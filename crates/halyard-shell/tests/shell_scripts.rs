@@ -558,7 +558,7 @@ fn bash_integration() {
 #[test]
 fn fish_integration() {
     // fish 4 marks prompts itself (no `aid=`); fish 3 gets the script's marks.
-    if let Some((major, events)) = fish_exercise("fish_integration", &[]) {
+    if let Some((major, _, events)) = fish_exercise("fish_integration", &[]) {
         assert_eq!(prompt_aids(&events), major < 4, "fish {major}: who emitted the marks");
     }
 }
@@ -568,8 +568,17 @@ fn fish_integration() {
 #[test]
 fn fish_integration_without_native_marks() {
     let env = [("fish_features", "no-mark-prompt")];
-    if let Some((major, events)) = fish_exercise("fish_integration_without_native_marks", &env) {
-        assert!(prompt_aids(&events), "fish {major}: the script must emit the marks");
+    if let Some((major, minor, events)) =
+        fish_exercise("fish_integration_without_native_marks", &env)
+    {
+        // fish 4.0 has no `mark-prompt` feature flag (`status test-feature` returns 2), so
+        // `no-mark-prompt` cannot turn its marking off and fish's own aid-less marks stay.
+        let cannot_disable = major == 4 && minor == 0;
+        assert_eq!(
+            prompt_aids(&events),
+            !cannot_disable,
+            "fish {major}.{minor}: who emitted the marks"
+        );
     }
 }
 
@@ -592,20 +601,20 @@ const FISH_SETUP: &str = "set -g __user_count 0; \
      function __user_pre --on-event fish_preexec; set -g __user_count (math $__user_count + 1); end; \
      function __user_prompt --on-event fish_prompt; printf USERHOOK; end";
 
-/// Runs the standard sequence in fish; returns fish's major version and the events.
-fn fish_exercise(test: &str, env: &[(&str, &str)]) -> Option<(u32, Vec<ShellEvent>)> {
+/// Runs the standard sequence in fish; returns fish's major and minor version and the
+/// events. The standard sequence waits for a B mark, so on fish 4.0 to 4.2 (which send
+/// none) it only passes because the script appends one.
+fn fish_exercise(test: &str, env: &[(&str, &str)]) -> Option<(u32, u32, Vec<ShellEvent>)> {
     let fish = require_shell("fish", test)?;
     let out = std::process::Command::new(&fish).arg("--version").output().unwrap();
     let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
     eprintln!("{test}: {version}");
-    let major = version
-        .rsplit(' ')
-        .next()
-        .and_then(|v| v.split('.').next())
-        .and_then(|m| m.parse().ok())
-        .expect("fish version");
+    let mut parts = version.rsplit(' ').next().expect("fish version").split('.');
+    let mut next =
+        || -> u32 { parts.next().and_then(|m| m.parse().ok()).expect("fish version number") };
+    let (major, minor) = (next(), next());
     let events = exercise(Shell::Fish, &fish, &["--no-config", "-i"], FISH_SETUP, false, env);
-    Some((major, events))
+    Some((major, minor, events))
 }
 
 /// bash: command lines stay exact past history entry 9, 99 and 999.

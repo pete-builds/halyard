@@ -23,4 +23,7 @@ pub use input::{
     KeyAction, KeyCode, KeyInput, Modifiers, MouseAction, MouseButton, MouseInput, ScrollRequest,
 };
 pub use palette::Palette;
-pub use session::{Session, SessionConfig, SessionError, SessionEvent, default_shell};
+pub use session::{
+    OutputObserver, Session, SessionConfig, SessionError, SessionEvent, default_shell,
+    new_session_id,
+};

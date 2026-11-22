@@ -447,3 +447,68 @@ fn htop_starts_and_quits() {
     s.write("q");
     wait_for(&s, "back at the shell", |f| !f.alt_screen && prompt_count(f) >= 2);
 }
+
+/// Records the cursor row at every ESC byte that starts an OSC, for
+/// `observer_sees_the_cursor_row_at_each_mark`.
+struct RowAtOsc {
+    rows: Arc<Mutex<Vec<u64>>>,
+    chunks: Arc<Mutex<usize>>,
+}
+
+impl halyard_term::OutputObserver for RowAtOsc {
+    fn scan(&mut self, chunk: &[u8], marks: &mut Vec<usize>) {
+        // Mark just past each `ESC ]` introducer's terminator (BEL).
+        let mut in_osc = false;
+        for (i, w) in chunk.windows(2).enumerate() {
+            if w == b"\x1b]" {
+                in_osc = true;
+            }
+            if in_osc && w[1] == 0x07 {
+                marks.push(i + 2);
+                in_osc = false;
+            }
+        }
+    }
+    fn at_mark(&mut self, _index: usize, row: u64) {
+        self.rows.lock().unwrap().push(row);
+    }
+    fn chunk_done(&mut self) {
+        *self.chunks.lock().unwrap() += 1;
+    }
+}
+
+#[test]
+fn observer_sees_the_cursor_row_at_each_mark() {
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let chunks = Arc::new(Mutex::new(0));
+    let observer = RowAtOsc { rows: Arc::clone(&rows), chunks: Arc::clone(&chunks) };
+    let s = Session::spawn(SessionConfig {
+        observer: Some(Box::new(observer)),
+        session_id: Some("chosen-id_1.0".into()),
+        ..config(40, 5)
+    })
+    .expect("spawn");
+    assert_eq!(s.id(), "chosen-id_1.0");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    // 12 lines scroll a 5-row screen into scrollback; the mark after them must
+    // count those rows, not the row on screen.
+    run(&s, "printf 'm1\\033]0;x\\007\\n'; seq 1 12; printf 'm2\\033]0;y\\007\\n'; echo obs-done");
+    let f = wait_for(&s, "the end", |f| (0..f.rows).any(|r| f.row_text(r) == "obs-done"));
+    let rows = rows.lock().unwrap().clone();
+    // The row itself, not only the distance: the second mark was on the `m2` line.
+    let m2 = (0..f.rows).find(|&r| f.row_text(r) == "m2").expect("m2 on screen");
+    assert_eq!(rows.get(1).copied(), Some(f.scroll.offset + u64::from(m2)), "{rows:?}");
+    assert_eq!(rows.len(), 2, "one row per mark: {rows:?}");
+    assert_eq!(rows[1] - rows[0], 13, "12 lines of seq plus the m1 line: {rows:?}");
+    assert!(*chunks.lock().unwrap() >= 1);
+}
+
+#[test]
+fn an_invalid_session_id_is_replaced() {
+    for bad in ["", "has space", "semi;colon", &"x".repeat(129)] {
+        let s = Session::spawn(SessionConfig { session_id: Some(bad.into()), ..config(20, 4) })
+            .expect("spawn");
+        assert_ne!(s.id(), bad);
+        assert_eq!(s.id().len(), 32, "a fresh id");
+    }
+}

@@ -1,8 +1,64 @@
 # Agents in Halyard
 
-Status: the model is implemented and tested as a library (`crates/halyard-agents`).
-Wiring it into the app (polling the foreground process, feeding focus and input
-events, drawing the sidebar and the dashboard) is not done yet; see `ROADMAP.md`.
+Status: the model is implemented and tested as a library (`crates/halyard-agents`) and
+wired into the app: every pane scans its output, polls its foreground process, and
+shows its state on its tab and in a badge, with desktop notifications. The dashboard
+is not built yet; see `ROADMAP.md`.
+
+## In the app
+
+Each pane runs the pipeline in `crates/halyard-app/src/signals.rs`:
+
+* **Output.** The session thread hands every PTY chunk to a `SignalScanner`
+  (`halyard-agents::pane`). The scanner finds the escape sequences, the session
+  feeds the VT engine up to each one and reads the cursor's absolute row there
+  (`halyard-term::OutputObserver`), and the chunk is applied to the pane's
+  `PaneMonitor` (command blocks and attention) under one lock. A chunk with no
+  escape sequence is one scan and one lock; terminal I/O never waits for the UI.
+* **Foreground.** Every 500 ms the window reads each shell's process groups (one
+  `proc_pidinfo` or `/proc/<pid>/stat` read per pane). Only while a command holds
+  the terminal does it read that command's executable and argv and run
+  `detect_agent` (plus `[agents] detect` names).
+* **Input and focus.** Keys, typed text and pastes are `UserInput`. A pane counts
+  as focused when it is the focused pane of the shown tab in the active window, so
+  news in a background window stays unread.
+
+What it shows:
+
+| State | Tab mark | Pane badge |
+|-------|----------|------------|
+| Working | `●` in `ui.accent` | `● <agent> · working` |
+| WaitingForInput | `●` in `ui.attention` | the same, and the pane outlined in `ui.attention` |
+| Idle | `●` in `ui.text_muted` | `● <agent> · idle` |
+| Finished, status 0 or unknown | `✓` in `ui.success` | `✓ <agent> · finished` |
+| Finished, status N | `✗N` in `ui.danger` | `✗N <agent> · exited N` |
+| Error | `!` in `ui.danger` | `! <agent> · error` |
+| Unknown | nothing | nothing |
+
+A tab shows its most urgent pane (the dashboard order below). Unread news turns the
+tab mark into a filled pill reading `<mark> new` and outlines the pane and its badge
+in `ui.attention` until the pane is focused.
+
+A pane that becomes WaitingForInput or Finished while its window is not active sends
+one desktop notification (`[agents] notify_on_waiting`, see `docs/configuration.md`).
+The title names the agent; the body is the agent's last notification text, or the tab
+title. Both come from the pane's output, so control characters, bidi overrides and
+isolates, direction marks and zero-width characters are removed, whitespace is
+collapsed, the text is capped (80 and 200 characters), and on Linux `&`, `<` and `>`
+are escaped because notification servers render markup. Nothing else is filtered:
+the text is shown as the program wrote it.
+
+Untrusted output cannot drive this by itself. The app counts a protocol report only
+when it carries `session=` with the pane's `HALYARD_SESSION_ID` (a `cat`ed file cannot
+know it), and counts OSC 9, OSC 777;notify and the bell only while an agent is active
+in the pane; before that their text is not even kept. Tests: `attention_ui::tests`
+(indicators, the tab mark, the decision, rate limits, text cleaning),
+`notify::tests::markup_is_escaped_for_the_notification_server`,
+`pane::tests::reports_without_this_panes_session_are_plain_output`,
+`notifications_and_bells_count_only_with_an_agent_in_the_foreground`,
+`focus_changes_never_swallow_another_change`, `pane::tests` (the pipeline on a fake clock),
+`signals::tests::fake_claude_notification_means_waiting` (a real program named
+`claude` printing OSC 9 in a real PTY).
 
 Halyard shows what a coding agent in a pane is doing using only signals it can
 observe (ADR 0004). Every state names the signal that produced it (`Cause` in the
@@ -51,7 +107,7 @@ not exited since.
 
 | # | Signal | Condition | Result | `Cause` |
 |---|--------|-----------|--------|---------|
-| 1 | Protocol report with `state=` (OSC 7717 or OSC 777;halyard) | `session=` absent or equal to the pane's id | `working` Working, `waiting` WaitingForInput, `idle` Idle, `done` Finished (with `exit=` if given), `error` Error. The agent becomes active and the protocol latch is set. | `ProtocolReport` |
+| 1 | Protocol report with `state=` (OSC 7717 or OSC 777;halyard) | `session=` equal to the pane's id (the library also accepts a report without `session=`; the app does not, see below) | `working` Working, `waiting` WaitingForInput, `idle` Idle, `done` Finished (with `exit=` if given), `error` Error. The agent becomes active and the protocol latch is set. | `ProtocolReport` |
 | 2 | OSC 9 or OSC 777;notify notification, or BEL | agent active, no protocol latch | WaitingForInput, waiting latch set | `Notification` / `Bell` |
 | 2b | The same | agent active, protocol latch set | state unchanged; the pane becomes unread if not focused | (unchanged) |
 | 3 | User input (keys, paste) | a latch is set | latch cleared; Working if output arrived within the idle period, else Idle | `UserInput` |
