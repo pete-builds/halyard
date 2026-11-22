@@ -669,10 +669,39 @@ fn rows_text_and_scroll_to_row_use_screen_rows() {
     run(&s, "printf 'first\\nsecond\\n'; seq 1 30; echo rows-done");
     let f = wait_for(&s, "the end", |f| row_equal(f, "rows-done").is_some());
     let done = absolute_row_of(&f, "rows-done").unwrap();
-    // `seq 1 30` ends on the row above `rows-done`; `first` is 32 rows up.
-    assert_eq!(s.screen_rows_text(done - 1, done - 1).as_deref(), Some("30"));
-    let first = done - 32;
-    assert_eq!(s.screen_rows_text(first, first + 2).as_deref(), Some("first\nsecond\n1"));
+    // Rows are found by their text, not by a fixed distance: in the macOS Nix
+    // build, bash 3.2's job control sometimes prints "sh: child setpgid (N to
+    // N): Operation not permitted" (two rows at 40 columns) between commands,
+    // which shifts every offset. What this test proves is that `rows_text` and
+    // `scroll_to_row` count the same screen rows as the frame does.
+    let text = |r: u64| s.screen_rows_text(r, r);
+    let first = (0..done)
+        .rev()
+        .find(|&r| text(r).as_deref() == Some("first"))
+        .expect("`first` in scrollback or on screen");
+    // `second` follows `first` directly, and the range joins rows with `\n`.
+    assert_eq!(text(first + 1).as_deref(), Some("second"));
+    assert_eq!(s.screen_rows_text(first, first + 1).as_deref(), Some("first\nsecond"));
+    // The 30 seq lines appear in order after `second`; other rows may sit
+    // among them.
+    let numbers: Vec<(u64, String)> = (first + 2..done)
+        .filter_map(|r| text(r).map(|t| (r, t)))
+        .filter(|(_, t)| t.parse::<u32>().is_ok())
+        .collect();
+    let want: Vec<String> = (1..=30).map(|n| n.to_string()).collect();
+    let got: Vec<String> = numbers.iter().map(|(_, t)| t.clone()).collect();
+    assert_eq!(got, want, "seq output in order after `second`");
+    let (one, _) = numbers[0];
+    let (last, _) = *numbers.last().unwrap();
+    assert!(one > first + 1, "`1` is below `second`");
+    // A range reads the rows in it, in order. Rows a long line soft-wrapped
+    // are joined without a newline, so only the ends are compared exactly.
+    let range = s.screen_rows_text(first, last).expect("the range");
+    let tail = format!("\n{}", want.join("\n"));
+    assert!(range.starts_with("first\nsecond\n"), "{range:?}");
+    assert!(range.ends_with(&tail), "{range:?}");
+    assert_eq!(text(last).as_deref(), Some("30"));
+    assert_eq!(s.screen_rows_text(last, last + 1).map(|t| t.starts_with("30\n")), Some(true));
     assert_eq!(s.screen_rows_text(5, 4), None);
     assert_eq!(s.screen_rows_text(1_000_000, 1_000_001), None);
     // Scrolling to a row puts it at the top of the viewport.
