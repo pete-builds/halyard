@@ -94,7 +94,7 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       the pane's directory and environment (`halyard_term::flatpak`; tests
       `login_shell_runs_on_the_host_with_cwd_and_env`, `inside_flatpak_the_login_shell_runs_on_the_host`,
       `outside_flatpak_the_program_runs_directly` and the rest of `flatpak::tests`). Unit tested only:
-      no real host shell has been started through `flatpak-spawn` yet
+      no real host shell has been started through `flatpak-spawn` yet. Env files a crash leaves behind are swept at the first pane start (`sweep_removes_an_old_own_file_and_keeps_everything_else`)
 - [x] Flatpak package (`packaging/flatpak/`, `docs/flatpak.md`): offline build on Freedesktop 26.08 for
       x86_64 and aarch64 in CI (`.github/workflows/flatpak.yml`), bundle uploaded as an artifact; CI checks
       the source lists against `Cargo.lock` and the Ghostty pin (`check-sources.py`), the installed

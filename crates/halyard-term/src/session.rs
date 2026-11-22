@@ -402,7 +402,19 @@ struct Built {
 }
 
 fn build_command(config: &SessionConfig, session_id: &str) -> std::io::Result<Built> {
-    build_command_for(config, session_id, Placement::detect())
+    let placement = Placement::detect();
+    if placement == Placement::FlatpakHost {
+        // Once per process: remove env files a crashed or killed Halyard left.
+        static SWEEP: std::sync::Once = std::sync::Once::new();
+        SWEEP.call_once(|| {
+            crate::flatpak::sweep_stale_env_files(
+                &crate::flatpak::env_file_dir(),
+                crate::flatpak::STALE_ENV_FILE_AGE,
+                std::time::SystemTime::now(),
+            );
+        });
+    }
+    build_command_for(config, session_id, placement)
 }
 
 fn build_command_for(
