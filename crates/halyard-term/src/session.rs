@@ -301,7 +301,69 @@ impl ShutdownPlan {
     }
 }
 
+/// Where a session's program runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    /// In Halyard's own environment (every normal install).
+    Local,
+    /// On the host, through `flatpak-spawn --host`, because Halyard itself
+    /// runs inside a Flatpak sandbox (see [`crate::flatpak`]).
+    FlatpakHost,
+}
+
+impl Placement {
+    fn detect() -> Self {
+        if crate::flatpak::in_flatpak() { Self::FlatpakHost } else { Self::Local }
+    }
+}
+
+/// The variables Halyard sets for every program, in the order they apply:
+/// Halyard's own first, then the session's extras, which may override them.
+fn session_env(config: &SessionConfig, session_id: &str) -> Vec<(OsString, OsString)> {
+    let own = [
+        ("TERM", "xterm-256color"),
+        ("COLORTERM", "truecolor"),
+        ("TERM_PROGRAM", "Halyard"),
+        ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION")),
+        ("HALYARD_SESSION_ID", session_id),
+    ];
+    own.iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+        .chain(config.env.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))))
+        .collect()
+}
+
 fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
+    build_command_for(config, session_id, Placement::detect())
+}
+
+fn build_command_for(
+    config: &SessionConfig,
+    session_id: &str,
+    placement: Placement,
+) -> CommandBuilder {
+    let env = session_env(config, session_id);
+    if placement == Placement::FlatpakHost {
+        let home = std::env::var_os("HOME");
+        let shell = std::env::var_os("SHELL");
+        let launch = crate::flatpak::host_launch(&crate::flatpak::HostSpawn {
+            program: config.program.as_deref(),
+            args: &config.args,
+            cwd: config.cwd.as_deref(),
+            home: home.as_deref(),
+            shell: shell.as_deref(),
+            env: &env,
+        });
+        // flatpak-spawn itself runs in the sandbox, in portable-pty's default
+        // directory ($HOME); the host program gets the session's directory
+        // through --directory, which may not exist inside the sandbox.
+        let mut cmd = CommandBuilder::new(launch.program);
+        cmd.args(launch.args);
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        return cmd;
+    }
     let mut cmd = if let Some(program) = &config.program {
         let mut cmd = CommandBuilder::new(program);
         cmd.args(&config.args);
@@ -324,13 +386,8 @@ fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
     for key in &config.env_remove {
         cmd.env_remove(key);
     }
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    cmd.env("TERM_PROGRAM", "Halyard");
-    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-    cmd.env("HALYARD_SESSION_ID", session_id);
-    for (k, v) in &config.env {
-        cmd.env(OsString::from(k), OsString::from(v));
+    for (k, v) in &env {
+        cmd.env(k, v);
     }
     cmd
 }
@@ -959,6 +1016,64 @@ mod tests {
         assert_eq!(get("FOO").as_deref(), Some("bar"));
         assert!(cmd.is_default_prog());
         assert_eq!(get("SHELL").map(PathBuf::from), Some(default_shell()));
+    }
+
+    fn argv(cmd: &CommandBuilder) -> Vec<String> {
+        cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn inside_flatpak_the_login_shell_runs_on_the_host() {
+        let config = SessionConfig {
+            cwd: Some(PathBuf::from("/srv/project")),
+            env: vec![("FOO".into(), "bar".into()), ("TERM".into(), "dumb".into())],
+            ..SessionConfig::default()
+        };
+        let cmd = build_command_for(&config, "abc123", Placement::FlatpakHost);
+        assert!(!cmd.is_default_prog());
+        let argv = argv(&cmd);
+        assert_eq!(argv[..3], ["flatpak-spawn", "--host", "--watch-bus"], "{argv:?}");
+        assert!(argv.contains(&"--directory=/srv/project".to_owned()), "{argv:?}");
+        for want in [
+            "--env=TERM=dumb",
+            "--env=COLORTERM=truecolor",
+            "--env=TERM_PROGRAM=Halyard",
+            "--env=HALYARD_SESSION_ID=abc123",
+            "--env=FOO=bar",
+        ] {
+            assert!(argv.contains(&want.to_owned()), "{want} missing from {argv:?}");
+        }
+        assert!(!argv.contains(&"--env=TERM=xterm-256color".to_owned()), "{argv:?}");
+        // The program comes last: the login shell from $SHELL, or the host's own.
+        let tail = &argv[argv.len() - 2..];
+        assert!(tail[1] == "-l" || tail[1] == crate::flatpak::HOST_SHELL_FALLBACK, "{argv:?}");
+        // The sandbox side does not chdir to a host path that may not exist in it.
+        assert_eq!(cmd.get_cwd(), None);
+    }
+
+    #[test]
+    fn inside_flatpak_an_explicit_program_runs_on_the_host() {
+        let config = SessionConfig {
+            program: Some(PathBuf::from("/usr/bin/htop")),
+            args: vec!["-d".into(), "10".into()],
+            ..SessionConfig::default()
+        };
+        let argv = argv(&build_command_for(&config, "id", Placement::FlatpakHost));
+        assert_eq!(argv[0], "flatpak-spawn");
+        assert_eq!(argv[argv.len() - 3..], ["/usr/bin/htop", "-d", "10"], "{argv:?}");
+    }
+
+    #[test]
+    fn outside_flatpak_the_program_runs_directly() {
+        let config = SessionConfig {
+            program: Some(PathBuf::from("/usr/bin/htop")),
+            args: vec!["-d".into(), "10".into()],
+            cwd: Some(PathBuf::from("/tmp")),
+            ..SessionConfig::default()
+        };
+        let cmd = build_command_for(&config, "id", Placement::Local);
+        assert_eq!(argv(&cmd), ["/usr/bin/htop", "-d", "10"]);
+        assert_eq!(cmd.get_cwd().map(PathBuf::from), Some(PathBuf::from("/tmp")));
     }
 
     #[test]
