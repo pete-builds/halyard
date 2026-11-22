@@ -995,9 +995,7 @@ impl SessionThread {
         let mut last_publish = Instant::now();
         let mut dirty = false;
         let mut reader_open = true;
-        let mut exit_code: Option<Option<i32>> = None;
-        let mut exit_deadline: Option<Instant> = None;
-        let mut exit_reported = false;
+        let mut exit = ExitTracker::default();
         let mut child_running = true;
 
         loop {
@@ -1006,7 +1004,7 @@ impl SessionThread {
             if dirty {
                 timeout = timeout.min(FRAME_INTERVAL.saturating_sub(now - last_publish));
             }
-            if let Some(deadline) = exit_deadline {
+            if let Some(deadline) = exit.deadline() {
                 timeout = timeout.min(deadline.saturating_duration_since(now));
             }
             let out_rx = if reader_open { self.out_rx.clone() } else { never() };
@@ -1031,16 +1029,12 @@ impl SessionThread {
                     }
                     Err(_) => {
                         reader_open = false;
-                        if exit_code.is_some() {
-                            exit_deadline = Some(Instant::now());
-                        }
+                        exit.reader_closed(Instant::now());
                     }
                 },
                 recv(exit_rx) -> msg => {
                     child_running = false;
-                    exit_code = Some(msg.unwrap_or(None));
-                    exit_deadline =
-                        Some(if reader_open { Instant::now() + EXIT_DRAIN } else { Instant::now() });
+                    exit.child_exited(msg.unwrap_or(None), reader_open, Instant::now());
                 },
                 recv(self.cmd_rx) -> msg => match msg {
                     Ok(Command::Shutdown) | Err(_) => break,
@@ -1058,17 +1052,12 @@ impl SessionThread {
                 last_publish = Instant::now();
                 dirty = false;
             }
-            if !exit_reported
-                && let (Some(code), Some(deadline)) = (exit_code, exit_deadline)
-                && Instant::now() >= deadline
-            {
+            if let Some(code) = exit.take_due(Instant::now()) {
                 if dirty {
                     self.publish(&mut engine);
                     last_publish = Instant::now();
                     dirty = false;
                 }
-                exit_reported = true;
-                exit_deadline = None;
                 self.emit(SessionEvent::Exited(code));
             }
         }
@@ -1168,10 +1157,91 @@ impl SessionThread {
     }
 }
 
+/// When the session reports the child's exit. The loop sleeps until
+/// [`ExitTracker::deadline`]; a deadline left behind after the report would
+/// make that sleep zero forever, so only `take_due` may clear it and nothing
+/// may set it once the exit is reported.
+#[derive(Default)]
+struct ExitTracker {
+    code: Option<Option<i32>>,
+    deadline: Option<Instant>,
+    reported: bool,
+}
+
+impl ExitTracker {
+    fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    fn child_exited(&mut self, code: Option<i32>, reader_open: bool, now: Instant) {
+        self.code = Some(code);
+        if !self.reported {
+            self.deadline = Some(if reader_open { now + EXIT_DRAIN } else { now });
+        }
+    }
+
+    fn reader_closed(&mut self, now: Instant) {
+        if self.code.is_some() && !self.reported {
+            self.deadline = Some(now);
+        }
+    }
+
+    /// The exit code, once, when the drain deadline has passed.
+    fn take_due(&mut self, now: Instant) -> Option<Option<i32>> {
+        if self.reported {
+            return None;
+        }
+        let (code, deadline) = (self.code?, self.deadline?);
+        if now < deadline {
+            return None;
+        }
+        self.reported = true;
+        self.deadline = None;
+        Some(code)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn reported_exit_leaves_no_deadline_when_reader_closes_late() {
+        // A background job holds the PTY open past the shell's exit: the exit is
+        // reported after the drain, then the reader hits EOF.
+        let t0 = Instant::now();
+        let mut exit = ExitTracker::default();
+        exit.child_exited(Some(1), true, t0);
+        assert_eq!(exit.take_due(t0), None);
+        assert_eq!(exit.take_due(t0 + EXIT_DRAIN), Some(Some(1)));
+        assert_eq!(exit.deadline(), None);
+        exit.reader_closed(t0 + Duration::from_secs(5));
+        assert_eq!(exit.deadline(), None, "a reported exit must not arm the loop timer");
+        assert_eq!(exit.take_due(t0 + Duration::from_secs(5)), None);
+    }
+
+    #[test]
+    fn exit_is_reported_once_when_reader_closes_first() {
+        let t0 = Instant::now();
+        let mut exit = ExitTracker::default();
+        exit.reader_closed(t0);
+        assert_eq!(exit.deadline(), None);
+        exit.child_exited(None, false, t0);
+        assert_eq!(exit.take_due(t0), Some(None));
+        assert_eq!(exit.deadline(), None);
+        assert_eq!(exit.take_due(t0 + Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn reader_closing_during_drain_reports_immediately() {
+        let t0 = Instant::now();
+        let mut exit = ExitTracker::default();
+        exit.child_exited(Some(0), true, t0);
+        exit.reader_closed(t0 + Duration::from_millis(10));
+        assert_eq!(exit.take_due(t0 + Duration::from_millis(10)), Some(Some(0)));
+        assert_eq!(exit.deadline(), None);
+    }
 
     #[test]
     fn session_handle_is_send_and_sync() {
