@@ -39,7 +39,7 @@ jobs:
             system-features = nixos-test benchmark big-parallel kvm
 
       - name: Run the VM test
-        run: nix build -L --no-update-lock-file --out-link result-vm .#checks.x86_64-linux.nixos-vm
+        run: nix build -L --no-update-lock-file --out-link result-vm .#vmTests.nixos-vm
 
       - name: Collect screenshots
         if: always()

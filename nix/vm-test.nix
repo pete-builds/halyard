@@ -3,9 +3,10 @@
 # on a screenshot, so a window that opens but draws nothing fails.
 #
 # Until the app crate lands, the window is a stand-in (vm-test/probe) that
-# draws a fixed marker string. Run on a Linux host with KVM:
-#   nix build -L .#checks.x86_64-linux.nixos-vm
-# Screenshots land in ./result.
+# draws a fixed marker string. Kept out of `checks` so `nix flake check`
+# stays fast and needs no KVM. Run on an x86_64 Linux host with KVM:
+#   nix build -L .#vmTests.nixos-vm
+# Screenshots land in ./result. See docs/testing.md.
 { pkgs }:
 let
   inherit (pkgs) lib;

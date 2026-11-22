@@ -97,7 +97,6 @@
             ;
           inherit (build.${pkgs.stdenv.hostPlatform.system}) configChecker;
         }
-        // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") { nixos-vm = import ./nix/vm-test.nix { inherit pkgs; }; }
       );
 
       overlays.default = final: _prev: {
@@ -107,5 +106,6 @@
       homeManagerModules.default = import ./nix/hm-module.nix self;
       homeModules.default = self.homeManagerModules.default;
       nixosModules.default = import ./nix/nixos-module.nix self;
+      legacyPackages.x86_64-linux.vmTests.nixos-vm = import ./nix/vm-test.nix { pkgs = nixpkgs.legacyPackages.x86_64-linux; };
     };
 }
