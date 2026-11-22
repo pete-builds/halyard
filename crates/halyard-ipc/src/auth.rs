@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::Error;
-use crate::paths::{check_private, ensure_private_dir};
+use crate::paths::{check_private, ensure_private_dir_all};
 use crate::types::Scope;
 
 /// Prefix of controller grant tokens, so they are recognizable in logs and secret scans.
@@ -327,7 +327,8 @@ impl GrantStore {
 
     /// Opens the grants file at `path` (created on the first grant).
     ///
-    /// The parent directory is created with mode 0700 if missing. An existing file must
+    /// The parent directory is created with mode 0700 if missing, along with any missing
+    /// ancestors (ordinary permissions), so a fresh account without `~/.local/state` works. An existing file must
     /// be a regular file owned by us with no group or other bits, otherwise it is refused:
     /// a writable grants file would let someone else add a controller. The file is read
     /// here only to fail early; every later operation reads it again under the lock.
@@ -336,7 +337,7 @@ impl GrantStore {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
             && !parent.exists()
         {
-            ensure_private_dir(parent)?;
+            ensure_private_dir_all(parent)?;
         }
         {
             let _lock = FileLock::acquire(&path, DEFAULT_LOCK_TIMEOUT)?;
@@ -575,6 +576,17 @@ mod tests {
         assert!(err.to_string().contains("b.json.lock"), "{err}");
         // The symlink target was not touched.
         assert_eq!(fs::read(&elsewhere).expect("read"), br#"{"version":1,"grants":[]}"#);
+    }
+
+    #[test]
+    fn open_creates_missing_ancestors_and_a_private_leaf() {
+        // A fresh account has no ~/.local/state at all: two levels are missing.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("a/b/halyard/grants.json");
+        GrantStore::open(&path).expect("open must create the whole missing chain");
+        let leaf = path.parent().expect("parent");
+        let mode = fs::metadata(leaf).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "the leaf holding grants must be private");
     }
 
     #[test]

@@ -77,6 +77,25 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), Error> {
     check_private(dir, true)
 }
 
+/// Like [`ensure_private_dir`], but first creates any missing ancestors of `dir`.
+///
+/// For per-user state that lives under a tree nothing else may have created yet, such as
+/// `~/.local/state/halyard` on a fresh account. Missing ancestors get ordinary
+/// permissions (the process umask), as XDG tools create them. Only the leaf is held to
+/// the private-directory rules: mode 0700, owned by us, not a symlink, checked exactly
+/// as [`ensure_private_dir`] checks it. The ancestors are not inspected, matching how
+/// existing ancestors have always been treated.
+///
+/// Do not use this for the socket directory: there a missing parent such as
+/// `$XDG_RUNTIME_DIR` means the session is misconfigured, and that should stay an error.
+pub fn ensure_private_dir_all(dir: &Path) -> Result<(), Error> {
+    if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent)
+            .map_err(|e| Error::io(format!("creating {}", parent.display()), e))?;
+    }
+    ensure_private_dir(dir)
+}
+
 /// Checks that `path` is owned by us, is not a symlink, is a directory (`want_dir`) or a
 /// regular file, and has no group or other permission bits.
 pub(crate) fn check_private(path: &Path, want_dir: bool) -> Result<(), Error> {
@@ -123,6 +142,42 @@ mod tests {
         assert_eq!(mode, 0o700);
         // Idempotent on a correct directory.
         ensure_private_dir(&dir).expect("second call accepts our own 0700 dir");
+    }
+
+    #[test]
+    fn all_variant_creates_missing_ancestors_with_a_private_leaf() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("a/b/halyard");
+        ensure_private_dir_all(&dir).expect("create chain");
+        let mode = fs::metadata(&dir).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        ensure_private_dir_all(&dir).expect("idempotent");
+    }
+
+    #[test]
+    fn all_variant_still_refuses_symlink_and_open_leaf() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("x/real");
+        ensure_private_dir_all(&real).expect("real dir");
+        let link = tmp.path().join("y/link");
+        fs::create_dir_all(link.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let err = ensure_private_dir_all(&link).expect_err("symlink leaf refused");
+        assert!(matches!(err, Error::Insecure { .. }), "{err}");
+
+        let open = tmp.path().join("z/open");
+        fs::create_dir_all(&open).expect("mkdir");
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let err = ensure_private_dir_all(&open).expect_err("0755 leaf refused");
+        assert!(matches!(err, Error::Insecure { .. }), "{err}");
+    }
+
+    #[test]
+    fn plain_variant_keeps_a_missing_parent_an_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("missing/run");
+        assert!(ensure_private_dir(&dir).is_err());
+        assert!(!tmp.path().join("missing").exists(), "must not create ancestors");
     }
 
     #[test]
