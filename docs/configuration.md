@@ -173,6 +173,11 @@ bash or fish) to `shell-integration/` next to `config.toml` and copies the one l
 loads it, for you to paste into `~/.zshrc`, `~/.bashrc` or `config.fish`. The line checks
 `TERM_PROGRAM` itself, so other terminals never read the script.
 
+On fish 4.0 to 4.2 (Debian stable ships 4.0.2), put the line after anything that defines
+`fish_prompt` (a custom prompt, `starship init fish | source`, tide). Those versions need
+Halyard to add the "input starts here" mark to your prompt, and a prompt defined later
+replaces that. Command blocks still work without it, but without the input start.
+
 ## `[ai]`
 
 AI features are off by default. With `enabled = false` no AI code runs.
