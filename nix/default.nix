@@ -97,7 +97,7 @@ let
   # Every dependency, Ghostty included, built once and shared by the package
   # and the checks.
   cargoArtifacts = craneLib.buildDepsOnly (
-    commonArgs
+    builtins.removeAttrs commonArgs [ "src" ]
     // {
       # crane replaces every path crate with an empty stub for the deps-only
       # build, and that includes the [patch.crates-io] crates under vendor/.
