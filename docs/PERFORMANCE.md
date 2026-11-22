@@ -123,8 +123,12 @@ script (typing `true` instead) used 0.23 s with either build.
 
 | Build | Pipeline wall | MB/s | App CPU (whole run) |
 |-------|--------------:|-----:|--------------------:|
-| before | 4.37 s | 4.6 | 6.90 s |
-| after | 3.44 s | 5.8 | 0.96 s |
+| `main` at `a28c847` | 4.45 s (4.31, 4.45, 4.52) | 4.5 | 7.02 s (6.83, 7.02, 7.11) |
+| this change merged onto it | 3.24 s (3.22, 3.24, 3.26) | 6.2 | 0.90 s (0.89, 0.90, 0.96) |
+
+`a28c847` includes the per-pane signal observer (#22), which scans every chunk on the session
+thread, so fewer chunks also means fewer scans. Before that merge the same comparison
+(`456cc80` against this change) gave 4.37 s and 6.90 s against 3.44 s and 0.96 s.
 
 This reproduces the original report (4.7 MB/s and about 32 s of Halyard CPU per 100 MB) and
 matches the headless numbers. The window did not repaint during these runs (its render count
@@ -187,8 +191,10 @@ ceiling fails on `main` ("session/yes-head used 0.332 s CPU per MB, above 0.2").
 
 - **Debug Zig build of libghostty-vt.** The release profile builds it `ReleaseFast`: the
   workspace's `[profile.*.package.libghostty-vt-sys] debug = false` keeps its build script from
-  choosing `Debug`. Control: forcing `LIBGHOSTTY_VT_SYS_OPTIMIZE=Debug` makes the engine
-  CONTROL_RESULT.
+  choosing `Debug`. Control: forcing `LIBGHOSTTY_VT_SYS_OPTIMIZE=Debug` (separate target
+  directory) makes the engine parse `mixed` at 0.1 MB/s instead of about 300 MB/s and a frame
+  take 1.7 ms instead of 0.23 ms (1 MB, one run), so a Debug build would stand out in these
+  numbers by three orders of magnitude.
 - **Per-chunk channel handoff.** Draining every queued chunk in one session-thread wakeup (up to
   1 MiB or 2 ms) changed nothing measurable: `yes` 60.3 vs 59.6 MB/s, `yes-head` 5.9 vs 5.9,
   `mixed` 139.1 vs 140.5 (three alternating 50 MB runs each). It was not kept.
@@ -196,7 +202,9 @@ ceiling fails on `main` ("session/yes-head used 0.332 s CPU per MB, above 0.2").
   frames the UI has not fetched yet would save little and was not done.
 - **Per-chunk UI wakeups.** There are none: the UI is notified per published frame (at most
   every 8 ms), bell or title change, never per chunk.
-- **The output tap.** The benchmark runs with a counting tap; the app installs none.
+- **The output tap.** The benchmark runs with a counting tap. The app's per-pane signal
+  observer (#22) scans each chunk; it is included in the in-app numbers above but not in the
+  headless benchmark.
 - **Small reads in general.** Every macOS PTY read is at most 1 KiB; the engine parses 1 KiB
   writes as fast as 64 KiB ones (table above), and `long-line` reaches 90% of what `script(1)`
   gets through the same PTY.
