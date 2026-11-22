@@ -66,6 +66,22 @@ flake PR).
 nix run github:pete-builds/halyard
 ```
 
+## Flatpak (any Linux desktop)
+
+A Flatpak runs on Fedora, Ubuntu, Debian, Arch and other desktops without Nix and without
+building anything. Halyard is not on Flathub yet: every CI run of the `flatpak` workflow
+uploads a `.flatpak` bundle, and you can build one yourself with `flatpak-builder`.
+
+```sh
+flatpak install --user ./halyard.flatpak
+flatpak run io.github.pete_builds.Halyard
+```
+
+Your shell runs on the host, outside the sandbox, as in any other terminal: the Flatpak is a
+way to install Halyard, not a sandbox around your shell. Details, build steps and what has
+not been tested yet (no window has been opened from the Flatpak so far):
+[docs/flatpak.md](flatpak.md).
+
 ## Other Linux
 
 The release has tarballs for x86_64 and aarch64, built on Ubuntu 24.04, so they need a
@@ -103,5 +119,6 @@ cargo build --release --locked -p halyard-app
 
 ## Not available
 
-No Homebrew formula or cask, no `.deb` or `.rpm`, no Windows build, and no auto-update.
+No Homebrew formula or cask, no `.deb` or `.rpm`, no Flathub listing, no Windows build, and
+no auto-update.
 Halyard makes no network calls.

@@ -77,7 +77,7 @@ modules:
       - install -Dm644 packaging/flatpak/${FLATPAK_ID}.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
       - desktop-file-validate ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
       - install -Dm644 packaging/flatpak/${FLATPAK_ID}.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
-      - appstreamcli validate --no-net --explain ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+      # appstreamcli is not in the SDK; CI validates the metainfo file separately.
       - install -Dm644 packaging/icon/halyard.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
       - install -Dm644 -t ${FLATPAK_DEST}/share/licenses/${FLATPAK_ID} LICENSE-MIT LICENSE-APACHE
       # Every library the binary links resolves (in the SDK; CI repeats this

@@ -23,6 +23,13 @@ jobs:
         run: python3 -I packaging/flatpak/check-sources.py
       - name: Shell scripts
         run: shellcheck packaging/flatpak/*.sh
+      - name: AppStream metadata and desktop entry
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends appstream desktop-file-utils
+          appstreamcli --version
+          appstreamcli validate --no-net --explain packaging/flatpak/io.github.pete_builds.Halyard.metainfo.xml
+          desktop-file-validate packaging/flatpak/io.github.pete_builds.Halyard.desktop
 
   bundle:
     name: bundle (${{ matrix.arch }})
