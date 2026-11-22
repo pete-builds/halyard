@@ -536,6 +536,30 @@ halyard-msg notify <TITLE> [BODY] [--strict]
 halyard-msg info [--strict]
 ```
 
+### Where it is, and how a hook finds it
+
+Every package ships it beside the `halyard` binary:
+
+| Package | Location | Found by a hook in a pane |
+|---------|----------|---------------------------|
+| macOS `Halyard.app` | `Halyard.app/Contents/MacOS/halyard-msg` (universal, like `halyard`) | Yes, through the pane's `PATH` (below) |
+| Linux tarball | `halyard-<version>-linux-<arch>/halyard-msg` | Yes, once you copy it next to `halyard` on your `PATH` (`docs/INSTALL.md`) |
+| Nix | `bin/halyard-msg` in the package | Yes: installed into your profile with `halyard` |
+| Flatpak | `/app/bin/halyard-msg`, inside the sandbox | Not by name. Panes run on the host, which cannot see `/app/bin`; see `docs/flatpak.md` for the wrapper to install |
+| `cargo build` | `target/<profile>/halyard-msg` after `cargo build -p halyard-ipc` | Through the pane's `PATH` when it sits next to the `halyard` you run |
+
+**The pane's `PATH`.** When an executable `halyard-msg` sits in the same directory as the
+running `halyard` (symlinks resolved), Halyard appends that directory to the end of every
+pane's `PATH`. In the app that is `/Applications/Halyard.app/Contents/MacOS`. It goes last,
+so it never shadows a program you installed, and macOS's `path_helper` (run by login
+shells) keeps it at the end. It is added only when `PATH` is set and does not already hold
+the directory. A shell startup file that assigns `PATH` outright, rather than adding to it,
+drops it; put `halyard-msg` on your `PATH` yourself in that case, or call it by its full
+path. Agents started in the pane (Claude Code, for example) inherit the pane's `PATH`, and
+so do their hooks. A hook run by something started outside Halyard does not have it, and
+does not need it: outside Halyard `halyard-msg` does nothing anyway. The Flatpak does not
+do this, because its panes run on the host.
+
 - **Outside Halyard** (`HALYARD_SESSION_ID` unset) it does nothing, prints nothing and
   exits 0, so the same hook config works in every terminal.
 - It connects to `HALYARD_SOCKET`, calls `halyard.hello`, `session.attach` with
@@ -572,7 +596,17 @@ In `~/.claude/settings.json` (or a project's `.claude/settings.json`):
 }
 ```
 
-In other terminals these hooks are silent no-ops.
+In other terminals these hooks are silent no-ops, provided `halyard-msg` is on `PATH`
+there too. With the macOS app it is on `PATH` only inside Halyard's panes, so the same
+hooks run in another terminal print "command not found" and exit 127 (Claude Code shows a
+hook error and carries on). Link it onto your `PATH` once to keep them quiet everywhere:
+
+```sh
+mkdir -p ~/.local/bin
+ln -sf /Applications/Halyard.app/Contents/MacOS/halyard-msg ~/.local/bin/halyard-msg
+```
+
+(`~/.local/bin` must be on your `PATH`; `/usr/local/bin` works as well.)
 
 ### A Python controller using only the standard library
 

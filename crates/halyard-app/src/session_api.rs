@@ -13,9 +13,9 @@
 //! dialogs and runs the UI half.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use futures::channel::mpsc::UnboundedSender;
@@ -218,6 +218,31 @@ pub fn pane_env(creds: Option<&PaneCredentials>) -> (Vec<(String, String)>, Vec<
     let remove =
         vec![halyard_ipc::ENV_SOCKET.to_owned(), halyard_ipc::ENV_SESSION_TOKEN.to_owned()];
     (creds.map(|c| c.env.clone()).unwrap_or_default(), remove)
+}
+
+/// The hook client every package installs next to `halyard` (`docs/session-api.md`).
+pub const HOOK_CLIENT: &str = "halyard-msg";
+
+/// The directory added to the end of every pane's `PATH` (`SessionConfig::path_append`)
+/// so hooks run in a pane find [`HOOK_CLIENT`] without the user putting it on `PATH`:
+/// the directory of the running `halyard`, symlinks resolved, when an executable
+/// `halyard-msg` is there. In `Halyard.app` that is `Contents/MacOS`. Worked out once.
+#[must_use]
+pub fn hook_client_dir() -> Option<PathBuf> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        hook_client_dir_for(&std::fs::canonicalize(&exe).unwrap_or(exe))
+    })
+    .clone()
+}
+
+/// [`hook_client_dir`] for the binary at `exe`.
+fn hook_client_dir_for(exe: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = exe.parent().filter(|d| d.is_absolute())?;
+    let meta = std::fs::metadata(dir.join(HOOK_CLIENT)).ok()?;
+    (meta.is_file() && meta.permissions().mode() & 0o111 != 0).then(|| dir.to_path_buf())
 }
 
 /// A request only the UI thread can answer or act on.

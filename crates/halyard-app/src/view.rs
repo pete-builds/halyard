@@ -365,6 +365,8 @@ impl TerminalView {
             session_id: Some(session_id),
             env,
             env_remove,
+            // Hooks in the pane find halyard-msg, which ships next to halyard.
+            path_append: crate::session_api::hook_client_dir(),
             ..SessionConfig::default()
         };
         let session = Arc::new(Session::spawn(config)?);

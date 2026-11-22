@@ -190,8 +190,36 @@ bundle's permissions against this list and fails if network access appears.
   a pane could pass the API's ancestry check; its socket would also sit in the sandbox's
   private runtime directory, out of reach of host tools. Halyard says so once in the
   banner and does not start it; `halyard-msg` in a pane falls back to escape sequences,
-  which still drive the attention marks. Making it work would need the host's pids
-  (through the Flatpak portal) and `--filesystem=xdg-run/halyard:create`.
+  which still drive the attention marks (see "Hooks and `halyard-msg`" below for how a
+  host hook reaches it). Making it work would need the host's pids (through the Flatpak
+  portal) and `--filesystem=xdg-run/halyard:create`.
+
+## Hooks and `halyard-msg`
+
+The bundle ships the hook client at `/app/bin/halyard-msg`, next to `halyard`. That path
+exists only inside the sandbox. Your panes, and the agents and hooks you start in them, run
+on the host, where `/app/bin` is not on `PATH` and does not exist, so a hook that calls
+`halyard-msg` by name fails with "command not found" (exit 127). Halyard does not add
+anything to a host pane's `PATH`: the only directory it could add is a sandbox path.
+
+Install a small wrapper on the host instead, for example as `~/.local/bin/halyard-msg`
+(any directory on your `PATH`), and make it executable with `chmod +x`:
+
+```sh
+#!/bin/sh
+# halyard-msg for the Halyard Flatpak: runs the copy inside the app.
+# Outside Halyard there is nothing to report, so skip starting a sandbox.
+[ -n "${HALYARD_SESSION_ID-}" ] || exit 0
+exec flatpak run --command=halyard-msg io.github.pete_builds.Halyard "$@"
+```
+
+The hook commands in `docs/session-api.md` then work unchanged. How it reports: `flatpak
+run` passes your environment through (so `HALYARD_SESSION_ID` arrives), the session API is
+off in the Flatpak, and `halyard-msg` falls back to writing the OSC 7717 escape sequence to
+`/dev/tty`, the pane's terminal, which Halyard reads. Each call starts a fresh sandbox,
+which takes longer than running a native binary; it has not been timed. Because of the
+early `exit 0`, the wrapper prints nothing for `--help` or `--version` outside Halyard; run
+`flatpak run --command=halyard-msg io.github.pete_builds.Halyard --help` for those.
 
 ## What is verified, and what is not
 
@@ -210,7 +238,11 @@ Verified by CI (`.github/workflows/flatpak.yml`) on every pull request:
   (so no network access) (`check-permissions.sh`);
 - inside the Platform runtime (what users get): the binary exists, `ldd` finds every
   library it links, the libraries GPUI loads at run time are present, and `flatpak-spawn`
-  is there (`smoke-test.sh`).
+  is there (`smoke-test.sh`);
+- `halyard-msg` is in the bundle and runs through `flatpak run --command=halyard-msg`, and
+  that exact host hook path, run under a pseudo-terminal with `HALYARD_SESSION_ID` set,
+  puts the OSC 7717 report on the terminal; the control, without `HALYARD_SESSION_ID`,
+  writes nothing.
 
 Not verified:
 
@@ -219,6 +251,9 @@ Not verified:
   the sandbox are untested.
 - **No host shell has been started through `flatpak-spawn`.** The command line is unit
   tested; the real round trip (PTY, job control, signals, `--watch-bus` cleanup) is not.
+- **The `halyard-msg` wrapper has not been used from a real pane.** CI runs its
+  `flatpak run` line under a pseudo-terminal, not inside a Halyard window, so the attention
+  mark it should raise has not been seen.
 - The bundle is not on Flathub and has not been through `flatpak-builder-lint`.
 - NVIDIA systems need the matching `org.freedesktop.Platform.GL.nvidia-*` extension, which
   Flatpak normally installs; not tested.

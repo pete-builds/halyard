@@ -463,6 +463,34 @@ fn panes_never_inherit_another_instances_socket_or_token() {
     assert_eq!(remove.len(), 2);
 }
 
+#[test]
+fn panes_find_halyard_msg_only_when_it_ships_next_to_halyard() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("Halyard.app/Contents/MacOS");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("halyard");
+    let client = dir.join(HOOK_CLIENT);
+
+    // Control: no halyard-msg beside the binary, so nothing goes on PATH.
+    assert_eq!(hook_client_dir_for(&exe), None);
+
+    std::fs::write(&client, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(hook_client_dir_for(&exe), None, "not executable");
+
+    std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(hook_client_dir_for(&exe), Some(dir.clone()));
+
+    // A directory with the client's name is not the client.
+    std::fs::remove_file(&client).unwrap();
+    std::fs::create_dir(&client).unwrap();
+    assert_eq!(hook_client_dir_for(&exe), None);
+
+    // A relative binary path never puts a relative directory on PATH.
+    assert_eq!(hook_client_dir_for(Path::new("halyard")), None);
+}
+
 fn request_for(text: &str) -> SendTextRequest {
     SendTextRequest {
         grant_id: "g".into(),

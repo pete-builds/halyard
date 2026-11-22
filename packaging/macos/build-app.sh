@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Build Halyard.app: a universal (arm64 + x86_64) macOS app bundle, ad-hoc signed, plus a zip.
+# Contents/MacOS holds two universal binaries: halyard (the app) and halyard-msg (the hook
+# client, docs/session-api.md). The app appends Contents/MacOS to every pane's PATH.
 #
 # Usage: packaging/macos/build-app.sh [--out DIR] [--skip-build]
 #   --out DIR      where to write Halyard.app and the zip (default: <repo>/target/macos)
@@ -18,7 +20,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --out) out="${2:?--out needs a directory}"; shift 2 ;;
     --skip-build) skip_build=1; shift ;;
-    -h | --help) sed -n '2,12p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h | --help) sed -n '2,13p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -39,6 +41,7 @@ version="${full_version%%-*}"
 min_macos="13.0"
 bundle_id="io.github.pete-builds.Halyard"
 targets=(aarch64-apple-darwin x86_64-apple-darwin)
+bins=(halyard halyard-msg)
 
 target_dir="${CARGO_TARGET_DIR:-$root/target}"
 case "$target_dir" in
@@ -50,7 +53,8 @@ if [ "$skip_build" -eq 0 ]; then
   for t in "${targets[@]}"; do
     echo "==> cargo build --release --target $t"
     MACOSX_DEPLOYMENT_TARGET="$min_macos" \
-      cargo build --release --locked -p halyard-app --target "$t" --manifest-path "$root/Cargo.toml"
+      cargo build --release --locked -p halyard-app -p halyard-ipc --target "$t" \
+      --manifest-path "$root/Cargo.toml"
   done
 fi
 
@@ -58,14 +62,22 @@ app="$out/Halyard.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
-echo "==> lipo"
-lipo -create \
-  "$target_dir/aarch64-apple-darwin/release/halyard" \
-  "$target_dir/x86_64-apple-darwin/release/halyard" \
-  -output "$app/Contents/MacOS/halyard"
-# Drop debug symbol-table entries (the code is signed after this, so the signature stays valid).
-strip -S "$app/Contents/MacOS/halyard" 2> /dev/null
-chmod 755 "$app/Contents/MacOS/halyard"
+for bin in "${bins[@]}"; do
+  echo "==> lipo $bin"
+  lipo -create \
+    "$target_dir/aarch64-apple-darwin/release/$bin" \
+    "$target_dir/x86_64-apple-darwin/release/$bin" \
+    -output "$app/Contents/MacOS/$bin"
+  # Drop debug symbol-table entries (the code is signed after this, so the signature stays
+  # valid).
+  strip -S "$app/Contents/MacOS/$bin" 2> /dev/null
+  chmod 755 "$app/Contents/MacOS/$bin"
+  # Both architectures, or the bundle is not universal.
+  for arch in arm64 x86_64; do
+    lipo "$app/Contents/MacOS/$bin" -verify_arch "$arch" \
+      || { echo "$bin is missing $arch" >&2; exit 1; }
+  done
+done
 
 echo "==> icon"
 icon_src="$root/packaging/icon/halyard-1024.png"
@@ -108,14 +120,21 @@ plutil -lint "$app/Contents/Info.plist"
 # bundle internally consistent. It is NOT a Developer ID signature and the app is NOT
 # notarized, so Gatekeeper warns on a downloaded copy. See docs/INSTALL.md.
 echo "==> codesign (ad-hoc)"
+# halyard-msg is nested code in Contents/MacOS: it is signed on its own first, then the
+# bundle seals it.
+codesign --force --sign - --timestamp=none "$app/Contents/MacOS/halyard-msg"
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --strict --verbose=2 "$app"
+codesign --verify --strict --verbose=2 "$app/Contents/MacOS/halyard-msg"
 
 zip="$out/Halyard-${full_version}-macos-universal.zip"
 rm -f "$zip"
 ditto -c -k --keepParent "$app" "$zip"
 
 echo "==> done"
-lipo -info "$app/Contents/MacOS/halyard"
+for bin in "${bins[@]}"; do
+  lipo -info "$app/Contents/MacOS/$bin"
+done
+"$app/Contents/MacOS/halyard-msg" --version
 du -sh "$app" "$zip"
 echo "$zip"

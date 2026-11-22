@@ -72,8 +72,13 @@ modules:
         ZIG_LOCAL_CACHE_DIR: /run/build/halyard/zig-local-cache
         XDG_CACHE_HOME: /run/build/halyard/xdg-cache
     build-commands:
-      - cargo --offline build --release --locked -p halyard-app
+      # halyard-ipc brings halyard-msg, the hook client (docs/session-api.md).
+      # Panes run on the host, which cannot see /app/bin: docs/flatpak.md says
+      # how host hooks reach it (flatpak run --command=halyard-msg).
+      - cargo --offline build --release --locked -p halyard-app -p halyard-ipc
       - install -Dm755 target/release/halyard ${FLATPAK_DEST}/bin/halyard
+      - install -Dm755 target/release/halyard-msg ${FLATPAK_DEST}/bin/halyard-msg
+      - ${FLATPAK_DEST}/bin/halyard-msg --version
       - install -Dm644 packaging/flatpak/${FLATPAK_ID}.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
       - desktop-file-validate ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
       - install -Dm644 packaging/flatpak/${FLATPAK_ID}.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml

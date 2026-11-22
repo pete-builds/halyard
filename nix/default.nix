@@ -135,7 +135,10 @@ let
     commonArgs
     // {
       inherit cargoArtifacts;
-      cargoExtraArgs = "--locked " + (if hasApp then "-p halyard-app" else "--workspace");
+      # halyard-ipc brings halyard-msg, the hook client that ships next to
+      # halyard (docs/session-api.md); crane installs every binary it builds.
+      cargoExtraArgs =
+        "--locked " + (if hasApp then "-p halyard-app -p halyard-ipc" else "--workspace");
       # Tests run in checks.cargo-test, not in every package build.
       doCheck = false;
       # With no binary to install, crane's reference-stripping hook has no files

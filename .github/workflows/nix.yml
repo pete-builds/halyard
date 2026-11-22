@@ -97,6 +97,7 @@ jobs:
           nix build --no-update-lock-file -L .#default
           find -L result -maxdepth 5 | sort
           test -x result/bin/halyard
+          test -x result/bin/halyard-msg
 
       - name: nix develop runs the cargo suite
         run: nix develop --no-update-lock-file -c bash -c 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked'

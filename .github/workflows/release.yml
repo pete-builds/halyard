@@ -140,7 +140,9 @@ jobs:
       - name: Toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - name: Build
-        run: cargo build --release --locked -p halyard-app
+        # halyard-ipc for halyard-msg, the hook client that ships next to halyard
+        # (docs/session-api.md).
+        run: cargo build --release --locked -p halyard-app -p halyard-ipc
       - name: Package
         env:
           VERSION: ${{ needs.guard.outputs.version }}
@@ -150,12 +152,22 @@ jobs:
           out="$RUNNER_TEMP/out"
           mkdir -p "$out/$name"
           # The release profile keeps line tables (debug = "line-tables-only"), which makes
-          # the binary about 93 MB. Strip it for the tarball.
-          install -m 755 target/release/halyard "$out/$name/halyard"
-          strip "$out/$name/halyard"
+          # halyard about 93 MB. Strip both binaries for the tarball.
+          for bin in halyard halyard-msg; do
+            install -m 755 "target/release/$bin" "$out/$name/$bin"
+            strip "$out/$name/$bin"
+          done
+          # The stripped hook client still runs.
+          "$out/$name/halyard-msg" --version
           cp packaging/linux/README.txt LICENSE-MIT LICENSE-APACHE "$out/$name/"
           tar -C "$out" -czf "$out/$name.tar.gz" "$name"
           rm -rf "${out:?}/${name:?}"
+          listing="$(tar -tzf "$out/$name.tar.gz")"
+          echo "$listing"
+          for bin in halyard halyard-msg; do
+            grep -qx "$name/$bin" <<< "$listing" \
+              || { echo "$bin is missing from the tarball" >&2; exit 1; }
+          done
           ls -l "$out"
           test "$(find "$out" -mindepth 1 | wc -l)" -eq 1 \
             || { echo "expected exactly one staged file" >&2; exit 1; }
