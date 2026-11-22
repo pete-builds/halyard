@@ -87,6 +87,16 @@ pub struct PaneStyle {
     pub confirm_multiline_paste: bool,
 }
 
+/// Decoration the window draws on a pane: a dimming veil for inactive
+/// panes and an outline for the focused one.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PaneChrome {
+    /// Color laid over the whole pane, if dimmed.
+    pub dim: Option<Hsla>,
+    /// Outline color, if outlined.
+    pub border: Option<Hsla>,
+}
+
 /// How to start a pane's program.
 #[derive(Clone, Debug, Default)]
 pub struct PaneSpawn {
@@ -155,6 +165,7 @@ pub struct TerminalView {
     exited: Option<Option<i32>>,
     scroll_accum: f32,
     title: String,
+    chrome: PaneChrome,
     /// False during the "off" half of a cursor blink.
     blink_on: bool,
     /// Number of render passes, for debugging repaint problems.
@@ -286,6 +297,7 @@ impl TerminalView {
             exited: None,
             scroll_accum: 0.0,
             title: String::new(),
+            chrome: PaneChrome::default(),
             blink_on: true,
             renders: 0,
             _pump: pump,
@@ -344,6 +356,14 @@ impl TerminalView {
         l.cols = 0;
         self.layout.set(l);
         cx.notify();
+    }
+
+    /// Set the dimming and outline drawn over the pane.
+    pub fn set_chrome(&mut self, chrome: PaneChrome, cx: &mut Context<Self>) {
+        if self.chrome != chrome {
+            self.chrome = chrome;
+            cx.notify();
+        }
     }
 
     /// Change the colors.
@@ -900,6 +920,7 @@ struct PaintState {
     cursor_text: Rgb,
     cursor_on: bool,
     marked: Option<String>,
+    chrome: PaneChrome,
 }
 
 fn run_font(base: &Font, spec: &TextRunSpec) -> Font {
@@ -1043,6 +1064,7 @@ impl Render for TerminalView {
             cursor_text: self.style.cursor_text,
             cursor_on: self.blink_on || !self.style.blink,
             marked: self.marked.clone(),
+            chrome: self.chrome,
         };
         let (pad_x, pad_y) = (self.style.padding_x, self.style.padding_y);
         let layout = Rc::clone(&self.layout);
@@ -1096,6 +1118,12 @@ impl Render for TerminalView {
                             cx,
                         );
                         paint_grid(origin, &state, window, cx);
+                        if let Some(dim) = state.chrome.dim {
+                            window.paint_quad(fill(bounds, dim));
+                        }
+                        if let Some(border) = state.chrome.border {
+                            window.paint_quad(outline(bounds, border, gpui::BorderStyle::Solid));
+                        }
                     },
                 )
                 .size_full(),
