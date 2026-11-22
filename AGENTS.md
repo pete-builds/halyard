@@ -13,6 +13,7 @@ in separate crates and never block terminal I/O.
 | Path | Role |
 |------|------|
 | `crates/halyard-term` | PTY, VT engine adapter (libghostty-vt), session thread, `Frame` snapshots. No UI code. |
+| `crates/halyard-workspace` | Windows, tabs and split panes as plain data, and saving them. No UI code. |
 | `crates/halyard-app` | The `halyard` binary: GPUI windows, panes, rendering, input. |
 | `docs/ARCHITECTURE.md` | How the pieces fit. Read before changing a crate boundary. |
 | `docs/adr/` | Architecture decision records. Add one for any consequential choice. |

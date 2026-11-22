@@ -2379,6 +2379,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "halyard-agents"
+version = "0.1.0-dev"
+dependencies = [
+ "halyard-shell",
+ "libc",
+ "portable-pty",
+]
+
+[[package]]
 name = "halyard-app"
 version = "0.1.0-dev"
 dependencies = [
@@ -2389,15 +2398,6 @@ dependencies = [
  "objc",
  "png 0.18.1",
  "raw-window-handle",
-]
-
-[[package]]
-name = "halyard-agents"
-version = "0.1.0-dev"
-dependencies = [
- "halyard-shell",
- "libc",
- "portable-pty",
 ]
 
 [[package]]
@@ -2429,6 +2429,16 @@ dependencies = [
  "portable-pty",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "halyard-workspace"
+version = "0.1.0-dev"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

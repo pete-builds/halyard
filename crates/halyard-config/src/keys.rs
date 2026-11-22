@@ -294,6 +294,15 @@ actions! {
     AgentDashboard => "agent_dashboard",
     NewWindow => "new_window",
     Quit => "quit",
+    ResizePaneLeft => "resize_pane_left",
+    ResizePaneRight => "resize_pane_right",
+    ResizePaneUp => "resize_pane_up",
+    ResizePaneDown => "resize_pane_down",
+    MoveTabLeft => "move_tab_left",
+    MoveTabRight => "move_tab_right",
+    RenameTab => "rename_tab",
+    ReloadConfig => "reload_config",
+    OpenConfig => "open_config",
 }
 
 /// The value that removes a default binding when used as an action name.
@@ -326,6 +335,15 @@ pub fn default_bindings(platform: Platform) -> &'static [(&'static str, Action)]
             ("cmd+shift+a", AgentDashboard),
             ("cmd+n", NewWindow),
             ("cmd+q", Quit),
+            ("cmd+ctrl+left", ResizePaneLeft),
+            ("cmd+ctrl+right", ResizePaneRight),
+            ("cmd+ctrl+up", ResizePaneUp),
+            ("cmd+ctrl+down", ResizePaneDown),
+            ("cmd+shift+alt+left", MoveTabLeft),
+            ("cmd+shift+alt+right", MoveTabRight),
+            ("cmd+shift+i", RenameTab),
+            ("cmd+shift+,", ReloadConfig),
+            ("cmd+,", OpenConfig),
         ],
         Platform::Linux => &[
             ("primary+t", NewTab),
@@ -349,6 +367,15 @@ pub fn default_bindings(platform: Platform) -> &'static [(&'static str, Action)]
             ("primary+a", AgentDashboard),
             ("primary+n", NewWindow),
             ("primary+q", Quit),
+            ("primary+alt+left", ResizePaneLeft),
+            ("primary+alt+right", ResizePaneRight),
+            ("primary+alt+up", ResizePaneUp),
+            ("primary+alt+down", ResizePaneDown),
+            ("ctrl+shift+pageup", MoveTabLeft),
+            ("ctrl+shift+pagedown", MoveTabRight),
+            ("primary+i", RenameTab),
+            ("primary+,", ReloadConfig),
+            ("ctrl+,", OpenConfig),
         ],
     }
 }
@@ -470,7 +497,7 @@ mod tests {
             assert_eq!(Action::from_name(a.name()), Some(*a));
         }
         assert_eq!(Action::from_name("nope"), None);
-        assert_eq!(Action::ALL.len(), 21);
+        assert_eq!(Action::ALL.len(), 30);
     }
 
     #[test]
