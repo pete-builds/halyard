@@ -205,7 +205,10 @@ let
     pkgs.vim
     pkgs.less
     pkgs.htop
-  ];
+  ]
+  # halyard-config's watcher_threads test counts threads with `ps -M` on
+  # macOS, and a Nix build's PATH has no /bin.
+  ++ lib.optionals stdenv.hostPlatform.isDarwin [ pkgs.ps ];
 
   checks = {
     inherit halyard;
