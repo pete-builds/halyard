@@ -31,7 +31,7 @@ design, with the tests that will prove it, is [docs/assistant.md](../assistant.m
    `api_key_env`, or a helper program named by an absolute path whose argv is checked for
    key-shaped values. The existing refusal of secret-looking keys (`config.rs:479-492`,
    `config.rs:682`) is not relaxed. It has a gap at `main`: names in the schema are exempt
-   at any depth under `[ai]`, so `[ai] api_key_env = "<key>"` only warns. The config PR
+   at any depth under `[ai]`, so `[ai] api_key_env = "<key>"` only warns. The config exemption PR
    closes that first, by exempting each name only in its own table, before adding any new
    name.
 6. **A new crate, `halyard-assistant`, owns all network code.** It has no GPUI and no

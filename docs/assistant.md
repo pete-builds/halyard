@@ -25,7 +25,7 @@ about a crate's license or version names where and when it was checked.
 |-------------|-----------|--------------------------|
 | Local-first, no telemetry, no mandatory account | Loopback endpoints are the first-class path; a hosted provider exists only if the user adds one. No request is made except by a user action. Nothing reports usage anywhere. | `no_request_without_a_user_send`, `no_network_crate_outside_halyard_assistant` |
 | AI optional and OFF by default; terminal complete without it | `[ai] enabled = false` is the default (`crates/halyard-config/default-config.toml:76-78`). With it off the app builds no assistant state, no thread, no panel, no indicator, and binds no assistant keys. | `assistant_off_builds_nothing` |
-| No automatic execution of AI-generated commands, ever | Insert-only path: a validated single line goes through the paste path, only into a shell's line editor with bracketed paste on. The assistant crate cannot reach a PTY. | `model_output_never_runs` (with a control), `insertable_rejects_every_unsafe_scalar` |
+| No automatic execution of AI-generated commands, ever | Insert-only path: a validated single line goes through `Session::insert_if_bracketed`, which checks bracketed paste and writes in one step on the session thread, only into a shell's line editor. The assistant crate cannot reach a PTY. | `model_output_never_runs` (with a control), `insertable_rejects_every_unsafe_scalar` |
 | Explicit permission for anything sensitive | A preview of the exact outgoing text before every send; a fresh consent for every request to a non-loopback host; the MCP bridge uses the session API's pairing and a typing dialog on every request (it never holds "always allow typing"). | `remote_send_needs_consent_every_time`, `request_body_matches_the_preview_byte_for_byte`, `typing_through_the_bridge_still_opens_the_dialog` |
 | MIT or Apache, no GPL | Every new crate is license-checked by `cargo deny` against `deny.toml` in the PR that adds it. Candidates and their licenses: [section 4.5](#45-crates). | CI `cargo deny` |
 | macOS and NixOS | Pure Rust HTTP and TLS; the keychain path has one implementation per platform with the environment variable as a fallback that works everywhere. | CI on macOS and Ubuntu; manual runs listed per PR |
@@ -196,8 +196,8 @@ Validation, added to `validate_provider` (`config.rs:994`):
   `[ai.x]` table, is accepted with only an unknown-key warning: the value is not echoed,
   but the key stays in the file and nothing tells the user to revoke it. Adding
   `api_key_command` to `PROVIDER` the same way would turn `[ai] api_key_command = "sk-..."`
-  from a hard error into that warning. So the config PR first changes `is_secret_key` to
-  take the table it is checking: `AI` names are exempt only directly in `[ai]`, `PROVIDER`
+  from a hard error into that warning. So `is_secret_key` first changes to take the table it
+  is checking (fixed by the config exemption PR, before any new name lands): `AI` names are exempt only directly in `[ai]`, `PROVIDER`
   names only directly in an `[[ai.providers]]` entry, and nothing is exempt anywhere else.
   That is the rule the locator already uses to decide which names it may show
   (`crates/halyard-config/src/locate.rs:71-82`). Only then are `api_key_keychain`,
@@ -206,7 +206,9 @@ Validation, added to `validate_provider` (`config.rs:994`):
   `secret_names_are_exempt_only_in_their_own_table`: `[ai] api_key_env = <key>`,
   `[ai] api_key_command = <key>`, `[ai.x] api_key_command = <key>` and a table nested
   inside a provider holding `api_key_env = <key>` are each a hard error that does not echo
-  the value. The first and third cases fail at `main` and pass after the change.
+  the value. At `main` the first and fourth cases fail (both are accepted with a warning) and
+  pass after the change; the second and third are already hard errors at `main` and guard
+  against a regression once the new names are in the schema.
 - More than one key source on a provider is an error.
 - `api_key_command[0]` must be an absolute path that, after following symlinks (on NixOS it
   is usually a link into `/nix/store`), names an existing executable regular file when the
@@ -214,13 +216,19 @@ Validation, added to `validate_provider` (`config.rs:994`):
 - **The argv can hold the key.** `["/bin/echo", "sk-ant-..."]` passes the path check. Every
   argv element is matched against the redaction patterns (section 5.3); a match is a hard
   error naming the field and the element's index, never the value, and telling the user to
-  revoke the key (`api_key_command_argv_holding_a_key_is_refused`). A value with no known
+  revoke the key (`api_key_command_argv_holding_a_key_is_refused`). The check includes the
+  secret-looking assignment pattern, so an argument such as `--auth=...`, `--token=...` or
+  `password:...` is refused too, whatever its value looks like. A value with no known
   shape (a bare password) cannot be detected; the configuration doc says the argv must name
   where the key is, never contain it. This matters more under Home Manager, which writes
   the config into `/nix/store`, readable by every user on the machine.
-- While any provider sets `api_key_command`, a config file (after following symlinks) that
-  is group- or world-writable is refused, since anyone who can write it chooses a program
-  Halyard runs as the user (`api_key_command_needs_a_private_config_file`).
+- While any provider sets `api_key_command`, the config file (after following symlinks) must
+  be owned by the user or by root, must not be group- or world-writable, and must sit in a
+  directory that is not group- or world-writable, the same rule the grants file follows
+  (`docs/session-api.md`, the grants file); otherwise the config is refused, since anyone
+  who can write it or replace it chooses a program Halyard runs as the user
+  (`api_key_command_needs_a_private_config_file`). Files in `/nix/store` are owned by root
+  and read-only, so a Home Manager config passes.
 - The existing tests `api_key_in_config_is_rejected_with_guidance`,
   `other_secret_like_keys_are_rejected_too`, `api_key_env_must_be_a_variable_name_not_a_key`
   and `secret_in_kind_is_not_echoed` (`crates/halyard-config/tests/config.rs:258-309`) must
@@ -467,9 +475,10 @@ and the user edits it and presses Enter themselves.
   keystrokes, and in a vi-mode line editor's command mode printable keys are commands
   that run a history line: `k#` in zsh (recall the previous line, then `#` toggles its
   comment and accepts it), or `kvZZ` in bash with `EDITOR=vi` (recall it, open it in the
-  editor, save and quit, which runs it). Both were run in real PTYs during review of this
-  design: each runs without bracketed paste, and neither runs inside a bracketed paste,
-  where the line editor inserts the text instead of interpreting it. Halyard cannot see
+  editor, save and quit, which runs it). During review each ran without bracketed paste in a
+  real PTY (zsh 5.9; bash 3.2, which has no bracketed paste). `k#` was confirmed inert
+  inside a bracketed paste in zsh 5.9; bash 5 inside a bracketed paste is unverified and is
+  what `model_output_never_runs` checks on Ubuntu. Halyard cannot see
   which keymap the line editor is in, so it relies on the bracket, never on reading the
   mode.
 - **Shell in the foreground:** a TUI or an agent may enable bracketed paste and still act
@@ -647,7 +656,7 @@ answers with that command.
 | A key leaks through config, logs or errors. | Keys never in config (unchanged refusal); `Debug` prints `<redacted>`; errors carry no body and no key; the key lives in memory for one request. |
 | A redirect or proxy carries loopback-bound text to another host. | Redirects are never followed; environment proxies are ignored for loopback; `localhost` resolves only to loopback addresses. |
 | A cleartext request leaks the key on the network. | `http://` to a non-loopback host needs `allow_http = true`, and the panel shows "unencrypted". |
-| An `api_key_command` helper is swapped for another program, or the config is edited to name one. | Its path must be absolute; the config must not be group- or world-writable while it is set; argv elements shaped like keys are refused. A same-uid attacker can still replace the helper or edit the config, which is item 4 of the existing "not mitigated" list. |
+| An `api_key_command` helper is swapped for another program, or the config is edited to name one. | Its path must be absolute; while it is set the config must be owned by the user or root, and neither it nor its directory may be group- or world-writable; argv elements shaped like keys are refused. A same-uid attacker can still replace the helper or edit the config, which is item 4 of the existing "not mitigated" list. |
 | Assistant traffic slows the terminal. | Requests run on a worker thread; the UI thread never waits; the PTY path never touches the assistant. |
 
 ### 8.3 Residual risk, stated plainly
@@ -674,16 +683,18 @@ answers with that command.
    "private", and warns where the preview can be skipped.
 9. **The foreground gate cannot see through `exec` or a multiplexer.** A program the shell
    `exec`ed into, or a `tmux` configured as the pane's shell, looks like the shell. With
-   shell integration the prompt-mark rule catches most of these; without it, only the
-   bracket protects, and a program that enables bracketed paste and then acts on what it
-   receives is trusted.
+   shell integration the prompt-mark rule catches most of these, but not a hostile one: OSC
+   133 prompt marks can be printed by any program, so an `exec`ed program can fake a prompt.
+   Without integration, or against such a program, only the bracket protects, and a program
+   that enables bracketed paste and then acts on what it receives is trusted.
 10. **The guarantee assumes the line editor's default paste handling.** A user who binds
     zsh's `bracketed-paste` widget or readline's `bracketed-paste-begin` to something that
     accepts the line has opted out of it.
 11. **Bytes not yet read.** The session thread checks bracketed mode against what the engine
     has parsed. A `?2004l` the program has written but Halyard has not yet read from the PTY
     is not seen; the inserted text then arrives unbracketed. It is still a single line with
-    no controls, so it runs only through vi command-mode keys like those in section 6.2.
+    no controls, but it can act as keystrokes: vi command-mode keys (section 6.2) or a program
+    that acts on single keys (`THREAT_MODEL.md` item 10).
     The window is the time between the program's write and Halyard's read.
 12. **The bridge's grants are as safe as the user's account.** Any same-uid process can run
     `halyard-mcp --client-name <name>` and use that name's stored grant (existing item 4).
@@ -778,9 +789,9 @@ checked only with its test named, and a "not verified" list in the PR body.
 - **The Flatpak.** The assistant is off there in v1 (section 4.6). If it is enabled later,
   none of the key sources is verified inside the sandbox: an `api_key_command` on the host
   is likely not visible, and the Secret Service through the portal is untested.
-- **vi command mode inside a bracketed paste.** In the reviewer's PTY probes, `k#` (zsh) and
-  `kvZZ` (bash) did not run inside a bracketed paste. `model_output_never_runs` keeps
-  checking it on every CI run. If a shell's line editor is ever found to act on a bracketed
+- **vi command mode inside a bracketed paste.** `k#` was confirmed inert inside a bracketed
+  paste in zsh 5.9; bash 5 inside a bracketed paste is unverified and is what
+  `model_output_never_runs` checks on Ubuntu. If a shell's line editor is ever found to act on a bracketed
   paste, the decision is that Insert is refused for that shell by name (bash, say), always,
   because Halyard cannot see which keymap a line editor is in.
 - **Whether macOS CI runners can use the login keychain** non-interactively is unknown.
