@@ -1,0 +1,14 @@
+[package]
+name = "halyard-term"
+description = "Terminal sessions for Halyard: PTY, VT engine (libghostty-vt), and owned frame snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
