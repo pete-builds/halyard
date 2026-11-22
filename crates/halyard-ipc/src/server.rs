@@ -355,6 +355,15 @@ impl IpcServer {
         GrantsHandle(Arc::clone(&self.shared.grants))
     }
 
+    /// Forgets the text typed into `session_id` under standing permission.
+    ///
+    /// The app calls this when the user types into the pane themselves (for example after
+    /// clearing the line), since the user has then seen the line. It is the way out of the
+    /// "too much typed since the last approval" refusal.
+    pub fn reset_typed_since_approval(&self, session_id: &str) {
+        lock(&self.shared.unapproved).remove(session_id);
+    }
+
     /// Stops accepting, closes every connection, and removes the socket file.
     pub fn shutdown(mut self) {
         self.stop();
@@ -575,6 +584,9 @@ impl Drop for Conn {
         if let Some(id) = self.subscription.take() {
             self.shared.events.unsubscribe(id);
         }
+        // Let the handshake watchdog exit now instead of sleeping until its deadline.
+        self.handshake_done.store(true, Ordering::SeqCst);
+        self.watchdog.unpark();
     }
 }
 
@@ -1023,9 +1035,24 @@ impl Conn {
         };
         if let Some(reason) = reason {
             let _one_dialog = lock(&self.shared.dialog);
+            // The grant may have been revoked while this request waited for the dialog.
+            let grant = self.grant_with(Scope::InputWrite)?;
             // Read inside the dialog lock so it matches what this approval will run.
             let prior =
                 lock(&self.shared.unapproved).get(&p.session_id).cloned().unwrap_or_default();
+            if prior.truncated {
+                // The dialog could only show the last part of the pending line; the start
+                // (the actual command) could be pushed out by padding. Never ask the user
+                // to approve something they cannot see.
+                return Err(RpcError::new(
+                    code::DENIED,
+                    "too much typed since the last approval; clear the line in the pane",
+                )
+                .with_data(json!({
+                    "reason": "typed_since_approval_truncated",
+                    "max_bytes": text::MAX_TYPED_SINCE_APPROVAL_BYTES,
+                })));
+            }
             let request = SendTextRequest {
                 grant_id: grant.id.clone(),
                 client_name: grant.client_name.clone(),
@@ -1041,6 +1068,8 @@ impl Conn {
             if !self.shared.approver.approve_send_text(&request) {
                 return Err(RpcError::new(code::DENIED, "the user declined the input"));
             }
+            // And may have been revoked while the dialog was open.
+            self.grant_with(Scope::InputWrite)?;
             self.shared.directory.send_text(&p.session_id, &p.text).map_err(dir_err)?;
             // The user has now seen and approved everything typed so far.
             lock(&self.shared.unapproved).remove(&p.session_id);
@@ -1049,6 +1078,11 @@ impl Conn {
         // Standing sends also take the dialog lock, so nothing can be typed while a dialog
         // is open and then be cleared, unseen, by that dialog's approval.
         let _one_dialog = lock(&self.shared.dialog);
+        // Re-check after waiting: revoked, or "always allow" withdrawn, means no send.
+        let grant = self.grant_with(Scope::InputWrite)?;
+        if !grant.always_allow_input {
+            return Err(RpcError::new(code::FORBIDDEN, "standing input permission was withdrawn"));
+        }
         self.shared.directory.send_text(&p.session_id, &p.text).map_err(dir_err)?;
         lock(&self.shared.unapproved).entry(p.session_id.clone()).or_default().push(&p.text);
         Ok(json!({ "sent": true, "approval": "standing" }))
@@ -1091,5 +1125,26 @@ impl Conn {
         }
         self.subscription = Some(sub_id);
         Ok(json!({ "subscribed": true }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unapproved_keeps_the_last_bytes_on_a_char_boundary() {
+        let mut u = Unapproved::default();
+        u.push(&"a".repeat(3000));
+        assert!(!u.truncated);
+        let tail = format!("{}é{}", "b".repeat(1500), "c".repeat(1500));
+        u.push(&tail);
+        assert!(u.truncated);
+        assert!(u.text.len() <= text::MAX_TYPED_SINCE_APPROVAL_BYTES);
+        assert!(u.text.ends_with(&tail));
+        // Cutting inside "é" must move forward to a boundary, not panic.
+        let mut v = Unapproved::default();
+        v.push(&format!("é{}", "x".repeat(text::MAX_TYPED_SINCE_APPROVAL_BYTES - 1)));
+        assert!(v.truncated && v.text.chars().all(|c| c == 'x'));
     }
 }
