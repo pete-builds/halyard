@@ -2,7 +2,8 @@
 
 mod common;
 
-use std::time::Duration;
+use std::io::ErrorKind;
+use std::time::{Duration, Instant};
 
 use common::{code_of, start, start_with};
 use halyard_ipc::{Limits, MAX_MESSAGE_BYTES, code};
@@ -181,15 +182,37 @@ fn connection_limit_closes_extra_connections() {
     let limits = Limits { max_connections: 2, ..Limits::default() };
     let h = start_with(limits);
     let _a = h.hello();
-    let _b = h.hello();
+    let b = h.hello();
     // Over the limit the server either refuses the connection outright (macOS can report this
     // at connect time) or accepts and immediately closes it. Both enforce the limit; a third
     // connection that is served is the failure.
     match h.try_connect() {
-        Err(_) => {}
+        Err(e) => assert!(
+            matches!(
+                e.kind(),
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::WouldBlock
+            ),
+            "the third connection failed for another reason: {e:?}"
+        ),
         Ok(mut c) => {
             let _ = c.send_raw(b"{}\n");
             assert!(c.read_message().is_err(), "third connection is closed");
         }
+    }
+    // The server is still alive and closing a connection frees a slot: a new client gets
+    // through (retried while the server notices the close). A dead server would fail here.
+    drop(b);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(mut c) = h.try_connect()
+            && c.hello("test").is_ok()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no slot freed after closing a connection");
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
