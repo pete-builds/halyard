@@ -12,6 +12,12 @@ pub const MAX_SEND_TEXT_BYTES: usize = 16 * 1024;
 /// approval dialog.
 pub const MAX_TYPED_SINCE_APPROVAL_BYTES: usize = 4 * 1024;
 
+/// The longest request an approval dialog is asked to show, in bytes of its escaped
+/// form ([`escape_for_display`]). A longer request is refused without a dialog, because
+/// a dialog must show everything it approves. (The text typed since the last approval
+/// is bounded separately by [`MAX_TYPED_SINCE_APPROVAL_BYTES`].)
+pub const MAX_APPROVAL_DISPLAY_BYTES: usize = 4 * 1024;
+
 /// Code points that render as nothing (or as something else) and so can hide text from a
 /// reader: every `Default_Ignorable_Code_Point` from Unicode 16.0's
 /// `DerivedCoreProperties.txt`, plus every code point of general category `Cf` (format),

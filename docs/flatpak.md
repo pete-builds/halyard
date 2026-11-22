@@ -185,9 +185,13 @@ bundle's permissions against this list and fails if network access appears.
 - **Window matching.** Halyard's window app ID is `halyard`, not the Flatpak ID; the desktop
   file sets `StartupWMClass=halyard` so desktops can match the window to the launcher. Not
   yet checked on a real desktop.
-- **The session API socket.** When the session API is wired into the app, its socket under
-  `$XDG_RUNTIME_DIR/halyard` sits in the sandbox's private runtime directory, which host
-  programs cannot reach. That feature will need `--filesystem=xdg-run/halyard:create`.
+- **The session API is off in the Flatpak.** Panes run on the host through
+  `flatpak-spawn --host`, and the sandbox cannot see the host's process tree, so no hook in
+  a pane could pass the API's ancestry check; its socket would also sit in the sandbox's
+  private runtime directory, out of reach of host tools. Halyard says so once in the
+  banner and does not start it; `halyard-msg` in a pane falls back to escape sequences,
+  which still drive the attention marks. Making it work would need the host's pids
+  (through the Flatpak portal) and `--filesystem=xdg-run/halyard:create`.
 
 ## What is verified, and what is not
 

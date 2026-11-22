@@ -17,7 +17,7 @@
 
 use std::time::SystemTime;
 
-use halyard_shell::{BlockTracker, Clock, ReportedCwd, Scanner, ShellEvent};
+use halyard_shell::{AgentReport, BlockTracker, Clock, ReportedCwd, Scanner, ShellEvent};
 
 use crate::attention::{AttentionConfig, AttentionEvent, AttentionMachine, AttentionState};
 use crate::dashboard::SessionSummary;
@@ -161,6 +161,22 @@ impl<C: Clock> PaneMonitor<C> {
             return;
         }
         self.apply(e, at);
+    }
+
+    /// A state report through the session API (`session.report_state`). The server
+    /// already checked that the reporter runs inside this pane (process ancestry plus the
+    /// pane's token), so unlike an escape-sequence report it needs no `session=` match:
+    /// it is applied as this pane's own report. `msg` is untrusted text and is
+    /// sanitized like a notification.
+    pub fn on_api_report(&mut self, mut report: AgentReport, at: SystemTime) {
+        report.session = self.attention.session_id().map(str::to_owned);
+        self.apply(AttentionEvent::Report(report), at);
+    }
+
+    /// A notification through the session API (`session.notify`), already verified
+    /// to come from inside this pane. The text is untrusted and sanitized.
+    pub fn on_api_notification(&mut self, text: &str, at: SystemTime) {
+        self.apply(AttentionEvent::Notification(text.to_owned()), at);
     }
 
     /// The primary screen's scrollback after a chunk: `rows` now, `dropped`

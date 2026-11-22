@@ -56,6 +56,15 @@ impl WorkspaceView {
             let v = p.view.read(cx);
             let m = signals::lock(v.monitor());
             let a = m.attention();
+            if let Some(api) = v.api() {
+                api.observe(crate::session_api::Observed {
+                    session_id: v.session_id(),
+                    state: a.state(),
+                    cause: a.cause(),
+                    agent: a.agent(),
+                    note: a.last_notification(),
+                });
+            }
             (
                 v.session_id().to_owned(),
                 a.state(),

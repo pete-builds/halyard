@@ -86,7 +86,7 @@ dotted keys (`"ai".enabled = ...`) and multi-line strings cannot hide a section.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `scrollback_lines` | `10000` | Scrollback per pane, 0 to 1,000,000. |
+| `scrollback_lines` | `10000` | Lines of scrollback per pane, 0 to 1,000,000. Lines of ordinary text are kept in full at any width up to 256 columns (or the pane's starting width, if wider), and a narrower pane can keep more. Dense lines, with many colors, emoji or combining marks, use more memory each, so fewer are kept (as few as about 1,900 of 10,000; see `docs/PERFORMANCE.md`). Memory grows only as scrollback fills, up to about 2.4 KB per configured line (24 MB for 10,000 lines). |
 | `shell` | unset | `{ program = "/bin/zsh", args = ["-l"] }`. Unset means your login shell (`$SHELL`). |
 | `working_directory` | `"home"` | `"home"`, `"inherit"` (the focused pane's directory), or an absolute path or one starting with `~/`. |
 | `cursor_style` | `"block"` | `"block"`, `"bar"`, or `"underline"`. |
@@ -229,6 +229,17 @@ The text comes from the program in the pane, so control characters, bidi overrid
 direction marks and zero-width characters are removed and it is capped (80 characters
 for the title, 200 for the body); on Linux `&`, `<` and `>` are also escaped. macOS shows
 nothing while Halyard is the frontmost app; the unread pill on the tab covers that case.
+
+
+## `[session_api]`
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `true` | Start the local session API (`docs/session-api.md`): a private Unix socket for hooks such as `halyard-msg` and for tools you pair. Read at startup, so a change needs a restart. With it off, panes get no `HALYARD_SOCKET` or `HALYARD_SESSION_TOKEN`, and `halyard-msg` falls back to escape sequences. |
+
+Nothing the API receives runs on its own. Pairing a tool, and every request to type into
+a pane, opens a dialog first (see "Typing into a pane" in `docs/session-api.md`). Paired
+tools are listed, and revoked, with the command palette's "Paired Tools" command.
 
 ## Saved workspaces
 

@@ -357,9 +357,11 @@ impl IpcServer {
 
     /// Forgets the text typed into `session_id` under standing permission.
     ///
-    /// The app calls this when the user types into the pane themselves (for example after
-    /// clearing the line), since the user has then seen the line. It is the way out of the
-    /// "too much typed since the last approval" refusal.
+    /// The app calls this only from real key events in the pane that end or clear the
+    /// line (Enter, Ctrl-C, Ctrl-U), since the user has then seen it. Never call it from
+    /// `send_text`, a paste or anything else that writes to the PTY: that would hide what
+    /// an approved Enter runs. It is the way out of the "too much typed since the last
+    /// approval" refusal.
     pub fn reset_typed_since_approval(&self, session_id: &str) {
         lock(&self.shared.unapproved).remove(session_id);
     }
@@ -1053,15 +1055,34 @@ impl Conn {
                     "max_bytes": text::MAX_TYPED_SINCE_APPROVAL_BYTES,
                 })));
             }
+            let display_text = text::escape_for_display(&p.text);
+            let typed_display = text::escape_for_display(&prior.text);
+            // The pending line is bounded on its own (above, 4 KiB); this bounds the
+            // request. Both are shown in full, in a box the user scrolls through.
+            let shown = display_text.len();
+            if shown > text::MAX_APPROVAL_DISPLAY_BYTES {
+                // Too long for the user to review in a dialog. Approving what one
+                // cannot read is not consent, so ask for smaller pieces instead.
+                return Err(RpcError::new(
+                    code::DENIED,
+                    "the text is too long to show in an approval dialog; send it in smaller \
+                     pieces, or clear the line in the pane",
+                )
+                .with_data(json!({
+                    "reason": "too_long_to_review",
+                    "shown_bytes": shown,
+                    "max_bytes": text::MAX_APPROVAL_DISPLAY_BYTES,
+                })));
+            }
             let request = SendTextRequest {
                 grant_id: grant.id.clone(),
                 client_name: grant.client_name.clone(),
                 session,
-                display_text: text::escape_for_display(&p.text),
+                display_text,
                 text: p.text.clone(),
                 reason,
                 peer: self.peer.clone(),
-                typed_since_approval_display: text::escape_for_display(&prior.text),
+                typed_since_approval_display: typed_display,
                 typed_since_approval: prior.text,
                 typed_since_approval_truncated: prior.truncated,
             };

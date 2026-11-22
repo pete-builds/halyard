@@ -12,6 +12,7 @@
 //! last window closes.
 
 mod app_state;
+mod approval;
 mod attention_ui;
 mod blocks_ui;
 mod dashboard_ui;
@@ -25,6 +26,8 @@ mod notify;
 mod palette;
 mod procinfo;
 mod selection;
+mod session_api;
+mod session_api_ui;
 mod settings;
 mod signals;
 mod view;
@@ -130,6 +133,8 @@ pub fn open_window(restored: Option<Restored>, cx: &mut App) {
 fn main() {
     Application::new().run(|cx: &mut App| {
         AppState::init(cx);
+        let api = session_api_ui::start(cx);
+        cx.global_mut::<AppState>().session_api = api;
         cx.on_action(|_: &Quit, cx| request_quit(cx));
         cx.on_action(|_: &NewWindow, cx| open_window(None, cx));
         cx.set_menus(vec![
@@ -172,6 +177,7 @@ fn main() {
         ]);
         cx.on_app_quit(|cx| {
             app_state::save_now(cx);
+            session_api_ui::shutdown(cx);
             async {}
         })
         .detach();

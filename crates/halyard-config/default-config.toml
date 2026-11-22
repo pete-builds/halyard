@@ -95,3 +95,9 @@ enabled = false
 notify_on_waiting = true
 # Extra process names to treat as agents, besides the built-in list.
 detect = []
+
+[session_api]
+# The local session API (docs/session-api.md): a private Unix socket that lets hooks
+# such as `halyard-msg` and tools you pair report state and, with your approval, read or
+# type into panes. Nothing runs without a dialog. Changing this needs a restart.
+enabled = true

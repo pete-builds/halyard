@@ -353,3 +353,25 @@ fn dropped_scrollback_moves_the_base_and_forgets_dropped_blocks() {
     m.on_history(80, 50, true);
     assert_eq!(m.blocks().history().len(), 0);
 }
+
+#[test]
+fn api_report_applies_without_a_session_echo_and_marks_changed() {
+    let clock = FakeClock::new();
+    let mut m = monitor(&clock);
+    let report = halyard_shell::AgentReport {
+        state: Some(halyard_shell::ReportedState::Waiting),
+        agent: Some("claude-code".into()),
+        msg: Some("Needs approval".into()),
+        // Whatever the caller put here, the verified pane is the one that counts.
+        session: Some("another-pane".into()),
+        exit_code: None,
+    };
+    m.on_api_report(report, clock.at());
+    assert_eq!(m.attention().state(), AttentionState::WaitingForInput);
+    assert_eq!(m.attention().cause(), Cause::ProtocolReport);
+    assert_eq!(m.attention().last_notification(), Some("Needs approval"));
+    assert!(m.take_changed());
+    m.on_api_notification("Tests passed: 412 ok", clock.at());
+    assert_eq!(m.attention().last_notification(), Some("Tests passed: 412 ok"));
+    assert!(m.take_changed());
+}

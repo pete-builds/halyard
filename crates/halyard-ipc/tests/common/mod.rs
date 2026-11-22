@@ -164,6 +164,11 @@ impl Harness {
         Client::connect(&self.socket, Some(Duration::from_secs(10))).expect("connect")
     }
 
+    /// Connects without panicking, for tests where a refused connection is a valid outcome.
+    pub fn try_connect(&self) -> std::io::Result<Client> {
+        Client::connect(&self.socket, Some(Duration::from_secs(10)))
+    }
+
     pub fn hello(&self) -> Client {
         let mut c = self.connect();
         c.hello("test").expect("hello");

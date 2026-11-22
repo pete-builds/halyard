@@ -52,6 +52,12 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       `bracketed_paste_and_mouse_reach_the_program`. Window: resizing the window reflows and
       updates `stty size` (verified on macOS); wheel scrolling (scrollback, alternate scroll,
       mouse reporting) and click/drag reporting are implemented but not exercised in a window.
+      Scrollback length: `scrollback_lines` is converted to Ghostty's byte limit, so 10,000
+      lines of ordinary text are kept at 80 and 200 columns (`scrollback_keeps_the_configured_lines`,
+      bounded by `scrollback_limit_still_bounds_memory`); before, 247 rows were kept at 200
+      columns. Dense lines (many styles, emoji or combining marks per line) use more of each
+      page, so fewer of them are kept: 1,893 to 3,797 of 10,000 in review measurements
+      (`docs/PERFORMANCE.md`).
 - [ ] Selection, copy, paste (bracketed). Session side done: `selection_highlights_and_copies`,
       `selection_copies_text`, `paste_is_bracketed_only_when_enabled`. Window: highlight verified;
       drag to select, double-click word, Cmd+C/Cmd+V (Ctrl+Shift+C/V on Linux) implemented
@@ -240,7 +246,7 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
   Linux D-Bus call is compiled by CI but never run against a notification daemon.
 - [x] Dashboard model (git branch without running git, attention sort order):
   `dashboard::tests::sort_order`, `git::tests`
-- [ ] Local session API: authenticated socket, scoped capabilities, user approval for
+- [x] Local session API: authenticated socket, scoped capabilities, user approval for
       anything that writes to a pane ([docs/session-api.md](docs/session-api.md))
   - [x] Library `halyard-ipc`: 0700 socket dir and 0600 socket, peer uid check, versioned
         strict JSON-RPC, size and rate limits (tests in `crates/halyard-ipc/tests/protocol.rs`
@@ -262,8 +268,56 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
   - [x] `halyard-msg` hook client with OSC 7717 fallback
         (`unreachable_socket_falls_back_to_the_escape_sequence_on_the_tty`,
         `outside_halyard_it_exits_0_silently_and_fast`)
-  - [ ] App wiring: start the server, implement `SessionDirectory` and the approval
-        dialogs, export the pane env vars, publish events, grants settings page
+  - [x] App wiring: the app binds the server on its own thread at
+        `<socket dir>/<pid>.sock` (`[session_api] enabled`, default on; a failed bind is one
+        banner notice), every pane gets `HALYARD_SOCKET`, `HALYARD_SESSION_ID` and
+        `HALYARD_SESSION_TOKEN`, and `SessionDirectory` is backed by the real panes
+        (`crates/halyard-app/src/session_api.rs`). Tests run a real server, real shells in
+        real PTYs and the app's own directory and approver, with only the UI thread faked:
+        `a_report_from_inside_a_pane_updates_its_state`,
+        `attach_from_outside_the_pane_is_rejected_by_ancestry`,
+        `send_text_with_a_newline_needs_approval`,
+        `send_text_never_resets_typed_since_approval`,
+        `revoking_in_the_paired_tools_view_cuts_the_tool_off`, `a_closed_pane_leaves_the_api`,
+        `a_denied_pairing_cools_down_without_a_second_dialog`,
+        `events_are_published_once_per_change`; config `session_api` in
+        `default_config_file_parses_to_exactly_the_default_impl` and `full_config_round_trips_values`
+  - [x] Approval dialogs in the window, keyboard first and themed: pairing (scopes as
+        checkboxes, a warning on `input:write` and `screen:read`, "always allow typing" only
+        when `input:write` is ticked) and typing (exact escaped text, the text typed since
+        the last approval, the client and the pane, with its size, in one scrolling box that
+        must be scrolled to the end before Approve works; over 4 KiB escaped is refused
+        without a dialog). Plain, Shift and Ctrl+Enter never approve; nothing approves for
+        700 ms after opening, a stray key or refocus; approving is the dialog's own action
+        (Cmd+Enter, or Ctrl+Shift+Enter over Zoom Pane) or a click; "always allow" is
+        click-only; the window's actions are blocked while it is open; Escape denies; no
+        answer in 90 s denies (`approval::tests`,
+        `the_approve_chord_reaches_the_dialog_over_workspace_bindings`,
+        `a_dialog_nobody_answers_is_a_denial`,
+        `text_too_long_to_show_is_refused_without_a_dialog`). Pairing prompts are limited to 3 a minute across
+        connections, with a 30 s cooldown after a denial
+        (`pairing_prompts_are_limited_across_connections`).
+  - [x] `reset_typed_since_approval` only from real key events in the pane: Enter, Ctrl-C
+        (`keys::tests::only_enter_and_ctrl_c_reset_the_typed_line`,
+        `the_pane_key_path_resets_on_enter_but_not_on_ctrl_u`), never
+        from `send_text` (`send_text_never_resets_typed_since_approval`), paste or query
+        replies (those paths never call it)
+  - [x] "Paired Tools (Session API)" palette view: name, scopes, last use; Enter revokes;
+        the grants file is read and written off the UI thread
+        (`revoking_in_the_paired_tools_view_cuts_the_tool_off`)
+  - [x] Off in the Flatpak, with one banner notice (host shells cannot pass ancestry from
+        the sandbox; `docs/flatpak.md`). Not run inside a real Flatpak.
+  - [x] Verified live on macOS arm64 with the debug-script build: `halyard-msg state
+        waiting` in a pane puts the "waiting" badge and the unread tab mark up, `halyard-msg
+        info --strict` answers over the socket, a Python client's pairing and `send_text`
+        dialogs appear, a plain Enter leaves the dialog open, Cmd+Enter approves, the
+        Paired Tools view revokes, `enabled = false` leaves `HALYARD_SOCKET` unset, and a
+        0755 socket directory gives the banner while the terminal works; a 2036-character
+        padded send shows its size, keeps Approve disabled ("Scroll to the end of the text
+        first") through a Cmd+Enter, enables it after End, and a 5000-byte send is refused
+        with `too_long_to_review`. Not verified:
+        Linux, a second window (the dialog opens in the active window, or the window that
+        holds the pane), the 90 s timeout with a real window.
   - [ ] Peer uid rejection tested with a second real user (code path is a uid compare;
         not exercised by tests)
 - [x] Agent dashboard: `agent_dashboard` (palette mode), every pane of every window in
@@ -282,7 +336,13 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 ## Phase 6: production readiness
 
 - [ ] Flatpak package (see `docs/adr/0005-linux-distribution.md`)
-- [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane
+- [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane. Throughput is measured:
+      `crates/halyard-term/examples/throughput.rs` (engine parse, frame build, real PTY sessions,
+      headless key echo), results in `docs/PERFORMANCE.md`, and a `--quick` floor runs in CI. Line
+      buffered output (`yes | head`) went from 4.6 to 6.1 MB/s and from 33 s to 3.4 s of CPU per
+      100 MB on macOS (`trickling_output_is_read_in_batches`). The reader pause is macOS only
+      until a Linux A/B on the NixOS box is run. Not yet: startup, memory, end to end input
+      latency, GPU render time, multi-pane, Linux numbers
 - [x] Threat model written: `docs/THREAT_MODEL.md` (cites code in PRs that were still open when it was written)
 - [ ] Security review (no outside review yet)
 - [ ] Release automation: `.github/workflows/release.yml` (macOS zip, Linux tarballs, SHA256SUMS, provenance,

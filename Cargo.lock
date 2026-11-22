@@ -2396,6 +2396,7 @@ dependencies = [
  "gpui",
  "halyard-agents",
  "halyard-config",
+ "halyard-ipc",
  "halyard-shell",
  "halyard-term",
  "halyard-workspace",
@@ -2403,6 +2404,7 @@ dependencies = [
  "objc",
  "png 0.18.1",
  "raw-window-handle",
+ "serde_json",
  "tempfile",
  "zbus",
 ]

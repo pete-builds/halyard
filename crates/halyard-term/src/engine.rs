@@ -124,9 +124,56 @@ const fn from_engine_rgb(c: RgbColor) -> Rgb {
     Rgb::new(c.r, c.g, c.b)
 }
 
+/// Bytes of one pooled scrollback page in Ghostty (`PagePool.item_size`):
+/// measured as the step between retained-row counts while raising the limit
+/// (409,600 bytes on macOS arm64, where memory pages are 16 KiB). On a system
+/// whose pages are smaller the real item is at most this, so more pages fit
+/// under the limit and at least as many rows are kept.
+const GHOSTTY_PAGE_BYTES: usize = 409_600;
+
+/// A lower bound on the bytes a Ghostty page has for rows and cells. Every
+/// page can hold its standard capacity of 215 rows of 215 cells, at 8 bytes
+/// per row header and 8 per cell (`page.zig`, `std_capacity` and
+/// `Capacity.adjust`). The measured value is about 383,000.
+const GHOSTTY_PAGE_GRID_BYTES: usize = 215 * 8 * (215 + 1);
+
+/// Narrowest width the scrollback limit is sized for. Ghostty's limit is
+/// fixed when the terminal is created and the C API cannot change it, but its
+/// cost per row grows with the width, so a pane created narrow and widened
+/// later would keep fewer lines. Sizing for at least this many columns keeps
+/// the configured lines in a pane widened up to here.
+const SCROLLBACK_BUDGET_MIN_COLS: u16 = 256;
+
+/// Rows of `cols` cells that fit in one Ghostty page (a lower bound).
+fn rows_per_page(cols: u16) -> usize {
+    (GHOSTTY_PAGE_GRID_BYTES / (8 * (usize::from(cols) + 1))).max(1)
+}
+
+/// Ghostty's scrollback limit in bytes that keeps at least `lines` lines of
+/// history for a `cols` x `rows` grid, for any width up to
+/// `max(cols, SCROLLBACK_BUDGET_MIN_COLS)`.
+///
+/// libghostty-vt's `max_scrollback` is documented as lines, but Ghostty's
+/// `Screen` treats it as bytes, rounded to whole pages. Passing a line count
+/// straight through kept 247 rows at 200 columns for 10,000 lines. Ghostty
+/// prunes the oldest page when the next one would pass the limit, so right
+/// after a prune the newest page holds a single row: the limit is the pages
+/// that hold `lines + rows` rows, plus that partial page, plus one spare.
+/// Zero lines stays zero (no scrollback).
+#[must_use]
+pub fn scrollback_bytes(lines: usize, cols: u16, rows: u16) -> usize {
+    if lines == 0 {
+        return 0;
+    }
+    let per_page = rows_per_page(cols.max(SCROLLBACK_BUDGET_MIN_COLS));
+    let pages = lines.saturating_add(usize::from(rows)).div_ceil(per_page).saturating_add(2);
+    pages.saturating_mul(GHOSTTY_PAGE_BYTES)
+}
+
 impl Engine {
-    /// Create an engine with a grid of `cols` x `rows` cells, keeping up to
-    /// `scrollback_lines` lines of history, drawing with `palette`.
+    /// Create an engine with a grid of `cols` x `rows` cells, keeping at least
+    /// `scrollback_lines` lines of history (see [`scrollback_bytes`]), drawing
+    /// with `palette`.
     pub fn new(
         cols: u16,
         rows: u16,
@@ -136,7 +183,7 @@ impl Engine {
         let mut terminal = Terminal::new(TerminalOptions {
             cols: cols.max(1),
             rows: rows.max(1),
-            max_scrollback: scrollback_lines,
+            max_scrollback: scrollback_bytes(scrollback_lines, cols.max(1), rows.max(1)),
         })
         .map_err(err("creating the terminal"))?;
 
@@ -1024,6 +1071,97 @@ mod tests {
         let mut e = Engine::new(20, 5, 100, &Palette::default()).unwrap();
         e.resize(20, 5, 8, 16).unwrap();
         e
+    }
+
+    /// Scrollback rows kept after writing `written` one-character lines to a
+    /// `cols` x 24 engine created with `lines` of scrollback, after widening it
+    /// to `wide_cols` (0: no resize).
+    fn kept_rows(lines: usize, cols: u16, wide_cols: u16, written: usize) -> u64 {
+        let mut e = Engine::new(cols, 24, lines, &Palette::default()).unwrap();
+        e.resize(cols, 24, 8, 16).unwrap();
+        if wide_cols > 0 {
+            e.resize(wide_cols, 24, 8, 16).unwrap();
+        }
+        let block = b"x\r\n".repeat(1000);
+        for _ in 0..written / 1000 {
+            e.write(&block);
+        }
+        let f = e.frame().unwrap();
+        f.scroll.total - u64::from(f.rows)
+    }
+
+    #[test]
+    fn scrollback_keeps_the_configured_lines() {
+        // `max_scrollback` is bytes to Ghostty; 10,000 passed straight through
+        // kept 247 rows at 200 columns.
+        for cols in [80, 200] {
+            let kept = kept_rows(10_000, cols, 0, 30_000);
+            assert!(kept >= 10_000, "{cols} columns kept {kept} of 10,000 lines");
+        }
+        // Widening after creation keeps them too, up to the budget width.
+        let kept = kept_rows(10_000, 80, SCROLLBACK_BUDGET_MIN_COLS, 30_000);
+        assert!(kept >= 10_000, "widened to 256 columns kept {kept} of 10,000 lines");
+        // A small setting is honored, and zero keeps none.
+        assert!(kept_rows(100, 80, 0, 5_000) >= 100);
+        assert_eq!(kept_rows(0, 80, 0, 5_000), 0);
+    }
+
+    #[test]
+    fn scrollback_limit_still_bounds_memory() {
+        // Far more output than the limit: what is kept stays within the byte
+        // budget (8 bytes per cell plus 8 per row) and well short of everything.
+        for cols in [80u16, 200] {
+            let budget = scrollback_bytes(10_000, cols, 24);
+            let kept = kept_rows(10_000, cols, 0, 120_000);
+            let kept_bytes = kept * 8 * (u64::from(cols) + 1);
+            assert!(kept < 60_000, "{cols} columns kept {kept} rows");
+            assert!(
+                kept_bytes <= budget as u64,
+                "{cols} columns: {kept} rows use {kept_bytes} bytes, limit {budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn scrollback_bytes_grow_with_lines_and_width() {
+        assert_eq!(scrollback_bytes(0, 80, 24), 0);
+        assert!(scrollback_bytes(1, 80, 24) >= 3 * GHOSTTY_PAGE_BYTES);
+        assert!(scrollback_bytes(20_000, 80, 24) > scrollback_bytes(10_000, 80, 24));
+        // Narrow panes are sized as if they were 256 columns wide.
+        assert_eq!(scrollback_bytes(10_000, 80, 24), scrollback_bytes(10_000, 256, 24));
+        assert!(scrollback_bytes(10_000, 1000, 24) > scrollback_bytes(10_000, 256, 24));
+        // The configuration maximum does not overflow.
+        assert!(scrollback_bytes(1_000_000, u16::MAX, u16::MAX) > 0);
+        // The pages that hold the lines and the screen, plus the partial page
+        // after a prune and one spare. With Ghostty's real page geometry the
+        // two extra pages are slack (see `scrollback_kept_through_page_prunes`),
+        // so only this arithmetic catches their removal.
+        let per_page = 371_520 / (8 * 257);
+        assert_eq!(per_page, 180);
+        assert_eq!(scrollback_bytes(10_000, 256, 24), (10_024usize.div_ceil(180) + 2) * 409_600);
+    }
+
+    #[test]
+    fn scrollback_kept_through_page_prunes() {
+        // Ghostty drops a whole page when the next one would pass the limit, so
+        // the fewest rows are kept just after a prune. Sample every few lines
+        // across more than two page cycles at the widest width the limit is
+        // sized for, where there is the least slack. Measured minimum: 10,579.
+        // Ghostty fits 186 rows per page here against the 180 assumed, so even
+        // three fewer pages would still keep 10,021: this guards the page
+        // geometry, and `scrollback_bytes_grow_with_lines_and_width` guards the
+        // spare pages.
+        let cols = SCROLLBACK_BUDGET_MIN_COLS;
+        let mut e = Engine::new(cols, 24, 10_000, &Palette::default()).unwrap();
+        e.resize(cols, 24, 8, 16).unwrap();
+        e.write(&b"x\r\n".repeat(12_000));
+        let mut fewest = u64::MAX;
+        for _ in 0..100 {
+            e.write(&b"x\r\n".repeat(5));
+            let f = e.frame().unwrap();
+            fewest = fewest.min(f.scroll.total - u64::from(f.rows));
+        }
+        assert!(fewest >= 10_000, "kept as few as {fewest} of 10,000 lines");
     }
 
     #[test]

@@ -107,7 +107,7 @@ pub struct SessionConfig {
     pub cell_width: u32,
     /// Cell height in pixels.
     pub cell_height: u32,
-    /// Lines of scrollback to keep.
+    /// Lines of scrollback to keep (at least; see [`crate::engine::scrollback_bytes`]).
     pub scrollback_lines: usize,
     /// Colors.
     pub palette: Palette,
@@ -798,6 +798,26 @@ fn wake_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
     Ok((r, w))
 }
 
+/// A read shorter than this means output is trickling in: a program writing
+/// one line per `write` (line-buffered stdio on a terminal) reaches the reader
+/// a few bytes at a time.
+const SMALL_READ: usize = 512;
+
+/// After a [`SMALL_READ`], the reader waits this long before polling again so
+/// that more output collects in the PTY. Without it, `yes | head` made one
+/// poll, read, channel send and session wakeup per 8 bytes on average and the
+/// reader thread spent all its time in system calls (see `docs/PERFORMANCE.md`).
+/// The bytes already read are handed over first, so the first output of a
+/// burst (a key echo) is never delayed; later output waits at most this long.
+/// Kept short so a macOS PTY, which holds only a few hundred bytes of small
+/// writes before the program blocks, never sits full for long.
+const SMALL_READ_PAUSE: Duration = Duration::from_micros(50);
+
+/// Whether the reader pauses after a [`SMALL_READ`]. Only measured on macOS,
+/// where a PTY read returns at most 1 KiB. On Linux it stays off until a real
+/// Linux before and after exists (`docs/PERFORMANCE.md`).
+const PAUSE_AFTER_SMALL_READ: bool = cfg!(target_os = "macos");
+
 /// Read PTY output until end-of-file, an error, or the session stops.
 ///
 /// Waits with poll on the PTY and the wake pipe, so a session that is
@@ -806,7 +826,11 @@ fn wake_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
 fn read_loop(pty: OwnedFd, wake: &OwnedFd, out: &Sender<Vec<u8>>) {
     let mut file = std::fs::File::from(pty);
     let mut buf = vec![0u8; 64 * 1024];
+    let mut trickle = false;
     loop {
+        if trickle {
+            thread::sleep(SMALL_READ_PAUSE);
+        }
         let mut fds = [
             libc::pollfd { fd: file.as_raw_fd(), events: libc::POLLIN, revents: 0 },
             libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 },
@@ -829,6 +853,7 @@ fn read_loop(pty: OwnedFd, wake: &OwnedFd, out: &Sender<Vec<u8>>) {
             // End of file, or EIO once the program closed the PTY: done.
             Ok(0) => return,
             Ok(n) => {
+                trickle = PAUSE_AFTER_SMALL_READ && n < SMALL_READ;
                 if out.send(buf[..n].to_vec()).is_err() {
                     return;
                 }
