@@ -55,6 +55,15 @@ for lib in $dlopened; do
   fi
 done
 
+# Halyard passes the host program's environment to flatpak-spawn through a
+# /bin/sh step (crates/halyard-term/src/flatpak.rs).
+if [ -x /bin/sh ]; then
+  echo "ok: /bin/sh is executable"
+else
+  echo "FAIL: /bin/sh is missing, so Halyard cannot hand flatpak-spawn the environment" >&2
+  fail=1
+fi
+
 if command -v flatpak-spawn >/dev/null 2>&1; then
   echo "ok: flatpak-spawn at $(command -v flatpak-spawn)"
 else

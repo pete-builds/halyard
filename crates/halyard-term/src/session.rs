@@ -375,7 +375,14 @@ fn session_env(config: &SessionConfig, session_id: &str) -> Vec<(OsString, OsStr
         .collect()
 }
 
-fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
+/// A command ready to spawn, plus the environment file it reads when it runs
+/// on the host through Flatpak (see [`crate::flatpak::EnvFile`]).
+struct Built {
+    cmd: CommandBuilder,
+    env_file: Option<crate::flatpak::EnvFile>,
+}
+
+fn build_command(config: &SessionConfig, session_id: &str) -> std::io::Result<Built> {
     build_command_for(config, session_id, Placement::detect())
 }
 
@@ -383,11 +390,23 @@ fn build_command_for(
     config: &SessionConfig,
     session_id: &str,
     placement: Placement,
-) -> CommandBuilder {
-    let env = session_env(config, session_id);
+) -> std::io::Result<Built> {
+    let mut env = session_env(config, session_id);
     if placement == Placement::FlatpakHost {
+        // The same UTF-8 locale default as a local program gets, judged on the
+        // variables the program will see: the session's, else the sandbox's
+        // (inherited from the desktop session) unless the session removes them.
+        let lookup = |k: &str| {
+            env.iter().rev().find(|(name, _)| name == k).map(|(_, v)| v.clone()).or_else(|| {
+                if config.env_remove.iter().any(|r| r == k) { None } else { std::env::var_os(k) }
+            })
+        };
+        if let Some(lang) = default_locale(lookup, cfg!(target_os = "macos")) {
+            env.push(("LANG".into(), lang.into()));
+        }
         let home = std::env::var_os("HOME");
         let shell = std::env::var_os("SHELL");
+        let env_path = crate::flatpak::EnvFile::path_in(&crate::flatpak::env_file_dir());
         let launch = crate::flatpak::host_launch(&crate::flatpak::HostSpawn {
             program: config.program.as_deref(),
             args: &config.args,
@@ -395,16 +414,18 @@ fn build_command_for(
             home: home.as_deref(),
             shell: shell.as_deref(),
             env: &env,
+            unset: &config.env_remove,
+            env_file: &env_path,
         });
-        // flatpak-spawn itself runs in the sandbox, in portable-pty's default
-        // directory ($HOME); the host program gets the session's directory
-        // through --directory, which may not exist inside the sandbox.
+        let env_file = crate::flatpak::EnvFile::create(env_path, &launch.env_block)?;
+        // The wrapper and flatpak-spawn run in the sandbox, in portable-pty's
+        // default directory ($HOME); the host program gets the session's
+        // directory through --directory, which may not exist inside the
+        // sandbox. Their own environment is the sandbox's: the host program's
+        // comes only from the env file.
         let mut cmd = CommandBuilder::new(launch.program);
         cmd.args(launch.args);
-        for (k, v) in &env {
-            cmd.env(k, v);
-        }
-        return cmd;
+        return Ok(Built { cmd, env_file: Some(env_file) });
     }
     let mut cmd = if let Some(program) = &config.program {
         let mut cmd = CommandBuilder::new(program);
@@ -436,7 +457,7 @@ fn build_command_for(
     {
         cmd.env("LANG", lang);
     }
-    cmd
+    Ok(Built { cmd, env_file: None })
 }
 
 /// The `LANG` to add when the child's environment names no locale at all.
@@ -492,8 +513,13 @@ impl Session {
             pair.master.as_raw_fd().ok_or_else(|| SessionError::Spawn("PTY has no fd".into()))?;
         let reader = dup_cloexec(master_fd).map_err(|e| spawn_err(&e))?;
         let (wake_read, wake_write) = wake_pipe().map_err(|e| spawn_err(&e))?;
-        let cmd = build_command(&config, &id);
+        let Built { cmd, env_file } = build_command(&config, &id).map_err(|e| spawn_err(&e))?;
+        // On failure the env file (if any) is dropped and deleted here.
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| spawn_err(&e))?;
+        // The wrapper in the child deletes it now; see `flatpak::EnvFile`.
+        if let Some(env_file) = env_file {
+            env_file.handed_over();
+        }
         // The parent must not hold the slave open, or the reader never sees
         // end-of-file when the program exits.
         drop(pair.slave);
@@ -1063,6 +1089,7 @@ impl SessionThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn session_handle_is_send_and_sync() {
@@ -1110,7 +1137,7 @@ mod tests {
             env_remove: vec!["LANG".into(), "LC_ALL".into(), "LC_CTYPE".into()],
             ..SessionConfig::default()
         };
-        let cmd = build_command(&config, "abc123");
+        let cmd = build_command(&config, "abc123").unwrap().cmd;
         let lang = cmd.get_env("LANG").and_then(|v| v.to_str()).map(str::to_owned);
         assert!(lang.as_deref().is_some_and(|l| l.ends_with("UTF-8")), "{lang:?}");
 
@@ -1118,7 +1145,7 @@ mod tests {
             env: vec![("LANG".into(), "de_DE.UTF-8".into())],
             ..SessionConfig::default()
         };
-        let cmd = build_command(&config, "abc123");
+        let cmd = build_command(&config, "abc123").unwrap().cmd;
         assert_eq!(cmd.get_env("LANG").and_then(|v| v.to_str()), Some("de_DE.UTF-8"));
     }
 
@@ -1129,7 +1156,7 @@ mod tests {
             env_remove: vec!["HALYARD_TEST_REMOVED".into()],
             ..SessionConfig::default()
         };
-        let cmd = build_command(&config, "abc123");
+        let cmd = build_command(&config, "abc123").unwrap().cmd;
         let get = |k: &str| cmd.get_env(k).and_then(|v| v.to_str()).map(str::to_owned);
         assert_eq!(get("TERM").as_deref(), Some("xterm-256color"));
         assert_eq!(get("COLORTERM").as_deref(), Some("truecolor"));
@@ -1145,33 +1172,103 @@ mod tests {
         cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect()
     }
 
+    /// The env file's `KEY=VALUE` entries, read before the `Built` (and its
+    /// file) is dropped.
+    fn env_entries(built: &Built) -> Vec<String> {
+        let file = built.env_file.as_ref().expect("an env file");
+        let bytes = std::fs::read(file.path()).unwrap();
+        let mode = std::fs::metadata(file.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the env file must be owner-only");
+        bytes
+            .split(|b| *b == 0)
+            .filter(|e| !e.is_empty())
+            .map(|e| String::from_utf8_lossy(e).into_owned())
+            .collect()
+    }
+
     #[test]
     fn inside_flatpak_the_login_shell_runs_on_the_host() {
+        let secret = "token-value-that-must-stay-out-of-argv";
         let config = SessionConfig {
             cwd: Some(PathBuf::from("/srv/project")),
-            env: vec![("FOO".into(), "bar".into()), ("TERM".into(), "dumb".into())],
+            env: vec![
+                ("FOO".into(), "bar".into()),
+                ("TERM".into(), "dumb".into()),
+                ("HALYARD_SESSION_TOKEN".into(), secret.into()),
+            ],
+            env_remove: vec!["OLDVAR".into()],
             ..SessionConfig::default()
         };
-        let cmd = build_command_for(&config, "abc123", Placement::FlatpakHost);
+        let built = build_command_for(&config, "abc123", Placement::FlatpakHost).unwrap();
+        let cmd = &built.cmd;
         assert!(!cmd.is_default_prog());
-        let argv = argv(&cmd);
-        assert_eq!(argv[..3], ["flatpak-spawn", "--host", "--watch-bus"], "{argv:?}");
+        let argv = argv(cmd);
+        assert_eq!(argv[..2], ["/bin/sh", "-c"], "{argv:?}");
+        let spawn = argv.iter().position(|a| a == "flatpak-spawn").unwrap();
+        assert_eq!(
+            argv[spawn..spawn + 4],
+            ["flatpak-spawn", "--host", "--watch-bus", "--env-fd=3"]
+        );
         assert!(argv.contains(&"--directory=/srv/project".to_owned()), "{argv:?}");
-        for want in [
-            "--env=TERM=dumb",
-            "--env=COLORTERM=truecolor",
-            "--env=TERM_PROGRAM=Halyard",
-            "--env=HALYARD_SESSION_ID=abc123",
-            "--env=FOO=bar",
-        ] {
-            assert!(argv.contains(&want.to_owned()), "{want} missing from {argv:?}");
+        assert!(argv.contains(&"--unset-env=OLDVAR".to_owned()), "{argv:?}");
+        for arg in &argv {
+            assert!(!arg.contains(secret) && !arg.contains("abc123"), "value in argv: {arg}");
         }
-        assert!(!argv.contains(&"--env=TERM=xterm-256color".to_owned()), "{argv:?}");
+
+        // Exactly the session's variables, plus SHELL and LANG when they
+        // apply, and nothing else from this process's environment.
+        let entries = env_entries(&built);
+        let mut names: Vec<&str> =
+            entries.iter().map(|e| e.split_once('=').map_or(e.as_str(), |(k, _)| k)).collect();
+        names.retain(|n| *n != "SHELL" && *n != "LANG");
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "COLORTERM",
+                "FOO",
+                "HALYARD_SESSION_ID",
+                "HALYARD_SESSION_TOKEN",
+                "TERM",
+                "TERM_PROGRAM",
+                "TERM_PROGRAM_VERSION"
+            ]
+        );
+        for want in ["TERM=dumb", "HALYARD_SESSION_ID=abc123", "FOO=bar"] {
+            assert!(entries.contains(&want.to_owned()), "{want} missing from {entries:?}");
+        }
+        assert!(entries.contains(&format!("HALYARD_SESSION_TOKEN={secret}")));
         // The program comes last: the login shell from $SHELL, or the host's own.
         let tail = &argv[argv.len() - 2..];
         assert!(tail[1] == "-l" || tail[1] == crate::flatpak::HOST_SHELL_FALLBACK, "{argv:?}");
         // The sandbox side does not chdir to a host path that may not exist in it.
         assert_eq!(cmd.get_cwd(), None);
+        // The wrapper never ran, so dropping the command removes its env file.
+        let path = built.env_file.as_ref().unwrap().path().to_owned();
+        drop(built);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn inside_flatpak_the_locale_default_applies_too() {
+        let config = SessionConfig {
+            env_remove: vec!["LANG".into(), "LC_ALL".into(), "LC_CTYPE".into()],
+            ..SessionConfig::default()
+        };
+        let built = build_command_for(&config, "id", Placement::FlatpakHost).unwrap();
+        let entries = env_entries(&built);
+        assert!(
+            entries.iter().any(|e| e.starts_with("LANG=") && e.ends_with("UTF-8")),
+            "{entries:?}"
+        );
+        let config = SessionConfig {
+            env: vec![("LANG".into(), "de_DE.UTF-8".into())],
+            ..SessionConfig::default()
+        };
+        let built = build_command_for(&config, "id", Placement::FlatpakHost).unwrap();
+        let langs: Vec<_> =
+            env_entries(&built).into_iter().filter(|e| e.starts_with("LANG=")).collect();
+        assert_eq!(langs, ["LANG=de_DE.UTF-8"]);
     }
 
     #[test]
@@ -1181,8 +1278,9 @@ mod tests {
             args: vec!["-d".into(), "10".into()],
             ..SessionConfig::default()
         };
-        let argv = argv(&build_command_for(&config, "id", Placement::FlatpakHost));
-        assert_eq!(argv[0], "flatpak-spawn");
+        let built = build_command_for(&config, "id", Placement::FlatpakHost).unwrap();
+        let argv = argv(&built.cmd);
+        assert!(argv.contains(&"flatpak-spawn".to_owned()), "{argv:?}");
         assert_eq!(argv[argv.len() - 3..], ["/usr/bin/htop", "-d", "10"], "{argv:?}");
     }
 
@@ -1194,7 +1292,9 @@ mod tests {
             cwd: Some(PathBuf::from("/tmp")),
             ..SessionConfig::default()
         };
-        let cmd = build_command_for(&config, "id", Placement::Local);
+        let built = build_command_for(&config, "id", Placement::Local).unwrap();
+        assert!(built.env_file.is_none());
+        let cmd = built.cmd;
         assert_eq!(argv(&cmd), ["/usr/bin/htop", "-d", "10"]);
         assert_eq!(cmd.get_cwd().map(PathBuf::from), Some(PathBuf::from("/tmp")));
     }
