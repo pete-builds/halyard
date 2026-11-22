@@ -235,12 +235,22 @@ pause stays off on Linux until that is measured. `trickling_output_is_read_in_ba
   and noisy; these show only that the floors hold there.
 - Throughput with the shell integration scanner installed as the output tap.
 
-## Found along the way, not changed here
+## Scrollback length (fixed in #30)
 
-`SessionConfig::scrollback_lines` (default 10,000, from `[terminal] scrollback_lines`) is passed
-to libghostty-vt's `max_scrollback`, which the C header documents as lines but Ghostty's
-`Screen.init` treats as **bytes** ("max_scrollback is the amount of scrollback to keep in
-bytes"). Measured: an engine created with 10,000 keeps 247 rows at 200 columns and 1,089 rows at
-80 columns after 20,000 lines of output; 10,000,000 keeps 5,483 rows at 200 columns. So panes
-keep far less scrollback than configured. Fixing it changes memory use per pane and needs its
-own decision and test.
+`SessionConfig::scrollback_lines` used to reach libghostty-vt's `max_scrollback` unchanged.
+The C header documents that as lines, but Ghostty's `Screen.init` treats it as **bytes**, so the
+default 10,000 kept 247 rows at 200 columns and about 1,000 at 80. #30 converts lines to bytes
+from Ghostty's page layout (`engine::scrollback_bytes`), sized for at least 256 columns because
+the limit cannot change after the terminal is created. That works out to a limit of about 24 MB
+per pane at 10,000 lines, filled only as scrollback grows.
+
+The conversion assumes ordinary text. A page also stores each line's styles and multi-code-point
+graphemes, so dense lines fill pages sooner and fewer of them are kept. Rows kept with 10,000
+configured lines at 200 columns (#30 review measurements):
+
+| Each line holds | Rows kept |
+|-----------------|----------:|
+| Plain text | 13,555 |
+| 100 truecolor style changes | 3,797 |
+| 100 ZWJ emoji | 3,357 |
+| 200 combining-mark clusters | 1,893 |
