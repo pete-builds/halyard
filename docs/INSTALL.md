@@ -59,12 +59,27 @@ For a quick run without a bundle: `cargo run --release -p halyard-app`.
 
 Use the flake. It pins every dependency, builds offline, wires up the runtime libraries
 and installs the desktop entry and icon. The flake, the NixOS module, the Home Manager
-module and the nix-darwin setup are documented in [docs/nix.md](nix.md) (added by the
-flake PR).
+module and the nix-darwin setup are documented in [docs/nix.md](nix.md).
 
 ```sh
 nix run github:pete-builds/halyard
 ```
+
+## Flatpak (any Linux desktop)
+
+A Flatpak runs on Fedora, Ubuntu, Debian, Arch and other desktops without Nix and without
+building anything. Halyard is not on Flathub yet: every CI run of the `flatpak` workflow
+uploads a `.flatpak` bundle, and you can build one yourself with `flatpak-builder`.
+
+```sh
+flatpak install --user ./halyard.flatpak
+flatpak run io.github.pete_builds.Halyard
+```
+
+Your shell runs on the host, outside the sandbox, as in any other terminal: the Flatpak is a
+way to install Halyard, not a sandbox around your shell. Details, build steps and what has
+not been tested yet (no window has been opened from the Flatpak so far):
+[docs/flatpak.md](flatpak.md).
 
 ## Other Linux
 
@@ -155,5 +170,6 @@ A Flatpak is planned; see [ADR 0005](adr/0005-linux-distribution.md).
 
 ## Not available
 
-No Homebrew formula or cask, no `.deb` or `.rpm`, no Windows build, and no auto-update.
+No Homebrew formula or cask, no `.deb` or `.rpm`, no Flathub listing, no Windows build, and
+no auto-update.
 Halyard makes no network calls.

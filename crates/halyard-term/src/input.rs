@@ -176,4 +176,8 @@ pub enum ScrollRequest {
     Top,
     /// Jump back to the live screen.
     Bottom,
+    /// Put this row (counted from the top of scrollback, as
+    /// [`crate::Engine::cursor_screen_row`] counts) at the top of the viewport,
+    /// as far as the scrollback allows.
+    Row(u64),
 }

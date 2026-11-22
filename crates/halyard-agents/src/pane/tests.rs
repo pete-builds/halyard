@@ -288,3 +288,68 @@ fn focus_changes_never_swallow_another_change() {
     assert!(b.take_changed(), "B's waiting change is still pending");
     assert!(b.attention().unread());
 }
+
+#[test]
+fn cleared_scrollback_forgets_closed_blocks() {
+    let clock = FakeClock::new();
+    let mut scan = SignalScanner::new();
+    let mut m = monitor(&clock);
+    m.on_history(40, 0, false);
+    feed(&mut scan, &mut m, b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07", 45, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]133;D;0\x07\x1b]133;A\x07", 47, clock.at());
+    m.on_history(42, 0, false);
+    assert_eq!(m.blocks().history().len(), 1, "growing scrollback keeps blocks");
+    let _ = m.take_blocks_changed();
+    // `clear`: scrollback dropped to 0. The old block's rows mean nothing now.
+    m.on_history(0, 0, false);
+    assert_eq!(m.blocks().history().len(), 0);
+    assert!(m.take_blocks_changed());
+    assert!(m.blocks().pending_prompt_row().is_some(), "the prompt being typed stays");
+}
+
+#[test]
+fn a_mark_above_the_newest_block_forgets_the_erased_blocks() {
+    // `clear` at rows 4..5 homes the cursor: its D lands on row 0.
+    let clock = FakeClock::new();
+    let mut scan = SignalScanner::new();
+    let mut m = monitor(&clock);
+    feed(&mut scan, &mut m, b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07", 2, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07", 4, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]133;C\x07", 5, clock.at());
+    assert_eq!(m.blocks().history().len(), 1);
+    feed(&mut scan, &mut m, b"\x1b]133;D;0\x07\x1b]133;A\x07", 0, clock.at());
+    assert_eq!(m.blocks().history().len(), 0, "both blocks sat on erased rows");
+    assert_eq!(m.blocks().pending_prompt_row(), Some(0));
+    // A prompt drawn again one row up (a two-line prompt redraw) keeps blocks.
+    feed(&mut scan, &mut m, b"\x1b]133;B\x07\x1b]133;C\x07", 1, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]133;D;0\x07\x1b]133;A\x07", 9, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]133;A\x07", 8, clock.at());
+    assert_eq!(m.blocks().history().len(), 1);
+}
+
+#[test]
+fn dropped_scrollback_moves_the_base_and_forgets_dropped_blocks() {
+    let clock = FakeClock::new();
+    let mut scan = SignalScanner::new();
+    let mut m = monitor(&clock);
+    m.on_history(100, 0, false);
+    // Two blocks: rows 10..=20 and 50..=60, counted from the session's first row.
+    for (a, c, d) in [(10, 11, 20), (50, 51, 60)] {
+        feed(&mut scan, &mut m, b"\x1b]133;A\x07\x1b]133;B\x07", a, clock.at());
+        feed(&mut scan, &mut m, b"\x1b]133;C\x07", c, clock.at());
+        feed(&mut scan, &mut m, b"\x1b]133;D;0\x07", d, clock.at());
+    }
+    assert_eq!(m.blocks().history().len(), 2);
+    // A full scrollback drops 30 rows (a page) while 30 new ones arrive: the
+    // row count stays the same, so only the drop count shows it.
+    m.on_history(100, 30, false);
+    assert_eq!(m.row_base(), 30);
+    let starts: Vec<_> = m.blocks().history().map(|b| b.start_row()).collect();
+    assert_eq!(starts, vec![Some(50)], "the block above the base is gone, the other keeps its row");
+    // A page dropped with the row count shrinking is still not a clear.
+    m.on_history(80, 50, false);
+    assert_eq!(m.blocks().history().len(), 1);
+    // A lost count forgets everything closed.
+    m.on_history(80, 50, true);
+    assert_eq!(m.blocks().history().len(), 0);
+}

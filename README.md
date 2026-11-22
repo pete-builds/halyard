@@ -35,11 +35,22 @@ library is built from source).
 brew install zig@0.15
 export PATH="$(brew --prefix zig@0.15)/bin:$PATH"
 cargo run --release -p halyard-app
-
-# NixOS / Nix
-nix develop
-cargo run --release -p halyard-app
 ```
+
+### Nix and NixOS
+
+The flake builds offline from pinned inputs (Ghostty's source and Zig packages included) on
+x86_64-linux, aarch64-linux and aarch64-darwin, which CI builds and tests on every pull request.
+
+```sh
+nix build github:pete-builds/halyard   # package into ./result
+nix develop                           # Rust, Zig 0.15.2 and the Linux libraries
+cargo test --workspace --locked       # inside the dev shell
+nix flake check                       # build, tests, clippy, fmt, pin and module checks
+```
+
+`nix run github:pete-builds/halyard` starts the terminal. NixOS and Home Manager modules
+(settings, themes, fonts, keybindings) are documented in [docs/nix.md](docs/nix.md).
 
 Install steps (macOS app, NixOS, Linux) are in [docs/INSTALL.md](docs/INSTALL.md); what Halyard
 defends and what it does not is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).

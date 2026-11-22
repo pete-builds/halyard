@@ -35,7 +35,10 @@ Halyard is a terminal first. Everything else is layered on top and can be turned
   `OutputObserver` does the same and can also ask for the cursor's absolute row at
   offsets it picks: the session feeds the engine up to each offset, reads the row, and
   continues. The app's shell integration and agent scanner (`halyard-agents::pane`)
-  plugs in there, so a prompt mark knows its row without a second parse.
+  plugs in there, so a prompt mark knows its row without a second parse. Rows count
+  from the session's first row: when a full scrollback drops its oldest rows (in
+  page-sized steps), the engine counts them through a pinned row and reports the count
+  after each chunk (`halyard_term::History`), so a recorded row keeps naming its line.
 - After consuming a burst of output the session thread builds a new `Frame` and publishes
   it as `Arc<Frame>`, at most once per 8 ms while output streams, then notifies the UI
   through a callback and an event channel (`FrameReady`, `TitleChanged`, `Bell`,

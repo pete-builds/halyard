@@ -68,15 +68,36 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 - Known gaps in the session layer: underline style (double, curly) and underline color are
   reduced to a single underline flag; Kitty graphics are not rendered; Option-as-Alt on
   macOS is off by default and only configurable through `SessionConfig::option_as_alt`.
-- [ ] `flake.nix`: `nix develop`, `nix build`, `nix run`, offline build (Ghostty source and
-      Zig packages pinned as inputs)
+- [x] `flake.nix`: `nix develop`, `nix build`, offline build (Ghostty source and Zig packages
+      pinned as inputs), on x86_64-linux, aarch64-linux, aarch64-darwin (`nix` workflow:
+      `nix flake check` incl. `checks.*.ghostty-pin`, plus the sandbox network control).
+      x86_64-darwin is not offered: the pinned nixpkgs dropped it.
+- [x] `nix run`: `apps.default` runs the packaged `halyard`, whose RUNPATH resolves all 14
+      libraries GPUI dlopens (`checks.*.package-contents`, with a control). On real NixOS
+      hardware (x86_64, KDE Plasma 6 Wayland, RTX 4070 Ti) at 5936fd0: `nix flake check` passed
+      and `nix run` opened Halyard. Not covered: aarch64-linux and X11 sessions on hardware
 - [ ] NixOS VM test: launches under Wayland and X11, screenshots
 - [x] macOS app bundle: `packaging/macos/build-app.sh` builds a universal `Halyard.app` (ad-hoc
       signed, icon from `packaging/icon/`) and a zip. Verified by hand on macOS arm64: built from
       the app-window branch, launched with `open`, process ran, `lipo -info` shows x86_64 and arm64,
       `codesign --verify` passes on the app and on the unzipped copy. Not covered: no automated test,
       the Intel slice has not been run, and the app is NOT notarized (see `docs/INSTALL.md`)
-- [ ] Linux desktop entry and icon (in the Nix flake PR)
+- [x] Linux desktop entry and icon: `dist/linux/halyard.desktop` (`StartupWMClass=halyard`) and
+      `dist/icons/halyard.svg` plus PNG 16 to 512, installed by the Nix package and checked by
+      `checks.*.package-contents` on x86_64-linux and aarch64-linux (`desktop-file-validate`,
+      `StartupWMClass=halyard` matching the app id "halyard") and inspected in the package built on
+      the real NixOS box. Not yet seen in a desktop launcher menu
+- [x] Flatpak host shells: inside Flatpak each pane runs `flatpak-spawn --host --watch-bus` with
+      the pane's directory and environment (`halyard_term::flatpak`; tests
+      `login_shell_runs_on_the_host_with_cwd_and_env`, `inside_flatpak_the_login_shell_runs_on_the_host`,
+      `outside_flatpak_the_program_runs_directly` and the rest of `flatpak::tests`). Unit tested only:
+      no real host shell has been started through `flatpak-spawn` yet
+- [x] Flatpak package (`packaging/flatpak/`, `docs/flatpak.md`): offline build on Freedesktop 26.08 for
+      x86_64 and aarch64 in CI (`.github/workflows/flatpak.yml`), bundle uploaded as an artifact; CI checks
+      the source lists against `Cargo.lock` and the Ghostty pin (`check-sources.py`), the installed
+      permissions exactly (`check-permissions.sh`), and libraries inside the runtime (`smoke-test.sh`, with a
+      control). Not covered: no window opened and no host shell started from the Flatpak; not on Flathub
+- [ ] Flatpak on a real Linux desktop: open a window, start a host shell, close a pane (pending)
 - [ ] Real-hardware runs: macOS arm64 (cypher), NixOS on a real GPU (pending)
 
 ## Phase 2: modern UI
@@ -133,7 +154,10 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       2-tab, 3-pane layout with a dragged divider, tab names and four directories came back
       after a relaunch (screenshots). Closing the last window saves an empty layout, so the
       next launch opens one new window.
-- [ ] Home Manager module: themes, fonts, keybindings, settings
+- [x] Home Manager module: themes, fonts, keybindings, settings (`checks.*.hm-module`
+      evaluates it with real Home Manager and compares the written TOML; NixOS module checked by
+      `checks.x86_64-linux.nixos-module`). The written files are loaded by halyard-config's own
+      parser in the check, and a key named like a secret in `settings` is an evaluation error.
 
 ## Phase 3: modern shell experience
 
@@ -157,8 +181,24 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
   (`halyard-term::OutputObserver`, `observer_sees_the_cursor_row_at_each_mark`); a real
   zsh or bash with the integration script sourced makes blocks with rows, statuses and
   command lines (`signals::tests::integration_script_in_a_real_shell_makes_blocks`).
-  Rows drift once scrollback is full and old rows are dropped (not handled yet).
-- [ ] Command blocks in the UI: navigate, copy output, failure marks, rerun (pending)
+  Rows survive a full scrollback dropping its oldest rows: the engine counts dropped
+  rows with a pinned row (`Engine::dropped_rows`) and block rows count from the
+  session's first row (`rows_stay_on_their_line_when_scrollback_drops_old_rows`,
+  `pane::tests::dropped_scrollback_moves_the_base_and_forgets_dropped_blocks`).
+- [x] Command blocks in the UI: `prev_prompt` and `next_prompt` scroll the prompt to the
+  top (`blocks_ui::tests::prompt_jumps_go_to_the_nearest_block_start`, and in a real zsh
+  `signals::tests::integration_script_in_a_real_shell_makes_blocks`;
+  `rows_text_and_scroll_to_row_use_screen_rows`), `copy_last_output`
+  (`last_output_is_the_newest_finished_block`, the same real-shell test), a danger-colored
+  margin bar beside failed commands (`failure_spans_are_clipped_to_the_viewport`), and a
+  palette entry that writes the script and copies the `install_line` for the configured
+  shell (`integration_line_writes_the_script_and_never_follows_a_symlink`). Blocks on rows
+  that `clear` erased are forgotten (`a_mark_above_the_newest_block_forgets_the_erased_blocks`,
+  `cleared_scrollback_forgets_closed_blocks`). A command with no output copies nothing
+  (`last_output_is_the_newest_finished_block`). Verified by debug-script screenshots on
+  macOS arm64 (prompt jumps, failure bars). Not built: rerun. Not handled: rows after a
+  window resize reflows lines, and a last output line without a trailing newline (it
+  shares the row of the next prompt, so it is not copied).
 - [ ] SQLite history and search
 
 ## Phase 4: agent awareness and the open protocol
@@ -229,7 +269,13 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
         dialogs, export the pane env vars, publish events, grants settings page
   - [ ] Peer uid rejection tested with a second real user (code path is a uid compare;
         not exercised by tests)
-- [ ] Agent dashboard with jump-to-pane: pending
+- [x] Agent dashboard: `agent_dashboard` (palette mode), every pane of every window in
+  the model's order with agent, tab title, cwd, branch, state with "since", last
+  notification and unread; Enter focuses the pane, its tab and its window
+  (`dashboard_ui::tests::rows_follow_the_dashboard_order_and_carry_their_targets`,
+  `ago_reads_naturally`). Verified by debug-script screenshots on macOS arm64 (the list,
+  and Enter switching to the waiting pane's tab). Not verified: jumping to a pane in
+  another window (code path written, no scripted second window).
 
 ## Phase 5: optional assistant and MCP
 
@@ -239,7 +285,16 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 ## Phase 6: production readiness
 
 - [ ] Flatpak package (see `docs/adr/0005-linux-distribution.md`)
-- [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane
+- [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane. Throughput is measured:
+      `crates/halyard-term/examples/throughput.rs` (engine parse, frame build, real PTY sessions,
+      headless key echo), results in `docs/PERFORMANCE.md`, and a `--quick` floor runs in CI. Line
+      buffered output (`yes | head`) went from 4.6 to 6.1 MB/s and from 33 s to 3.4 s of CPU per
+      100 MB on macOS (`trickling_output_is_read_in_batches`). The reader pause is macOS only
+      until a Linux A/B on the NixOS box is run. Not yet: startup, memory, end to end input
+      latency, GPU render time, multi-pane, Linux numbers
+- [ ] Scrollback is far shorter than configured: `scrollback_lines` reaches libghostty-vt's
+      `max_scrollback`, which Ghostty treats as bytes (247 rows kept at 200 columns for 10,000;
+      see `docs/PERFORMANCE.md`)
 - [x] Threat model written: `docs/THREAT_MODEL.md` (cites code in PRs that were still open when it was written)
 - [ ] Security review (no outside review yet)
 - [ ] Release automation: `.github/workflows/release.yml` (macOS zip, Linux tarballs, SHA256SUMS, provenance,

@@ -162,6 +162,16 @@ the same chord on a platform are an error.
 | `rename_tab` | `cmd+shift+i` | `ctrl+shift+i` |
 | `reload_config` | `cmd+shift+,` | `ctrl+shift+,` |
 | `open_config` | `cmd+,` | `ctrl+,` |
+| `prev_prompt`, `next_prompt` | `cmd+up`, `cmd+down` | `ctrl+shift+up`, `ctrl+shift+down` |
+| `copy_last_output` | `cmd+alt+c` | `ctrl+shift+alt+c` |
+
+`prev_prompt` and `next_prompt` scroll so the previous or next command's prompt is the top
+line, and `copy_last_output` copies the output of the last finished command. Both need
+shell integration; without it they do nothing. Halyard never edits your rc files. The
+palette's "Copy Shell Integration Line" writes the script for your configured shell (zsh,
+bash or fish) to `shell-integration/` next to `config.toml` and copies the one line that
+loads it, for you to paste into `~/.zshrc`, `~/.bashrc` or `config.fish`. The line checks
+`TERM_PROGRAM` itself, so other terminals never read the script.
 
 ## `[ai]`
 

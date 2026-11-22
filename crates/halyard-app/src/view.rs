@@ -25,6 +25,7 @@ use halyard_term::{
     Palette, Rgb, ScrollRequest, Session, SessionConfig, SessionError, SessionEvent,
 };
 
+use crate::blocks_ui::{self, Jump};
 use crate::decide::{self, Wheel};
 use crate::grid::{self, CellSize, TextRunSpec};
 use crate::keybind::{Copy, Paste};
@@ -100,6 +101,9 @@ pub struct PaneChrome {
     pub border: Option<Hsla>,
     /// Agent state badge in the top right corner.
     pub badge: Option<PaneBadge>,
+    /// Color of the margin mark beside commands that failed (shell integration
+    /// blocks with a non-zero status), or `None` for no marks.
+    pub failure: Option<Hsla>,
 }
 
 /// The small label a pane with an agent shows: what it is and its state.
@@ -160,6 +164,40 @@ pub fn pick_font_family<'a>(candidates: &[&'a str], installed: &[String]) -> &'a
 pub fn to_hsla(c: Rgb) -> Hsla {
     Rgba { r: f32::from(c.r) / 255.0, g: f32::from(c.g) / 255.0, b: f32::from(c.b) / 255.0, a: 1.0 }
         .into()
+}
+
+// Block rows count from the session's first row; screen rows (what the engine
+// scrolls to and reads) start after the rows dropped from the top of scrollback,
+// the monitor's `row_base`. These three convert at the view's call sites.
+
+/// The screen row a prompt jump scrolls to, from the viewport's scroll offset.
+fn prompt_scroll_row<C: halyard_shell::Clock>(
+    blocks: &halyard_shell::BlockTracker<C>,
+    scroll_offset: u64,
+    base: u64,
+    jump: Jump,
+) -> Option<u64> {
+    blocks_ui::prompt_target(blocks, scroll_offset + base, jump).map(|row| row.saturating_sub(base))
+}
+
+/// The screen rows of the last command's output, or `None` once any of them
+/// was dropped from scrollback (it cannot be copied whole).
+fn last_output_screen_rows<C: halyard_shell::Clock>(
+    blocks: &halyard_shell::BlockTracker<C>,
+    base: u64,
+) -> Option<(u64, u64)> {
+    let (first, last) = blocks_ui::last_output_rows(blocks)?;
+    Some((first.checked_sub(base)?, last.checked_sub(base)?))
+}
+
+/// Failure marks in viewport rows, from the viewport's scroll offset.
+fn viewport_failures<C: halyard_shell::Clock>(
+    blocks: &halyard_shell::BlockTracker<C>,
+    scroll_offset: u64,
+    base: u64,
+    rows: u16,
+) -> Vec<(u16, u16)> {
+    blocks_ui::failure_spans(blocks, scroll_offset + base, rows)
 }
 
 /// Where the grid sits in the window, and its size in cells.
@@ -375,6 +413,36 @@ impl TerminalView {
     /// event path, so it still notifies.
     pub fn set_seen(&mut self, seen: bool) -> bool {
         signals::lock(&self.monitor).set_focused(seen, SystemTime::now())
+    }
+
+    /// Scrolls so the previous or next command's prompt is the top row. Without
+    /// shell integration there are no blocks and nothing moves; past the last
+    /// prompt, [`Jump::Next`] returns to the live screen.
+    pub fn jump_prompt(&self, jump: Jump) {
+        let frame = self.session.latest_frame();
+        if frame.alt_screen {
+            return;
+        }
+        let target = {
+            let m = signals::lock(&self.monitor);
+            prompt_scroll_row(m.blocks(), frame.scroll.offset, m.row_base(), jump)
+        };
+        match (target, jump) {
+            (Some(row), _) => self.session.scroll(ScrollRequest::Row(row)),
+            (None, Jump::Next) => self.session.scroll(ScrollRequest::Bottom),
+            (None, Jump::Previous) => {}
+        }
+    }
+
+    /// The output of the last finished command, from the screen, or `None`
+    /// without shell integration or once it scrolled out of the scrollback.
+    #[must_use]
+    pub fn last_output(&self) -> Option<String> {
+        let (first, last) = {
+            let m = signals::lock(&self.monitor);
+            last_output_screen_rows(m.blocks(), m.row_base())?
+        };
+        self.session.screen_rows_text(first, last).map(|t| blocks_ui::tidy_output(&t))
     }
 
     /// The user typed or pasted.
@@ -1003,6 +1071,8 @@ struct PaintState {
     cursor_on: bool,
     marked: Option<String>,
     chrome: PaneChrome,
+    /// Viewport row spans of failed commands, for the margin marks.
+    failures: Vec<(u16, u16)>,
 }
 
 fn run_font(base: &Font, spec: &TextRunSpec) -> Font {
@@ -1136,6 +1206,12 @@ impl Render for TerminalView {
         let frame = self.session.latest_frame();
         let background = to_hsla(frame.background);
         let cursor_shape = settings::effective_cursor(frame.cursor.shape, self.style.cursor);
+        let failures = if self.chrome.failure.is_some() && !frame.alt_screen {
+            let m = signals::lock(&self.monitor);
+            viewport_failures(m.blocks(), frame.scroll.offset, m.row_base(), frame.rows)
+        } else {
+            Vec::new()
+        };
         let state = PaintState {
             frame,
             cell: self.cell,
@@ -1146,6 +1222,7 @@ impl Render for TerminalView {
             cursor_text: self.style.cursor_text,
             cursor_on: self.blink_on || !self.style.blink,
             marked: self.marked.clone(),
+            failures,
             chrome: self.chrome.clone(),
         };
         let (pad_x, pad_y) = (self.style.padding_x, self.style.padding_y);
@@ -1201,6 +1278,17 @@ impl Render for TerminalView {
                             cx,
                         );
                         paint_grid(origin, &state, window, cx);
+                        if let Some(color) = state.chrome.failure {
+                            // A thin bar in the left margin beside each failed command.
+                            let ch = state.cell.height;
+                            for (first, last) in &state.failures {
+                                let top = origin.y + px(f32::from(*first) * ch);
+                                let h = px(f32::from(last - first + 1) * ch);
+                                let bar =
+                                    Bounds::new(point(bounds.origin.x, top), size(px(2.0), h));
+                                window.paint_quad(fill(bar, color));
+                            }
+                        }
                         if let Some(dim) = state.chrome.dim {
                             window.paint_quad(fill(bounds, dim));
                         }
@@ -1291,5 +1379,34 @@ mod tests {
         assert_eq!(px_u32(8.5), 9);
         assert_eq!(px_u32(0.0), 1);
         assert_eq!(px_u32(f32::NAN), 1);
+    }
+
+    /// Blocks at absolute rows 110, 120, 130 (prompt, output on the next row, D
+    /// two below); 100 rows have been dropped from scrollback, so screen row 0
+    /// is block row 100.
+    #[test]
+    fn row_base_converts_between_block_and_screen_rows() {
+        use halyard_shell::{BlockTracker, ShellEvent, SystemClock};
+        let mut t = BlockTracker::new(SystemClock, 100);
+        for (row, code) in [(110, 0), (120, 1), (130, 0)] {
+            t.on_event(&ShellEvent::PromptStart { aid: None }, row);
+            t.on_event(&ShellEvent::CommandInputStart, row);
+            t.on_event(&ShellEvent::CommandExecuted, row + 1);
+            t.on_event(&ShellEvent::CommandFinished { exit_code: Some(code), aid: None }, row + 2);
+        }
+        let base = 100;
+        // Viewport at screen row 25 is block row 125: the previous prompt is
+        // block row 120, screen row 20.
+        assert_eq!(prompt_scroll_row(&t, 25, base, Jump::Previous), Some(20));
+        assert_eq!(prompt_scroll_row(&t, 25, base, Jump::Next), Some(30));
+        assert_eq!(prompt_scroll_row(&t, 10, base, Jump::Previous), None);
+        // Last output: block row 131 is screen row 31.
+        assert_eq!(last_output_screen_rows(&t, base), Some((31, 31)));
+        // Dropped from scrollback: nothing to copy rather than other text.
+        assert_eq!(last_output_screen_rows(&t, 132), None);
+        // The failed block (rows 120..=121) in a viewport at screen row 15,
+        // block row 115: viewport rows 5 and 6.
+        assert_eq!(viewport_failures(&t, 15, base, 10), vec![(5, 6)]);
+        assert_eq!(viewport_failures(&t, 22, base, 10), Vec::<(u16, u16)>::new());
     }
 }

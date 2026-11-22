@@ -103,13 +103,45 @@ fn shell_echo_reaches_the_screen() {
 }
 
 #[test]
+fn missing_home_starts_the_shell_in_root() {
+    // A HOME that does not exist (containers, service accounts, the Nix build
+    // sandbox) used to make the spawn fail with "No such file or directory".
+    let mut cfg = config(80, 24);
+    cfg.env.push(("HOME".to_owned(), "/nonexistent/halyard-home".to_owned()));
+    let s = Session::spawn(cfg).expect("spawn with a missing HOME");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    run(&s, "echo cwd:$(pwd)");
+    wait_for(&s, "the shell's cwd", |f| row_equal(f, "cwd:/").is_some());
+}
+
+#[test]
+fn existing_home_is_the_starting_directory() {
+    // The other half of the HOME fallback: with a real HOME and no cwd, the
+    // shell starts in HOME, not in "/".
+    let home = tempfile::tempdir().expect("temp HOME");
+    let home_path = home.path().canonicalize().expect("canonical HOME");
+    let mut cfg = config(200, 24);
+    cfg.env.push(("HOME".to_owned(), home_path.to_string_lossy().into_owned()));
+    let s = Session::spawn(cfg).expect("spawn with a temp HOME");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    run(&s, "echo cwd:$(pwd -P)");
+    let want = format!("cwd:{}", home_path.display());
+    wait_for(&s, "the shell's cwd", |f| row_equal(f, &want).is_some());
+}
+
+#[test]
 fn default_program_is_a_login_shell() {
     // No program: the user's shell from $SHELL or passwd, run as a login
     // shell (argv[0] starts with '-'). Its prompt is whatever the user has.
     let s = Session::spawn(SessionConfig::default()).expect("spawn login shell");
     s.write("echo login-check:$0\r");
+    // The line is typed before the first prompt appears, so the output can land
+    // after the prompt ("-bash-5.3$ login-check:-bash", seen in the Nix sandbox)
+    // and a long prompt can wrap it onto the next row (seen on macOS with a long
+    // hostname). Search the rows joined together. The typed command itself reads
+    // "login-check:$0" and cannot match.
     wait_for(&s, "login shell argv[0]", |f| {
-        (0..f.rows).any(|r| f.row_text(r).starts_with("login-check:-"))
+        (0..f.rows).map(|r| f.row_text(r)).collect::<String>().contains("login-check:-")
     });
 }
 
@@ -174,6 +206,38 @@ fn output_flood_keeps_up() {
     // Coalescing: far fewer frames than output chunks were published.
     let f = s.latest_frame();
     assert!(f.generation < 20_000, "published {} frames", f.generation);
+}
+
+// The reader pauses after small reads on macOS only (see `PAUSE_AFTER_SMALL_READ`
+// in session.rs); Linux is not measured yet.
+#[cfg(target_os = "macos")]
+#[test]
+fn trickling_output_is_read_in_batches() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // `head` writing to a terminal is line buffered: one 2-byte `write` per
+    // line. Read the moment it arrived, that reached the session as about 8
+    // bytes per chunk on macOS, each with its own poll, read, channel send and
+    // wakeup (`docs/PERFORMANCE.md`). The reader now pauses briefly after a
+    // small read so the output collects in the PTY first.
+    let bytes = Arc::new(AtomicUsize::new(0));
+    let chunks = Arc::new(AtomicUsize::new(0));
+    let (b, c) = (Arc::clone(&bytes), Arc::clone(&chunks));
+    let s = Session::spawn(SessionConfig {
+        program: Some(PathBuf::from("/bin/sh")),
+        args: vec!["-c".into(), "yes | head -c 400000; echo trickle-done".into()],
+        output_tap: Some(Box::new(move |chunk: &[u8]| {
+            b.fetch_add(chunk.len(), Ordering::Relaxed);
+            c.fetch_add(1, Ordering::Relaxed);
+        })),
+        ..config(80, 24)
+    })
+    .expect("spawn /bin/sh");
+    wait_for(&s, "end of output", |f| row_equal(f, "trickle-done").is_some());
+    let (bytes, chunks) = (bytes.load(Ordering::Relaxed), chunks.load(Ordering::Relaxed));
+    assert!(bytes > 400_000, "only {bytes} bytes arrived");
+    let average = bytes / chunks.max(1);
+    assert!(average >= 32, "{average} bytes per chunk ({chunks} chunks)");
 }
 
 #[test]
@@ -472,7 +536,7 @@ impl halyard_term::OutputObserver for RowAtOsc {
     fn at_mark(&mut self, _index: usize, row: u64) {
         self.rows.lock().unwrap().push(row);
     }
-    fn chunk_done(&mut self) {
+    fn chunk_done(&mut self, _history: Option<halyard_term::History>) {
         *self.chunks.lock().unwrap() += 1;
     }
 }
@@ -503,6 +567,28 @@ fn observer_sees_the_cursor_row_at_each_mark() {
     assert!(*chunks.lock().unwrap() >= 1);
 }
 
+/// Newlines earlier in the same chunk move the cursor before the mark: the row
+/// must be read after the engine has the bytes up to the mark, not before the
+/// chunk (which would report the `a` line).
+#[test]
+fn the_mark_row_counts_newlines_earlier_in_the_same_chunk() {
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let chunks = Arc::new(Mutex::new(0));
+    let observer = RowAtOsc { rows: Arc::clone(&rows), chunks: Arc::clone(&chunks) };
+    let s = Session::spawn(SessionConfig { observer: Some(Box::new(observer)), ..config(40, 10) })
+        .expect("spawn");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    // One printf, one write: `a`, `b` and `c` reach the PTY with the mark.
+    run(&s, "printf 'a\\nb\\nc\\033]0;y\\007\\n'; echo nl-done");
+    let f = wait_for(&s, "the end", |f| row_equal(f, "nl-done").is_some());
+    let rows = rows.lock().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let c = absolute_row_of(&f, "c").expect("c on screen");
+    let a = absolute_row_of(&f, "a").expect("a on screen");
+    assert_eq!(c, a + 2);
+    assert_eq!(rows[0], c, "the mark is on the `c` line: {rows:?}");
+}
+
 #[test]
 fn an_invalid_session_id_is_replaced() {
     for bad in ["", "has space", "semi;colon", &"x".repeat(129)] {
@@ -510,5 +596,91 @@ fn an_invalid_session_id_is_replaced() {
             .expect("spawn");
         assert_ne!(s.id(), bad);
         assert_eq!(s.id().len(), 32, "a fresh id");
+    }
+}
+
+/// Finds the absolute row of the line reading `text`, from the viewport.
+fn absolute_row_of(f: &Frame, text: &str) -> Option<u64> {
+    row_equal(f, text).map(|r| f.scroll.offset + u64::from(r))
+}
+
+#[test]
+fn rows_text_and_scroll_to_row_use_screen_rows() {
+    let s = spawn(40, 6);
+    run(&s, "printf 'first\\nsecond\\n'; seq 1 30; echo rows-done");
+    let f = wait_for(&s, "the end", |f| row_equal(f, "rows-done").is_some());
+    let done = absolute_row_of(&f, "rows-done").unwrap();
+    // `seq 1 30` ends on the row above `rows-done`; `first` is 32 rows up.
+    assert_eq!(s.screen_rows_text(done - 1, done - 1).as_deref(), Some("30"));
+    let first = done - 32;
+    assert_eq!(s.screen_rows_text(first, first + 2).as_deref(), Some("first\nsecond\n1"));
+    assert_eq!(s.screen_rows_text(5, 4), None);
+    assert_eq!(s.screen_rows_text(1_000_000, 1_000_001), None);
+    // Scrolling to a row puts it at the top of the viewport.
+    s.scroll(ScrollRequest::Row(first));
+    let f = wait_for(&s, "scrolled to `first`", |f| f.row_text(0) == "first");
+    assert_eq!(f.scroll.offset, first);
+    s.scroll(ScrollRequest::Row(u64::MAX));
+    wait_for(&s, "clamped at the bottom", |f| f.scroll.at_bottom());
+}
+
+/// Records rows at OSC marks and the last history report, for
+/// `rows_stay_on_their_line_when_scrollback_drops_old_rows`.
+struct DropWatch {
+    rows: Arc<Mutex<Vec<u64>>>,
+    history: Arc<Mutex<Option<halyard_term::History>>>,
+    inner: RowAtOsc,
+}
+
+impl halyard_term::OutputObserver for DropWatch {
+    fn scan(&mut self, chunk: &[u8], marks: &mut Vec<usize>) {
+        self.inner.scan(chunk, marks);
+    }
+    fn at_mark(&mut self, _index: usize, row: u64) {
+        self.rows.lock().unwrap().push(row);
+    }
+    fn chunk_done(&mut self, history: Option<halyard_term::History>) {
+        if let Some(mut h) = history {
+            let mut last = self.history.lock().unwrap();
+            // Keep `lost` once any chunk reported it.
+            h.lost |= last.is_some_and(|l| l.lost);
+            *last = Some(h);
+        }
+    }
+}
+
+#[test]
+fn rows_stay_on_their_line_when_scrollback_drops_old_rows() {
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let history = Arc::new(Mutex::new(None));
+    let inner =
+        RowAtOsc { rows: Arc::new(Mutex::new(Vec::new())), chunks: Arc::new(Mutex::new(0)) };
+    let observer = DropWatch { rows: Arc::clone(&rows), history: Arc::clone(&history), inner };
+    let s = Session::spawn(SessionConfig {
+        observer: Some(Box::new(observer)),
+        scrollback_lines: 200,
+        ..config(40, 6)
+    })
+    .expect("spawn");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    // Mark A, enough lines to make the scrollback drop old rows, mark B.
+    run(
+        &s,
+        "printf 'mA\\033]0;x\\007\\n'; seq 1 20000; printf 'mB\\033]0;y\\007\\n'; echo drop-done",
+    );
+    let f = wait_for(&s, "the end", |f| (0..f.rows).any(|r| f.row_text(r) == "drop-done"));
+    let h = history.lock().unwrap().expect("a history report");
+    let rows = rows.lock().unwrap().clone();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(h.dropped > 0, "the scrollback dropped rows: {h:?}");
+    // Mark B's row, minus the rows dropped, is the screen row of `mB`.
+    let mb = (0..f.rows).find(|&r| f.row_text(r) == "mB").expect("mB on screen");
+    assert_eq!(rows[1] - h.dropped, f.scroll.offset + u64::from(mb), "{rows:?} {h:?}");
+    // And unless a chunk dropped more than could be counted (then `lost` is set
+    // and the app forgets old blocks), the two marks stay 20001 lines apart
+    // though the rows between them were dropped. Which case happens depends on
+    // how the PTY splits the output (macOS: counted; Linux CI: lost).
+    if !h.lost {
+        assert_eq!(rows[1] - rows[0], 20_001, "{rows:?} {h:?}");
     }
 }
