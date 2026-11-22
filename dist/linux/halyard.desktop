@@ -7,5 +7,6 @@ Exec=halyard
 Icon=halyard
 Terminal=false
 StartupNotify=true
+StartupWMClass=halyard
 Categories=System;TerminalEmulator;
 Keywords=terminal;shell;console;command;prompt;

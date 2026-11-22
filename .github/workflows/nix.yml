@@ -70,6 +70,25 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: nix flake check --all-systems --no-build --no-update-lock-file
 
+      - name: Home Manager refuses a key in settings without printing it
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          set +e
+          log="$(nix eval --impure --expr 'import ./nix/tests/secret-canary.nix ./.' 2>&1)"
+          status=$?
+          set -e
+          tail -n 15 <<<"$log"
+          if [ "$status" -eq 0 ]; then
+            echo "::error::a config with api_key evaluated"
+            exit 1
+          fi
+          grep -q "refusing to write ai.providers\[0\]" <<<"$log"
+          if grep -q "sk-halyard-canary-7f3a" <<<"$log"; then
+            echo "::error::the key's value appears in the error output"
+            exit 1
+          fi
+          echo "ok: refused, and the value was not printed"
+
       - name: nix flake check
         run: nix flake check -L --no-update-lock-file
 

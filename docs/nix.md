@@ -85,7 +85,10 @@ The package also installs `share/applications/halyard.desktop` (checked by
 ```
 
 `programs.halyard.enable` installs the package system wide and sets
-`hardware.graphics.enable = true` (with `mkDefault`, so your own setting wins). Without the
+`hardware.graphics.enable = true` (with `mkDefault`, so your own setting wins).
+`programs.halyard.fonts.enable = true` (off by default) also installs JetBrains Mono: OFL-1.1,
+designed for code, with box drawing and powerline glyphs. It does not change the system's
+default monospace font; select it with `font.family = "JetBrains Mono"`. Without the
 module, add `halyard.packages.${system}.default` to `environment.systemPackages`, or use
 `halyard.overlays.default` and `pkgs.halyard`.
 
@@ -151,7 +154,7 @@ The module manages `~/.config/halyard/config.toml` and user themes. Halyard read
 | Option | Meaning |
 |--------|---------|
 | `enable` | Install Halyard and write its config. |
-| `package` | The package to install. `null` writes the config only. Default: this flake's package. |
+| `package` | The package to install. `null` writes the config only. Default: this flake's package, or `null` on a system the flake does not build (x86_64-darwin). |
 | `settings` | Any keys from [configuration.md](configuration.md), written as `config.toml`. Nothing is written when it is empty. |
 | `font.family`, `font.size` | Shortcuts for `settings.font.family` and `settings.font.size`. |
 | `keybindings` | Shortcut for `settings.keybindings`: `"chord" = "action"`. |
@@ -159,6 +162,16 @@ The module manages `~/.config/halyard/config.toml` and user themes. Halyard read
 
 Setting the same key through a shortcut and through `settings` with different values is an
 evaluation error, not a silent override.
+
+**Never put a credential in `settings`.** Everything there is copied into the world-readable
+`/nix/store` (and into any binary cache you push to). The module refuses, at evaluation time and
+without printing the value, any key named like a secret (containing key, token, secret,
+password, passwd or auth), the same rule Halyard applies when it reads the file. For an AI
+provider, export the key in an environment variable and name it with
+`api_key_env = "ANTHROPIC_API_KEY"`.
+
+The written `config.toml` and theme files are checked in CI by halyard-config's own parser
+(`crates/halyard-config/examples/check_files.rs`).
 
 ### nix-darwin
 
