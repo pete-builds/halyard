@@ -2392,6 +2392,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "halyard-agents"
+version = "0.1.0-dev"
+dependencies = [
+ "halyard-shell",
+ "libc",
+ "portable-pty",
+]
+
+[[package]]
 name = "halyard-config"
 version = "0.1.0-dev"
 dependencies = [
@@ -2401,6 +2410,13 @@ dependencies = [
  "serde",
  "tempfile",
  "toml 1.2.2+spec-1.1.0",
+]
+
+[[package]]
+name = "halyard-shell"
+version = "0.1.0-dev"
+dependencies = [
+ "portable-pty",
 ]
 
 [[package]]
