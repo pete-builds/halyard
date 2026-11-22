@@ -15,12 +15,20 @@ path = "src/main.rs"
 [dependencies]
 futures = "0.3"
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+halyard-agents = { path = "../halyard-agents" }
 halyard-config = { path = "../halyard-config" }
+halyard-shell = { path = "../halyard-shell" }
 halyard-term.workspace = true
 halyard-workspace = { path = "../halyard-workspace" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Desktop notifications through the freedesktop interface (D-Bus). zbus 5 is
+# already in the Linux build through GPUI's portal crate (ashpd); this adds only
+# its blocking API, no new crates.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
@@ -28,11 +36,12 @@ tempfile = "3.27.0"
 [features]
 # Debug-only scripted driving and window screenshots (HALYARD_DEBUG_SCRIPT),
 # used to verify the window on machines with no one at the keyboard.
-debug-script = ["dep:core-graphics", "dep:objc", "dep:png", "dep:raw-window-handle"]
+debug-script = ["dep:core-graphics", "dep:png", "dep:raw-window-handle"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = { version = "0.24", optional = true }
-objc = { version = "0.2", optional = true }
+# Desktop notifications (NSUserNotificationCenter) and the debug-script driver.
+objc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies.png]
 version = "0.18"

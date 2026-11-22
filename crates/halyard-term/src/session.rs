@@ -45,6 +45,29 @@ pub type NotifyFn = Arc<dyn Fn() + Send + Sync>;
 /// It runs on the session thread and must return quickly.
 pub type OutputTap = Box<dyn FnMut(&[u8]) + Send>;
 
+/// Sees raw PTY output on the session thread and learns where the cursor was at
+/// chosen points in it, for shell integration marks that need the row they
+/// occurred on (see `halyard_shell::scanner`, "Locating events").
+///
+/// For each chunk the session calls [`OutputObserver::scan`] first. When the
+/// observer asks for no marks the chunk goes to the engine in one piece, so an
+/// observer that finds nothing costs one scan per chunk. Otherwise the engine is
+/// fed up to each mark, [`OutputObserver::at_mark`] gets the cursor's absolute
+/// row there, and [`OutputObserver::chunk_done`] runs after the rest of the chunk.
+/// Every call runs on the session thread and must return quickly.
+pub trait OutputObserver: Send {
+    /// Looks at a chunk before the engine does. Pushes onto `marks` the offsets
+    /// (ascending, each at most `chunk.len()`) after which the cursor row is
+    /// wanted.
+    fn scan(&mut self, chunk: &[u8], marks: &mut Vec<usize>);
+    /// The engine has consumed the chunk up to mark number `index` (in the order
+    /// pushed by `scan`); `row` is the cursor's row counted from the top of
+    /// scrollback (see [`Engine::cursor_screen_row`]).
+    fn at_mark(&mut self, index: usize, row: u64);
+    /// The whole chunk has been consumed.
+    fn chunk_done(&mut self);
+}
+
 /// How to start a session.
 pub struct SessionConfig {
     /// Program to run. `None` runs the user's login shell (see
@@ -76,6 +99,13 @@ pub struct SessionConfig {
     pub notify: Option<NotifyFn>,
     /// Sees raw output before the engine (for shell-integration scanners).
     pub output_tap: Option<OutputTap>,
+    /// Sees raw output and the cursor row at the points it asks for.
+    pub observer: Option<Box<dyn OutputObserver>>,
+    /// The `HALYARD_SESSION_ID` to give the program, when the caller needs to
+    /// know it before the session starts (see [`new_session_id`]). Must be 1 to
+    /// 128 characters from `A-Z a-z 0-9 . _ -`; anything else is replaced by a
+    /// fresh id. `None` makes a fresh id.
+    pub session_id: Option<String>,
 }
 
 impl Default for SessionConfig {
@@ -95,6 +125,8 @@ impl Default for SessionConfig {
             option_as_alt: false,
             notify: None,
             output_tap: None,
+            observer: None,
+            session_id: None,
         }
     }
 }
@@ -116,6 +148,8 @@ impl fmt::Debug for SessionConfig {
             .field("option_as_alt", &self.option_as_alt)
             .field("notify", &self.notify.is_some())
             .field("output_tap", &self.output_tap.is_some())
+            .field("observer", &self.observer.is_some())
+            .field("session_id", &self.session_id)
             .finish()
     }
 }
@@ -240,8 +274,16 @@ fn passwd_shell() -> Option<PathBuf> {
     }
 }
 
-fn new_session_id() -> String {
+/// A fresh pane id for `HALYARD_SESSION_ID`: 32 lowercase hex characters.
+#[must_use]
+pub fn new_session_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
+}
+
+/// True if `id` is a valid `HALYARD_SESSION_ID` (`docs/protocol.md`).
+fn valid_session_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 /// Inherited variables that describe the terminal Halyard was launched from
@@ -339,7 +381,28 @@ fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
         eprintln!("halyard-term: HOME {home:?} is not a directory; starting in /");
         cmd.cwd("/");
     }
+    if let Some(lang) =
+        default_locale(|k| cmd.get_env(k).map(OsString::from), cfg!(target_os = "macos"))
+    {
+        cmd.env("LANG", lang);
+    }
     cmd
+}
+
+/// The `LANG` to add when the child's environment names no locale at all.
+///
+/// Apps started from the macOS Dock or Finder, and many service and container
+/// environments, have no `LANG`, `LC_CTYPE` or `LC_ALL`. Shells then run in the C
+/// locale and mishandle UTF-8 (zsh line editing, paths with non-ASCII names).
+/// Terminal.app and iTerm2 fill in a UTF-8 locale the same way. A locale the user
+/// set anywhere (even an empty-valued one is treated as unset) is never replaced.
+fn default_locale(env: impl Fn(&str) -> Option<OsString>, macos: bool) -> Option<&'static str> {
+    let set = |k: &str| env(k).is_some_and(|v| !v.is_empty());
+    if set("LC_ALL") || set("LC_CTYPE") || set("LANG") {
+        return None;
+    }
+    // macOS has no C.UTF-8; glibc 2.35+ and musl have it built in.
+    Some(if macos { "en_US.UTF-8" } else { "C.UTF-8" })
 }
 
 fn pty_size(cols: u16, rows: u16, cell_width: u32, cell_height: u32) -> PtySize {
@@ -364,7 +427,11 @@ fn spawn_thread(
 impl Session {
     /// Start `config.program` (or the login shell) in a new PTY.
     pub fn spawn(mut config: SessionConfig) -> Result<Self, SessionError> {
-        let id = new_session_id();
+        let id = config
+            .session_id
+            .take()
+            .filter(|id| valid_session_id(id))
+            .unwrap_or_else(new_session_id);
         let spawn_err = |e: &dyn fmt::Display| SessionError::Spawn(format!("{e:#}"));
         let size = pty_size(config.cols, config.rows, config.cell_width, config.cell_height);
         let pair = native_pty_system().openpty(size).map_err(|e| spawn_err(&e))?;
@@ -421,6 +488,8 @@ impl Session {
             frame: Arc::clone(&frame),
             notify: config.notify.take(),
             tap: config.output_tap.take(),
+            observer: config.observer.take(),
+            marks: Vec::new(),
         };
         let (cols, rows, cw, ch) =
             (config.cols, config.rows, config.cell_width, config.cell_height);
@@ -684,6 +753,9 @@ struct SessionThread {
     frame: Arc<Mutex<Arc<Frame>>>,
     notify: Option<NotifyFn>,
     tap: Option<OutputTap>,
+    observer: Option<Box<dyn OutputObserver>>,
+    /// Reused buffer for the observer's marks.
+    marks: Vec<usize>,
 }
 
 impl SessionThread {
@@ -749,6 +821,26 @@ impl SessionThread {
         }
     }
 
+    /// Feeds a chunk to the engine, stopping at the observer's marks to read the
+    /// cursor row.
+    fn feed_engine(&mut self, engine: &mut Engine, chunk: &[u8]) {
+        let Some(observer) = self.observer.as_mut() else {
+            engine.write(chunk);
+            return;
+        };
+        self.marks.clear();
+        observer.scan(chunk, &mut self.marks);
+        let mut done = 0;
+        for (index, &mark) in self.marks.iter().enumerate() {
+            let mark = mark.clamp(done, chunk.len());
+            engine.write(&chunk[done..mark]);
+            done = mark;
+            observer.at_mark(index, engine.cursor_screen_row());
+        }
+        engine.write(&chunk[done..]);
+        observer.chunk_done();
+    }
+
     fn run(mut self, mut engine: Engine) {
         self.publish(&mut engine);
         let mut last_publish = Instant::now();
@@ -777,7 +869,7 @@ impl SessionThread {
                         if let Some(tap) = self.tap.as_mut() {
                             tap(&chunk);
                         }
-                        engine.write(&chunk);
+                        self.feed_engine(&mut engine, &chunk);
                         let fx = engine.take_effects();
                         self.to_pty(fx.pty_reply);
                         if fx.bell {
@@ -947,6 +1039,37 @@ mod tests {
         assert_eq!((s.cols, s.rows), (1000, 1000));
         assert_eq!(s.pixel_width, u16::MAX);
         assert_eq!(pty_size(0, 0, 8, 16).cols, 1);
+    }
+
+    #[test]
+    fn a_utf8_locale_is_added_only_when_none_is_set() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| OsString::from(v))
+        };
+        assert_eq!(default_locale(env(&[]), true), Some("en_US.UTF-8"));
+        assert_eq!(default_locale(env(&[]), false), Some("C.UTF-8"));
+        assert_eq!(default_locale(env(&[("LANG", "")]), false), Some("C.UTF-8"));
+        assert_eq!(default_locale(env(&[("LANG", "de_DE.UTF-8")]), true), None);
+        assert_eq!(default_locale(env(&[("LC_CTYPE", "UTF-8")]), true), None);
+        assert_eq!(default_locale(env(&[("LC_ALL", "C")]), false), None);
+    }
+
+    #[test]
+    fn the_child_gets_a_locale_even_when_halyard_has_none() {
+        let config = SessionConfig {
+            env_remove: vec!["LANG".into(), "LC_ALL".into(), "LC_CTYPE".into()],
+            ..SessionConfig::default()
+        };
+        let cmd = build_command(&config, "abc123");
+        let lang = cmd.get_env("LANG").and_then(|v| v.to_str()).map(str::to_owned);
+        assert!(lang.as_deref().is_some_and(|l| l.ends_with("UTF-8")), "{lang:?}");
+
+        let config = SessionConfig {
+            env: vec![("LANG".into(), "de_DE.UTF-8".into())],
+            ..SessionConfig::default()
+        };
+        let cmd = build_command(&config, "abc123");
+        assert_eq!(cmd.get_env("LANG").and_then(|v| v.to_str()), Some("de_DE.UTF-8"));
     }
 
     #[test]

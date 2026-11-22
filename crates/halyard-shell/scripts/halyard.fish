@@ -6,8 +6,9 @@
 # Otherwise (fish 3, or fish 4 with `set -Ua fish_features no-mark-prompt`) it also
 # emits the OSC 133 marks and OSC 633;E with the command line.
 #
+# fish 4.0 to 4.2 send no B mark, so there the script wraps fish_prompt to append it.
 # Known gaps of fish's own marks, not filled here: fish 4.0.0 sends no command text,
-# fish 4.0 to 4.2 send no B mark, and fish 4.8 and later turn marking off when they
+# and fish 4.8 and later turn marking off when they
 # believe they run in Konsole (`status test-feature` may not reflect that). Its marks
 # carry no `aid=`; Halyard's block model treats an aid-less shell as its own level.
 #
@@ -36,6 +37,15 @@ if test "$TERM_PROGRAM" = Halyard; and status is-interactive; and not set -q __h
         end
     end
 
+    # fish 4.0 to 4.2 mark prompts natively but send no B mark (fish 4.3 added it), and the
+    # blocks need B to know where the command line starts. Append it to the prompt there.
+    set -l __halyard_needs_b 0
+    if test $__halyard_native_marks = 0
+        set __halyard_needs_b 1
+    else if string match -qr '^4\.[0-2](\.|-|$)' -- $version
+        set __halyard_needs_b 1
+    end
+
     if test $__halyard_native_marks = 0
         function __halyard_prompt_mark --on-event fish_prompt
             printf '\e]133;A;aid=%d\a' $fish_pid
@@ -51,7 +61,9 @@ if test "$TERM_PROGRAM" = Halyard; and status is-interactive; and not set -q __h
             set -l s $status
             printf '\e]133;D;%d;aid=%d\a' $s $fish_pid
         end
+    end
 
+    if test $__halyard_needs_b = 1
         if functions -q fish_prompt; and not functions -q __halyard_user_fish_prompt
             functions -c fish_prompt __halyard_user_fish_prompt
             function fish_prompt

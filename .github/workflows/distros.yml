@@ -1,0 +1,107 @@
+name: distros
+
+# Official Linux targets: Fedora, Debian, Arch and Ubuntu. Each job builds and runs the
+# headless test suite inside the distro's own container image with that distro's own
+# packages. This proves the build and the PTY tests only, not a desktop session.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: distros-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Container images ship no UTF-8 locale (Arch's sets one); every desktop session has one.
+  LANG: C.UTF-8
+  RUSTFLAGS: -D warnings
+  # Official Zig 0.15.2 tarball; checksum from https://ziglang.org/download/index.json
+  ZIG_URL: https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+  ZIG_SHA256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+  # rustup-init 1.28.2; checksum from the .sha256 file beside it on static.rust-lang.org
+  RUSTUP_URL: https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init
+  RUSTUP_SHA256: 20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c
+
+jobs:
+  distro:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fedora
+            family: fedora
+            image: fedora:latest@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c
+          - name: debian
+            family: debian
+            image: debian:stable@sha256:3f0347f4b50e7a54a91d1beaf6ce6fa5aec392347da6a9184b5bfe4e1b814538
+          - name: arch
+            family: arch
+            image: archlinux:latest@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
+          - name: ubuntu
+            family: debian
+            image: ubuntu:24.04@sha256:9c7f200c07e3d4a03e7249d2c16bf66a51120fb876aa2242cf31451412543289
+    steps:
+      - name: Packages (dnf)
+        if: matrix.family == 'fedora'
+        run: |
+          dnf install -y gcc gcc-c++ make pkgconf-pkg-config git curl xz tar \
+            libxkbcommon-devel libxkbcommon-x11-devel libxcb-devel wayland-devel \
+            vulkan-loader-devel fontconfig-devel freetype-devel \
+            libX11-devel libXcursor-devel libXi-devel libXrandr-devel \
+            vim-enhanced less htop zsh fish bash procps-ng
+      - name: Packages (apt)
+        if: matrix.family == 'debian'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates gcc g++ make \
+            pkg-config git curl xz-utils tar \
+            libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libwayland-dev \
+            libvulkan-dev libfontconfig-dev libfreetype-dev \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev libx11-xcb-dev \
+            vim less htop zsh fish bash procps
+      - name: Packages (pacman)
+        if: matrix.family == 'arch'
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git curl xz tar \
+            libxkbcommon libxkbcommon-x11 libxcb wayland vulkan-icd-loader \
+            vulkan-headers fontconfig freetype2 libx11 libxcursor libxi libxrandr \
+            vim less htop zsh fish bash procps-ng
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Zig 0.15.2
+        run: |
+          curl -fsSL --retry 3 -o /tmp/zig.tar.xz "$ZIG_URL"
+          echo "$ZIG_SHA256  /tmp/zig.tar.xz" | sha256sum -c -
+          mkdir -p /opt/zig
+          tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          echo /opt/zig >> "$GITHUB_PATH"
+          /opt/zig/zig version
+      - name: rustup (no default toolchain; rust-toolchain.toml picks one)
+        run: |
+          curl -fsSL --retry 3 -o /tmp/rustup-init "$RUSTUP_URL"
+          echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.name }}
+      - name: Build
+        run: cargo build --release -p halyard-app --locked
+      - name: Test
+        env:
+          CI: "1"
+        run: cargo test --workspace --locked
