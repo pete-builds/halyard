@@ -29,6 +29,66 @@ let
   tomlFormat = pkgs.formats.toml { };
   system = pkgs.stdenv.hostPlatform.system;
 
+  # Mirrors halyard-config's rule: a key NAME containing one of these
+  # (case-insensitive) is refused, because its value may be a credential.
+  # Checked at evaluation time, before anything is written to the
+  # world-readable store. Exempt, as in halyard-config: `api_key_env` (it holds
+  # the name of a variable, not a key) and everything under the top-level
+  # `keybindings` table (chords, not secrets).
+  secretFragments = [
+    "key"
+    "token"
+    "secret"
+    "password"
+    "passwd"
+    "auth"
+  ];
+  looksSecret =
+    name: name != "api_key_env" && lib.any (f: lib.hasInfix f (lib.toLower name)) secretFragments;
+
+  # Where each secret-looking name is, as a path such as `window.auth_token`.
+  # Under `ai` only the section is reported, as halyard-config does, in case
+  # the name itself was pasted from a credential. Values are never read.
+  secretPaths =
+    let
+      walk =
+        path: inAi: value:
+        if builtins.isAttrs value then
+          lib.concatLists (
+            lib.mapAttrsToList (
+              name: v:
+              let
+                here = if path == "" then name else "${path}.${name}";
+                ai = inAi || (path == "" && name == "ai");
+              in
+              if path == "" && name == "keybindings" then
+                [ ]
+              else
+                lib.optional (looksSecret name) (if ai then path else here) ++ walk here ai v
+            ) value
+          )
+        else if builtins.isList value then
+          lib.concatLists (lib.imap0 (i: walk "${path}[${toString i}]" inAi) value)
+        else
+          [ ];
+    in
+    walk "" false;
+
+  checkedSettings =
+    settings:
+    let
+      found = lib.unique (secretPaths settings);
+    in
+    if found == [ ] then
+      settings
+    else
+      throw ''
+        programs.halyard.settings: refusing to write ${lib.concatStringsSep ", " found}: a key is
+        named like a secret (key, token, secret, password, passwd or auth). Nix would copy it into
+        the world-readable /nix/store. Export the credential in an environment variable and set
+        `api_key_env = "NAME_OF_VARIABLE"` on the `ai.providers` entry instead.
+      '';
+
   themeModule = types.submodule (
     { name, ... }:
     {
@@ -48,11 +108,15 @@ in
 
     package = mkOption {
       type = types.nullOr types.package;
+      # null on a system the flake does not build for (such as x86_64-darwin,
+      # which nixpkgs dropped), so the config files can still be managed there.
       default = self.packages.${system}.default or null;
-      defaultText = literalExpression "halyard.packages.\${system}.default";
+      defaultText = literalExpression "halyard.packages.\${system}.default, or null where the flake has no package";
       description = ''
         The Halyard package to install. Set to `null` to manage only the
         configuration files, for example when Halyard is installed another way.
+        Defaults to `null` on systems the flake does not build for
+        (x86_64-darwin).
       '';
     };
 
@@ -69,7 +133,10 @@ in
       description = ''
         Configuration written to {file}`$XDG_CONFIG_HOME/halyard/config.toml`.
         Every key is optional. See `docs/configuration.md` in the Halyard
-        repository for the full list.
+        repository for the full list. Never put a credential here: the file
+        lands in the world-readable Nix store. A key named like a secret (key,
+        token, secret, password, passwd, auth) is an evaluation error; use
+        `api_key_env` on an `ai.providers` entry.
       '';
     };
 
@@ -140,7 +207,9 @@ in
 
     xdg.configFile = mkMerge [
       (mkIf (cfg.settings != { }) {
-        "halyard/config.toml".source = tomlFormat.generate "halyard-config.toml" cfg.settings;
+        "halyard/config.toml".source = tomlFormat.generate "halyard-config.toml" (
+          checkedSettings cfg.settings
+        );
       })
       (lib.mapAttrs' (
         fileName: theme:
