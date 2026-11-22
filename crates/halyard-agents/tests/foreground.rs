@@ -142,19 +142,25 @@ fn follows_the_foreground_job_of_an_interactive_shell() {
 
 #[test]
 fn detects_an_agent_by_its_program_name() {
-    // A program invoked as `claude` (here a symlink to sleep) is Claude Code by
-    // argv[0], even though the resolved executable is sleep.
+    // A program invoked as `claude` is Claude Code by argv[0], even though the
+    // resolved executable is something else. The program is the crate's own sleeper:
+    // `sleep` is a multicall binary on NixOS and busybox and would exit at once
+    // when called `claude`.
     let dir = scratch("symlink");
-    let sleep = find_in_path("sleep").expect("sleep");
+    let sleeper = Path::new(env!("CARGO_BIN_EXE_halyard-test-sleeper"));
     let claude = dir.join("claude");
-    std::os::unix::fs::symlink(&sleep, &claude).unwrap();
+    std::os::unix::fs::symlink(sleeper, &claude).unwrap();
     let mut cmd = CommandBuilder::new(&claude);
-    cmd.arg("5");
-    let pty = Pty::spawn(cmd);
+    cmd.arg("30");
+    let mut pty = Pty::spawn(cmd);
     let pid = pty.child.process_id().unwrap() as i32;
     pty.wait_foreground(|pg| pg == pid);
     let info = pty.exec_done_info();
+    assert_eq!(info.argv, vec![claude.to_str().unwrap().to_string(), "30".into()]);
+    assert_eq!(info.exe, Some(std::fs::canonicalize(sleeper).unwrap()));
     assert_eq!(detect_agent(&info), Some(AgentKind::ClaudeCode), "{info:?}");
+    // Still running: the check did not race a process that had already exited.
+    assert!(pty.child.try_wait().unwrap().is_none());
     drop(pty);
     let _ = std::fs::remove_dir_all(&dir);
 }
