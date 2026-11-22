@@ -94,6 +94,8 @@ pub struct ScriptedApprover {
     pub send: Mutex<VecDeque<bool>>,
     pub pair_seen: Mutex<Vec<PairingRequest>>,
     pub send_seen: Mutex<Vec<SendTextRequest>>,
+    /// When set, the next send dialog signals `entered` and stays open until `release`.
+    pub hold: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 
 impl ScriptedApprover {
@@ -106,6 +108,13 @@ impl ScriptedApprover {
     pub fn answer_send(&self, yes: bool) {
         self.send.lock().unwrap().push_back(yes);
     }
+    /// Makes the next send dialog stay open. Returns (entered, release).
+    pub fn hold_next_dialog(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *self.hold.lock().unwrap() = Some((entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
 }
 
 impl Approver for ScriptedApprover {
@@ -115,6 +124,11 @@ impl Approver for ScriptedApprover {
     }
     fn approve_send_text(&self, request: &SendTextRequest) -> bool {
         self.send_seen.lock().unwrap().push(request.clone());
+        let hold = self.hold.lock().unwrap().take();
+        if let Some((entered, release)) = hold {
+            entered.send(()).unwrap();
+            release.recv().unwrap();
+        }
         self.send.lock().unwrap().pop_front().unwrap_or(false)
     }
 }
