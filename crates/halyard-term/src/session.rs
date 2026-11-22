@@ -89,7 +89,7 @@ pub struct SessionConfig {
     pub cell_width: u32,
     /// Cell height in pixels.
     pub cell_height: u32,
-    /// Lines of scrollback to keep.
+    /// Lines of scrollback to keep (at least; see [`crate::engine::scrollback_bytes`]).
     pub scrollback_lines: usize,
     /// Colors.
     pub palette: Palette,

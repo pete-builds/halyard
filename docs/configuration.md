@@ -86,7 +86,7 @@ dotted keys (`"ai".enabled = ...`) and multi-line strings cannot hide a section.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `scrollback_lines` | `10000` | Scrollback per pane, 0 to 1,000,000. |
+| `scrollback_lines` | `10000` | Lines of scrollback per pane, 0 to 1,000,000. Kept in full at any width up to 256 columns, or the pane's width when it starts wider; a narrower pane can keep more. Memory grows only as scrollback fills, up to a limit of about 2.4 KB per configured line (24 MB for 10,000 lines). |
 | `shell` | unset | `{ program = "/bin/zsh", args = ["-l"] }`. Unset means your login shell (`$SHELL`). |
 | `working_directory` | `"home"` | `"home"`, `"inherit"` (the focused pane's directory), or an absolute path or one starting with `~/`. |
 | `cursor_style` | `"block"` | `"block"`, `"bar"`, or `"underline"`. |

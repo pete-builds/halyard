@@ -52,6 +52,9 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       `bracketed_paste_and_mouse_reach_the_program`. Window: resizing the window reflows and
       updates `stty size` (verified on macOS); wheel scrolling (scrollback, alternate scroll,
       mouse reporting) and click/drag reporting are implemented but not exercised in a window.
+      Scrollback length: `scrollback_lines` is converted to Ghostty's byte limit, so 10,000
+      lines are kept at 80 and 200 columns (`scrollback_keeps_the_configured_lines`, bounded by
+      `scrollback_limit_still_bounds_memory`); before, 247 rows were kept at 200 columns.
 - [ ] Selection, copy, paste (bracketed). Session side done: `selection_highlights_and_copies`,
       `selection_copies_text`, `paste_is_bracketed_only_when_enabled`. Window: highlight verified;
       drag to select, double-click word, Cmd+C/Cmd+V (Ctrl+Shift+C/V on Linux) implemented
