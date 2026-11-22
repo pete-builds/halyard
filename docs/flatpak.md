@@ -123,12 +123,14 @@ panes itself.
   small `/bin/sh` step opens it as descriptor 3, deletes it, and runs `flatpak-spawn
   --env-fd=3`. The `/bin/sh` step is needed because portable-pty closes every descriptor
   above 2 before it starts the program. If the program never starts, Halyard deletes the
-  file itself. If Halyard is killed between creating the file and that step, the file is
-  left behind (it cannot be deleted earlier, because the step opens it by path). So the first
-  time a pane starts in each Halyard process, it removes leftovers: files named
-  `halyard-env-` plus 32 hex digits in that directory that are regular files (symlinks are
-  never followed), owned by you, and at least 10 minutes old. A newer file may belong to
-  another running Halyard and is kept.
+  file itself. If Halyard is killed between creating the file and that step, the file cannot
+  be deleted earlier (the step opens it by path). In the shipped Flatpak,
+  `$XDG_RUNTIME_DIR` is `/run/user/UID` inside each sandbox instance's private root, so a
+  leftover dies with that instance and a restarted Halyard sees an empty directory. As a
+  backstop for the fallback to the per-app `/tmp` (when `$XDG_RUNTIME_DIR` is unset), the
+  first pane started in each Halyard process removes leftovers: files named `halyard-env-`
+  plus 32 hex digits that are regular files with one link (symlinks are never followed),
+  owned by you, and at least 10 minutes old. Newer files are kept.
 - `--watch-bus` makes Flatpak's session helper send SIGINT to the host process group when
   Halyard's side of the bus goes away (a crash, for example).
 - Every option uses the `--name=value` form and comes before the program: `flatpak-spawn`
@@ -148,7 +150,7 @@ forwarded set is exact (`the_forwarded_environment_is_exactly_the_session_set`),
 and the real `/bin/sh` step hands a stand-in for `flatpak-spawn` the file as descriptor 3
 and deletes it (`the_wrapper_hands_flatpak_spawn_the_file_as_fd_3_and_deletes_it`).
 The leftover sweep is `sweep_stale_env_files` (tests `sweep_removes_an_old_own_file_and_keeps_everything_else`,
-`sweep_leaves_files_of_another_user_and_future_dated_files`). A real Flatpak run, with Halyard killed mid-spawn, has not been tried.
+`sweep_leaves_files_of_another_user_and_future_dated_files`, and `the_spawn_path_sweeps_once_and_only_in_flatpak_host_mode` for the call from the spawn path). A real Flatpak run, with Halyard killed mid-spawn, has not been tried.
 
 ### What this means for security
 

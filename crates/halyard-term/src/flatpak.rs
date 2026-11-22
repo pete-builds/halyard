@@ -291,6 +291,7 @@ fn is_env_file_name(name: &OsStr) -> bool {
 /// - the name is `halyard-env-` plus 32 lowercase hex digits;
 /// - it is a regular file by `symlink_metadata`, so a symlink (or anything
 ///   else) is never followed or touched;
+/// - it has a single hard link, so an alias of some other file is refused;
 /// - it is owned by the current effective user, so another user's files in a
 ///   shared directory such as `/tmp` are left alone;
 /// - its modification time is at least `min_age` before `now`, so a file a
@@ -321,6 +322,7 @@ fn sweep_for_uid(dir: &Path, min_age: Duration, now: SystemTime, uid: u32) -> us
             .and_then(|m| now.duration_since(m).ok())
             .is_some_and(|age| age >= min_age);
         if meta.file_type().is_file()
+            && meta.nlink() == 1
             && meta.uid() == uid
             && old
             && std::fs::remove_file(&path).is_ok()
@@ -604,8 +606,18 @@ mod tests {
         // A symlink with a matching name, pointing at an old file we must not delete.
         let target = dir.path().join("target-file");
         std::fs::write(&target, "x").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
         let link = EnvFile::path_in(dir.path());
         std::os::unix::fs::symlink(&target, &link).unwrap();
+        // A matching name that is a second hard link to an old file.
+        let linked = make_env_file(dir.path(), Duration::from_secs(3600));
+        let alias = EnvFile::path_in(dir.path());
+        std::fs::hard_link(&linked, &alias).unwrap();
         // A matching name that is a directory.
         let sub = EnvFile::path_in(dir.path());
         std::fs::create_dir(&sub).unwrap();
@@ -617,6 +629,7 @@ mod tests {
         assert!(other_name.exists() && unrelated.exists());
         assert!(link.symlink_metadata().is_ok() && target.exists(), "symlinks are never touched");
         assert!(sub.is_dir());
+        assert!(linked.exists() && alias.exists(), "multi-link files are refused");
     }
 
     #[test]
