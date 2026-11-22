@@ -25,6 +25,8 @@ pub struct AppState {
     pub state_file: Option<PathBuf>,
     /// Problems found while restoring, shown once in the first window.
     pub restore_warnings: Vec<String>,
+    /// The session API link for new panes, when the API is on.
+    pub session_api: Option<crate::session_api::PaneApi>,
     save_pending: bool,
     /// Keeps the config watcher thread alive.
     _watcher: Option<std::thread::JoinHandle<()>>,
@@ -59,6 +61,7 @@ impl AppState {
             windows: Vec::new(),
             state_file: persist::state_file(),
             restore_warnings: Vec::new(),
+            session_api: None,
             save_pending: false,
             _watcher: watcher,
             #[cfg(feature = "debug-script")]

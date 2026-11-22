@@ -69,6 +69,9 @@ a message from an agent, a downloaded binary.
 | A process in pane A speaks for pane B, or a process outside any pane poses as an agent. | `session.attach` needs both **process ancestry** (the kernel-reported peer pid must descend from that pane's PTY child) and the pane's 256-bit token. | `crates/halyard-ipc/src/peer.rs` (ancestry), `auth.rs` (tokens). Tests `a_process_in_another_pane_cannot_spoof_this_one`, `an_unrelated_process_is_rejected`, `the_right_process_with_the_wrong_token_is_rejected`. |
 | An unapproved tool lists panes, reads screens or focuses. | Pairing shows the user the requested scopes, the kernel-reported pid and executable path, and the tool's self-reported name. Scopes are named and revocable, re-checked on every request. | Tests `pairing_denied_creates_no_grant`, `scopes_gate_each_method`, `revocation_cuts_off_live_connections_and_the_token`. |
 | A stolen grants file. | It stores SHA-256 hashes of 256-bit tokens, never tokens, is written atomically at 0600, and is refused at load if group or world accessible. | Tests `grants_file_never_contains_the_raw_token`, `refuses_group_readable_grants_file`. |
+| A dialog is approved by accident: the user was typing into the pane when it appeared. | The dialog takes keyboard focus and swallows every key. Plain Enter never approves. Nothing approves for 700 ms after it opens. Approving takes Cmd+Enter (macOS) or Ctrl+Shift+Enter, or a click on Approve; Escape denies; no answer in 90 s denies. | `crates/halyard-app/src/approval.rs`. Tests `plain_enter_never_approves`, `the_approve_chord_works_only_once_armed`, `letters_typed_into_the_dialog_are_swallowed`. |
+| A tool's standing text is cleared from the approval record by something other than the user, so approving Enter hides what Enter runs. | Only real key events in the pane (Enter, Ctrl-C, Ctrl-U) call `reset_typed_since_approval`. `send_text`, paste and terminal query replies never do. | `keys::resets_typed_line`, `TerminalView::handle_key`. Tests `send_text_never_resets_typed_since_approval` (with a control showing a key event does reset), `only_enter_ctrl_c_and_ctrl_u_reset_the_typed_line`. |
+| A same-user process floods the user with pairing dialogs from new connections. | On top of the server's 3 attempts per connection and one dialog at a time, the app shows at most 3 pairing dialogs a minute and none for 30 s after a denial. | `PairingLimiter` in `crates/halyard-app/src/session_api.rs`. Tests `pairing_prompts_are_limited_across_connections`, `a_denied_pairing_cools_down_without_a_second_dialog`. |
 | A buggy or hostile client exhausts the server. | 64 KiB request cap, per-connection rate limit, 64 connections, a 10 second handshake, bounded event queues, three pairing attempts, one dialog at a time. | Tests `oversized_message_is_rejected_and_the_connection_closed`, `rate_limit_rejects_bursts_then_disconnects_abusers`, `connection_limit_closes_extra_connections`. |
 
 ### Secrets in config
@@ -105,9 +108,11 @@ Said plainly, so nobody assumes otherwise.
    The session API is not made weaker by this and does not claim to be stronger. Its
    approval rules protect against a confused or prompt-injected tool that only uses the
    documented API. Root can do anything.
-5. **The session API is not wired into the app yet.** The server library and `halyard-msg`
-   are implemented and tested; the running terminal does not start the server
-   (`docs/session-api.md`, `ROADMAP.md`). The approval dialogs do not exist in the UI.
+5. **The session API's approval dialogs guard against accidents, not against a same-uid
+   attacker.** The app starts the server and shows the dialogs (`crates/halyard-app`); a
+   dialog cannot be approved by a stray Enter or by keys already on their way, but anything
+   that can synthesize input events as the user (accessibility APIs, `xdotool` under X11)
+   can click it. That attacker already has the PTY (item 4).
 6. **Pid reuse** in the ancestry check is narrowed by the token, not closed. Linux
    `SO_PEERPIDFD` is not used.
 7. **`screen:read` exposes secrets on screen.** It is gated once at pairing, not per request.

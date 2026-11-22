@@ -130,6 +130,9 @@ pub struct PaneSpawn {
     pub scrollback: usize,
     /// Starting colors.
     pub palette: Palette,
+    /// The session API, when it is on: the pane gets its variables and joins
+    /// the server's registry.
+    pub api: Option<crate::session_api::PaneApi>,
 }
 
 /// Something a pane tells its window.
@@ -195,10 +198,18 @@ pub struct TerminalView {
     blink_on: bool,
     /// Number of render passes, for debugging repaint problems.
     pub renders: u64,
+    /// The session API link while the pane is registered with it.
+    api: Option<crate::session_api::PaneApi>,
     _pump: Task<()>,
 }
 
 impl EventEmitter<PaneEvent> for TerminalView {}
+
+impl Drop for TerminalView {
+    fn drop(&mut self) {
+        self.leave_api();
+    }
+}
 
 impl std::fmt::Debug for TerminalView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -236,6 +247,7 @@ fn px_u32(v: f32) -> u32 {
 /// view entity exists so a failure can be shown instead.
 pub struct Prepared {
     session: Arc<Session>,
+    api: Option<crate::session_api::PaneApi>,
     monitor: SharedMonitor,
     wakeups: mpsc::UnboundedReceiver<()>,
     font: Font,
@@ -276,6 +288,12 @@ impl TerminalView {
         // protocol reports addressed to other panes.
         let session_id = halyard_term::new_session_id();
         let monitor = signals::new_monitor(&session_id);
+        // Without valid credentials the pane simply runs without the API.
+        let creds = spawn
+            .api
+            .as_ref()
+            .and_then(|api| crate::session_api::pane_credentials(api.socket(), &session_id));
+        let (env, env_remove) = crate::session_api::pane_env(creds.as_ref());
         let config = SessionConfig {
             program,
             args,
@@ -294,16 +312,32 @@ impl TerminalView {
             })),
             observer: Some(Box::new(SignalObserver::new(Arc::clone(&monitor)))),
             session_id: Some(session_id),
+            env,
+            env_remove,
             ..SessionConfig::default()
         };
         let session = Arc::new(Session::spawn(config)?);
-        Ok(Prepared { session, monitor, wakeups, font, font_size, cell, style, cols, rows })
+        let api = match (spawn.api, creds) {
+            (Some(api), Some(creds)) if api.register(&session, &monitor, &creds.token) => Some(api),
+            _ => None,
+        };
+        Ok(Prepared { session, api, monitor, wakeups, font, font_size, cell, style, cols, rows })
     }
 
     /// Build the view around a prepared session.
     pub fn new(prepared: Prepared, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let Prepared { session, monitor, mut wakeups, font, font_size, cell, style, cols, rows } =
-            prepared;
+        let Prepared {
+            session,
+            api,
+            monitor,
+            mut wakeups,
+            font,
+            font_size,
+            cell,
+            style,
+            cols,
+            rows,
+        } = prepared;
         let pump = cx.spawn_in(window, async move |this, cx| {
             while wakeups.next().await.is_some() {
                 // Coalesce a burst of wakeups into one update.
@@ -334,6 +368,7 @@ impl TerminalView {
             chrome: PaneChrome::default(),
             blink_on: true,
             renders: 0,
+            api,
             _pump: pump,
         }
     }
@@ -418,6 +453,19 @@ impl TerminalView {
         self.session.screen_rows_text(first, last).map(|t| blocks_ui::tidy_output(&t))
     }
 
+    /// Leaves the session API: the pane's program exited or the pane closed.
+    fn leave_api(&mut self) {
+        if let Some(api) = self.api.take() {
+            api.closed(self.session.id(), self.exited.flatten());
+        }
+    }
+
+    /// The session API link, while the pane is registered.
+    #[must_use]
+    pub fn api(&self) -> Option<&crate::session_api::PaneApi> {
+        self.api.as_ref()
+    }
+
     /// The user typed or pasted.
     fn note_input(&self) {
         signals::lock(&self.monitor).on_user_input(SystemTime::now());
@@ -427,14 +475,7 @@ impl TerminalView {
     /// machine, else the shell process's own directory. Used verbatim.
     #[must_use]
     pub fn cwd(&self) -> Option<String> {
-        let frame = self.session.latest_frame();
-        if let Some(p) = frame.cwd.as_deref().and_then(|raw| {
-            halyard_workspace::persist::osc7_local_path(raw, crate::app_state::hostname())
-        }) {
-            return Some(p);
-        }
-        let dir = self.session.pid().and_then(crate::procinfo::cwd)?;
-        dir.to_str().and_then(halyard_workspace::persist::valid_cwd).map(str::to_owned)
+        crate::session_api::pane_cwd(&self.session)
     }
 
     /// Whether a command other than the shell holds the terminal.
@@ -531,11 +572,13 @@ impl TerminalView {
                 SessionEvent::Exited(code) if decide::exit_closes_pane(code) => {
                     // A clean exit closes the pane, like most terminals.
                     self.exited = Some(code);
+                    self.leave_api();
                     cx.emit(PaneEvent::Exited);
                     return;
                 }
                 SessionEvent::Exited(code) => {
                     self.exited = Some(code);
+                    self.leave_api();
                     redraw = true;
                 }
             }
@@ -598,6 +641,13 @@ impl TerminalView {
         self.blink_on = true;
         match route_keystroke(keystroke, OPTION_AS_ALT) {
             KeyRoute::Terminal(key) => {
+                // A real key in this pane that ends or clears the line: the user
+                // has seen it, so a paired tool's standing text is forgotten.
+                if crate::keys::resets_typed_line(&key)
+                    && let Some(api) = &self.api
+                {
+                    api.user_line_key(self.session.id());
+                }
                 self.session.send_key(key);
                 self.note_input();
                 true

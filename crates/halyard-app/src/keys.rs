@@ -48,6 +48,27 @@ fn named_key(key: &str) -> Option<KeyCode> {
     })
 }
 
+/// Whether a key the user pressed in a pane ends or clears the command line:
+/// Enter, Ctrl-C or Ctrl-U (without Alt). After one of these the user has seen
+/// the line, so the session API forgets what a paired tool typed there under
+/// standing permission (`IpcServer::reset_typed_since_approval`).
+///
+/// Only real key events from the window may call this. Text a tool sends, pastes
+/// and the terminal's own query replies go through other paths and never reset
+/// it (`session_api` tests prove that for `session.send_text`).
+#[must_use]
+pub fn resets_typed_line(key: &KeyInput) -> bool {
+    let m = key.mods;
+    if m.alt || m.super_key {
+        return false;
+    }
+    match key.key {
+        KeyCode::Enter => !m.ctrl,
+        KeyCode::Char('c' | 'u') => m.ctrl && !m.shift,
+        _ => false,
+    }
+}
+
 /// Decide how a key-down should reach the terminal.
 ///
 /// `option_as_alt` only matters on macOS: when false, Option composes
@@ -300,5 +321,40 @@ mod tests {
         } else {
             assert!(matches!(route, KeyRoute::Terminal(_)), "{route:?}");
         }
+    }
+
+    #[test]
+    fn only_enter_ctrl_c_and_ctrl_u_reset_the_typed_line() {
+        let route =
+            |key: &str, f: fn(&mut gpui::Modifiers), text: Option<&str>| match route_keystroke(
+                &ks(key, f, text),
+                false,
+            ) {
+                KeyRoute::Terminal(k) => Some(k),
+                _ => None,
+            };
+        let enter = route("enter", |_| {}, None).unwrap();
+        assert!(resets_typed_line(&enter));
+        assert!(resets_typed_line(&route("c", |m| m.control = true, None).unwrap()));
+        assert!(resets_typed_line(&route("u", |m| m.control = true, None).unwrap()));
+        for (key, f) in [
+            ("a", (|m: &mut gpui::Modifiers| m.control = true) as fn(&mut gpui::Modifiers)),
+            ("d", |m| m.control = true),
+            ("j", |m| m.control = true),
+            ("c", |m| m.alt = true),
+            ("u", |m| {
+                m.control = true;
+                m.alt = true;
+            }),
+            ("tab", |_| {}),
+            ("backspace", |_| {}),
+            ("enter", |m| m.alt = true),
+        ] {
+            if let Some(k) = route(key, f, None) {
+                assert!(!resets_typed_line(&k), "{key} {:?}", k.mods);
+            }
+        }
+        // Typed text (the Text route) never reaches this check at all.
+        assert!(route("a", |_| {}, Some("a")).is_none());
     }
 }

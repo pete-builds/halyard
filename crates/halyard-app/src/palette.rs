@@ -53,6 +53,8 @@ pub enum Command {
     SwitchTheme,
     /// Write the shell integration script and copy the line that loads it.
     CopyShellIntegration,
+    /// List the tools paired through the session API, and revoke them.
+    PairedTools,
 }
 
 /// The palette title for an action, or `None` for actions not offered
@@ -102,6 +104,7 @@ pub fn commands() -> Vec<(Command, &'static str)> {
         Action::ALL.iter().filter_map(|a| title(*a).map(|t| (Command::Run(*a), t))).collect();
     v.insert(0, (Command::SwitchTheme, "Switch Theme"));
     v.insert(1, (Command::CopyShellIntegration, "Copy Shell Integration Line"));
+    v.insert(2, (Command::PairedTools, "Paired Tools (Session API)"));
     v
 }
 
@@ -136,6 +139,8 @@ pub enum Mode {
     },
     /// The agent dashboard: one entry per pane, in attention order.
     Agents,
+    /// Tools paired through the session API; Enter revokes the selected one.
+    PairedTools,
 }
 
 /// Palette state: mode, query, entries and selection.
@@ -294,6 +299,7 @@ mod tests {
         let cmds = commands();
         assert_eq!(cmds[0], (Command::SwitchTheme, "Switch Theme"));
         assert_eq!(cmds[1], (Command::CopyShellIntegration, "Copy Shell Integration Line"));
+        assert_eq!(cmds[2], (Command::PairedTools, "Paired Tools (Session API)"));
         for a in Action::ALL {
             let listed = cmds.iter().any(|(c, _)| *c == Command::Run(*a));
             let built = crate::keybind::gpui_action(*a).is_some();

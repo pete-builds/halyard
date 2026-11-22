@@ -1,8 +1,10 @@
 # The Halyard session API
 
-Protocol version 1. Status: the server library and the `halyard-msg` client are
-implemented and tested in `crates/halyard-ipc`. The app does not start the server yet;
-that wiring is pending (see `ROADMAP.md`).
+Protocol version 1. Status: the server library and the `halyard-msg` client are in
+`crates/halyard-ipc`; the app starts the server, backs it with its real panes and shows
+the approval dialogs (`crates/halyard-app/src/session_api.rs`, `session_api_ui.rs`,
+`approval.rs`). It is on by default and can be turned off with `[session_api] enabled =
+false` (`docs/configuration.md`).
 
 ## Purpose
 
@@ -50,7 +52,16 @@ rules in [Typing into a pane](#typing-into-a-pane).
 | Anything else | `$TMPDIR/halyard-<uid>/`, or `/tmp/halyard-<uid>/` |
 
 The socket is `<directory>/<instance>.sock`, where the instance name is 1 to 32
-characters of `[A-Za-z0-9_-]`. Inside a pane, `HALYARD_SOCKET` holds the full path.
+characters of `[A-Za-z0-9_-]`. The app uses its process id, so several instances never
+collide; a tool outside any pane finds the sockets by listing the directory. Inside a pane,
+`HALYARD_SOCKET` holds the full path. The socket is removed when Halyard quits.
+
+The app binds the socket on a thread of its own, so a slow grants file lock never delays
+the first window. Panes are given the path from the start; until the bind finishes, or if
+it fails (another program owns the path, the directory has the wrong owner or mode, the
+path is too long), nothing answers there and `halyard-msg` falls back to escape
+sequences. A failed bind is shown once in the window's banner, and the terminal works as
+usual.
 
 ### Permissions
 
@@ -94,6 +105,11 @@ characters of `[A-Za-z0-9_-]`. Inside a pane, `HALYARD_SOCKET` holds the full pa
 Each connection starts anonymous, must call `halyard.hello`, and then takes at most one
 identity for its lifetime: a **session** (via `session.attach`) or a **controller** (via
 `halyard.pair` or `halyard.authenticate`).
+
+With `[session_api] enabled = false` the app starts no server and sets none of the
+variables below. Either way a pane never inherits `HALYARD_SOCKET` or
+`HALYARD_SESSION_TOKEN` from the environment Halyard itself was started in, so a Halyard
+launched from another Halyard's pane never reports into the outer one.
 
 ### Session scope: agents and hooks inside a pane
 
@@ -240,8 +256,11 @@ padding (for example 4096 spaces after the command) would push the command out o
 So in that case the server **refuses the request without asking**: error `-32005` with
 `data.reason` `"typed_since_approval_truncated"` and the message "too much typed since the
 last approval; clear the line in the pane". What the user types by hand is not tracked,
-so the app calls `IpcServer::reset_typed_since_approval(session_id)` when the user types
-into that pane (for example after clearing the line); approvals work again from there.
+so the app calls `IpcServer::reset_typed_since_approval(session_id)` when the user presses
+Enter, Ctrl-C or Ctrl-U in that pane, the keys that end or clear a command line;
+approvals work again from there. Only real key events from the window count: text sent by
+`session.send_text`, a paste, and the terminal's own replies to queries never reset it,
+or approving Enter could hide what Enter runs.
 Dialogs therefore never receive `typed_since_approval_truncated: true`; the field stays
 for clarity.
 
@@ -362,6 +381,9 @@ Revokes the caller's own grant; the connection becomes anonymous.
 
 ### `session.focus` (`ui:focus`)
 
+Shows the pane: selects its tab, focuses it and raises its window. `-32009` if the window
+does not answer within 2 seconds.
+
 ```json
 > {"method": "session.focus", "params": {"session_id": "p7"}}
 < {"result": {}}
@@ -369,8 +391,9 @@ Revokes the caller's own grant; the connection becomes anonymous.
 
 ### `session.read_screen` (`screen:read`)
 
-Returns the pane's visible screen as plain text, rows separated by newlines. It may
-contain secrets that are on screen; the pairing dialog should say so.
+Returns the pane's visible screen as plain text, rows separated by newlines: what the
+pane shows now, so a pane scrolled back returns the scrolled view. At most 256 KiB. It may
+contain secrets that are on screen; the pairing dialog says so.
 
 ```json
 > {"method": "session.read_screen", "params": {"session_id": "p7"}}
@@ -386,8 +409,11 @@ contain secrets that are on screen; the pairing dialog should say so.
 
 `approval` is `"user"` when a dialog approved this request, `"standing"` when the
 client's "always allow" covered it. Text is 1 byte to 16 KiB. Error `-32005` when the user
-declines. The app decides how to deliver the text (for example, as a bracketed paste
-when the program enabled it).
+declines. The app delivers the text through the pane's paste path: control bytes the
+terminal treats as unsafe are neutralized, and when the program enabled bracketed paste
+(zsh, fish, bash 5, most editors) the text arrives bracketed, so a newline lands in the
+line editor and the user's own Enter still runs it. Without bracketed paste (`sh`, older
+bash) an approved newline arrives as Enter and runs the line.
 
 ### `events.subscribe` (`events:subscribe`)
 
@@ -407,6 +433,13 @@ responses:
 < {"jsonrpc": "2.0", "method": "session.exited", "params": {"session_id": "p8",
    "exit_code": 0}}
 ```
+
+The app publishes `session.state_changed` once per change of a pane's state, whatever
+caused it (a report over this API, an escape sequence, a detected agent starting or
+going quiet); `session.notification` for every `session.notify`, and for an OSC 9 or 777
+notification while an agent runs in the pane and has not set its state with a report
+(then the text is in `title` and `body` is empty); and `session.exited` when a pane's program exits or the pane closes. `msg` is
+set only when the state came from a report.
 
 A subscriber more than 256 events behind is disconnected rather than slowing Halyard
 down; it should reconnect and call `sessions.list` to resynchronize. Titles, bodies and
@@ -540,7 +573,8 @@ In other terminals these hooks are silent no-ops.
 
 ### A Python controller using only the standard library
 
-Pair once to get a token (the app will offer this from its settings page), then:
+Pair once with `halyard.pair` (Halyard shows the dialog) and keep the token the reply
+carries, then:
 
 ```python
 import json, os, socket
@@ -567,18 +601,31 @@ This file is `crates/halyard-ipc/examples/list_sessions.py`; the test
 `python_example_client_lists_sessions` runs it against a real server and checks that this
 document embeds it verbatim.
 
-## Wiring it into the app (pending)
+## The app's dialogs
 
-What the app has to do, for whoever wires it:
+The approval dialogs open in the window that holds the pane (`session.send_text`) or the
+active window (`halyard.pair`). A dialog takes keyboard focus, so whatever the user was
+typing lands on it instead of the pane, and it is built so that typing cannot approve:
 
-1. Implement `SessionDirectory` over the pane table and `Approver` with dialogs that
-   time out to a denial. Directory calls arrive on connection threads; hand work to the
-   UI thread and return.
-2. Per pane: `SessionToken::generate()`, put `session_env(socket, id, &token)` in the
-   child's environment, spawn, and record `SessionAuth { child_pid, token_hash }`.
-3. `IpcServer::bind(ServerConfig::new(default_socket_path(instance)?, GrantStore::open(default_grants_path)?), ...)`.
-   Suggested instance name: the app's pid, so several instances never collide; external
-   tools find sockets by listing the socket directory.
-4. Publish `SessionEvent`s on `server.events()` when a pane's state changes, a
-   notification arrives (from the API or from OSC sequences), or a pane exits.
-5. A settings page listing `server.grants().list()` with a revoke button.
+- Plain Enter never approves, at any time.
+- For the first 700 ms nothing approves, so keys already on their way land on nothing.
+- Approving takes Cmd+Enter on macOS or Ctrl+Shift+Enter elsewhere, or a click on
+  Approve. Escape denies at any time. Every other key is swallowed.
+- With no answer within 90 seconds the dialog closes and the request is denied.
+
+The pairing dialog lists the requested scopes as checkboxes (keys 1 to 5 toggle them), shows
+`input:write` and `screen:read` in the warning color, and offers "always allow typing from
+this tool" (key T) only while `input:write` is ticked. It shows the tool's name as a claim
+next to the kernel-reported pid and executable. The typing dialog shows the tool, the pane
+(its title, or its folder, and its id), the exact text escaped, and the text typed since the
+last approval when there is any.
+
+On top of the server's limits, the app shows at most 3 pairing dialogs a minute across all
+connections, and none for 30 seconds after the user denies one; those requests are denied
+without a dialog.
+
+Paired tools are listed by the command palette's "Paired Tools (Session API)" command:
+name, scopes, whether it may type without asking, and last use. Enter revokes the selected
+tool; its connections lose access on their next request. Grants are kept in
+`$XDG_STATE_HOME/halyard/grants.json` (else `~/.local/state/halyard/grants.json`); without
+a home directory they last until Halyard quits.

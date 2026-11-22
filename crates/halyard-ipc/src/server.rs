@@ -357,9 +357,11 @@ impl IpcServer {
 
     /// Forgets the text typed into `session_id` under standing permission.
     ///
-    /// The app calls this when the user types into the pane themselves (for example after
-    /// clearing the line), since the user has then seen the line. It is the way out of the
-    /// "too much typed since the last approval" refusal.
+    /// The app calls this only from real key events in the pane that end or clear the
+    /// line (Enter, Ctrl-C, Ctrl-U), since the user has then seen it. Never call it from
+    /// `send_text`, a paste or anything else that writes to the PTY: that would hide what
+    /// an approved Enter runs. It is the way out of the "too much typed since the last
+    /// approval" refusal.
     pub fn reset_typed_since_approval(&self, session_id: &str) {
         lock(&self.shared.unapproved).remove(session_id);
     }
