@@ -30,6 +30,7 @@ use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// The program that asks Flatpak to run a command on the host. It ships in
 /// every Freedesktop runtime (flatpak-xdg-utils).
@@ -260,6 +261,76 @@ impl Drop for EnvFile {
             eprintln!("halyard-term: removing {}: {e}", self.path.display());
         }
     }
+}
+
+/// How old an env file must be before [`sweep_stale_env_files`] treats it as
+/// abandoned. A live file exists for milliseconds (created, then opened and
+/// deleted by the wrapper), so ten minutes leaves a wide margin for another
+/// running Halyard and for clock differences.
+pub const STALE_ENV_FILE_AGE: Duration = Duration::from_secs(10 * 60);
+
+const ENV_FILE_PREFIX: &str = "halyard-env-";
+
+/// True when `name` is exactly what [`EnvFile::path_in`] makes: the prefix and
+/// 32 lowercase hex digits.
+fn is_env_file_name(name: &OsStr) -> bool {
+    name.as_bytes().strip_prefix(ENV_FILE_PREFIX.as_bytes()).is_some_and(|rest| {
+        rest.len() == 32 && rest.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+/// Remove env files that a crash or kill left in `dir`, and return how many.
+///
+/// An [`EnvFile`] holds the pane's environment (possibly secrets) from its
+/// creation until the wrapper opens and deletes it. If Halyard dies in that
+/// window the file stays. Halyard cannot unlink it earlier: portable-pty closes
+/// every descriptor above 2 before the program starts, so the wrapper has to
+/// open it by path. This sweep bounds the damage instead. It removes an entry
+/// only when all of these hold:
+///
+/// - the name is `halyard-env-` plus 32 lowercase hex digits;
+/// - it is a regular file by `symlink_metadata`, so a symlink (or anything
+///   else) is never followed or touched;
+/// - it has a single hard link, so an alias of some other file is refused;
+/// - it is owned by the current effective user, so another user's files in a
+///   shared directory such as `/tmp` are left alone;
+/// - its modification time is at least `min_age` before `now`, so a file a
+///   running Halyard is about to hand to a wrapper is left alone. A time in the
+///   future counts as fresh.
+///
+/// Errors on single entries (already gone, not permitted) are skipped: a sweep
+/// must never keep a terminal from starting.
+pub fn sweep_stale_env_files(dir: &Path, min_age: Duration, now: SystemTime) -> usize {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    sweep_for_uid(dir, min_age, now, uid)
+}
+
+fn sweep_for_uid(dir: &Path, min_age: Duration, now: SystemTime, uid: u32) -> usize {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        if !is_env_file_name(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= min_age);
+        if meta.file_type().is_file()
+            && meta.nlink() == 1
+            && meta.uid() == uid
+            && old
+            && std::fs::remove_file(&path).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -513,5 +584,77 @@ mod tests {
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(out.stdout, b"A=1\0B=two words\0gone\n");
         assert!(!path.exists());
+    }
+
+    fn make_env_file(dir: &Path, age: Duration) -> PathBuf {
+        let path = EnvFile::path_in(dir);
+        EnvFile::create(path.clone(), b"SECRET=1\0").unwrap().handed_over();
+        let when = SystemTime::now() - age;
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(when).unwrap();
+        path
+    }
+
+    #[test]
+    fn sweep_removes_an_old_own_file_and_keeps_everything_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = make_env_file(dir.path(), Duration::from_secs(3600));
+        let fresh = make_env_file(dir.path(), Duration::from_secs(5));
+        let other_name = dir.path().join("halyard-env-notahexname");
+        std::fs::write(&other_name, "x").unwrap();
+        let unrelated = dir.path().join("other-file");
+        std::fs::write(&unrelated, "x").unwrap();
+        // A symlink with a matching name, pointing at an old file we must not delete.
+        let target = dir.path().join("target-file");
+        std::fs::write(&target, "x").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
+        let link = EnvFile::path_in(dir.path());
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // A matching name that is a second hard link to an old file.
+        let linked = make_env_file(dir.path(), Duration::from_secs(3600));
+        let alias = EnvFile::path_in(dir.path());
+        std::fs::hard_link(&linked, &alias).unwrap();
+        // A matching name that is a directory.
+        let sub = EnvFile::path_in(dir.path());
+        std::fs::create_dir(&sub).unwrap();
+
+        let n = sweep_stale_env_files(dir.path(), STALE_ENV_FILE_AGE, SystemTime::now());
+        assert_eq!(n, 1);
+        assert!(!old.exists(), "the old own file must go");
+        assert!(fresh.exists(), "a fresh file may belong to a running Halyard");
+        assert!(other_name.exists() && unrelated.exists());
+        assert!(link.symlink_metadata().is_ok() && target.exists(), "symlinks are never touched");
+        assert!(sub.is_dir());
+        assert!(linked.exists() && alias.exists(), "multi-link files are refused");
+    }
+
+    #[test]
+    fn sweep_leaves_files_of_another_user_and_future_dated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = make_env_file(dir.path(), Duration::from_secs(3600));
+        let me = unsafe { libc::geteuid() };
+        let n =
+            sweep_for_uid(dir.path(), STALE_ENV_FILE_AGE, SystemTime::now(), me.wrapping_add(1));
+        assert_eq!(n, 0);
+        assert!(old.exists(), "a file owned by someone else is not ours to remove");
+
+        let future = EnvFile::path_in(dir.path());
+        EnvFile::create(future.clone(), b"").unwrap().handed_over();
+        let when = SystemTime::now() + Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&future).unwrap().set_modified(when).unwrap();
+        sweep_stale_env_files(dir.path(), STALE_ENV_FILE_AGE, SystemTime::now());
+        assert!(future.exists(), "a future mtime counts as fresh");
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn sweep_of_a_missing_directory_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("nope");
+        assert_eq!(sweep_stale_env_files(&gone, STALE_ENV_FILE_AGE, SystemTime::now()), 0);
     }
 }

@@ -402,7 +402,24 @@ struct Built {
 }
 
 fn build_command(config: &SessionConfig, session_id: &str) -> std::io::Result<Built> {
-    build_command_for(config, session_id, Placement::detect())
+    let placement = Placement::detect();
+    static SWEEP: std::sync::Once = std::sync::Once::new();
+    sweep_before_spawn(placement, &crate::flatpak::env_file_dir(), &SWEEP);
+    build_command_for(config, session_id, placement)
+}
+
+/// Once per `once`, before a Flatpak-host spawn: remove env files a crashed or
+/// killed Halyard left in `dir`. Does nothing for a local placement.
+fn sweep_before_spawn(placement: Placement, dir: &std::path::Path, once: &std::sync::Once) {
+    if placement == Placement::FlatpakHost {
+        once.call_once(|| {
+            crate::flatpak::sweep_stale_env_files(
+                dir,
+                crate::flatpak::STALE_ENV_FILE_AGE,
+                std::time::SystemTime::now(),
+            );
+        });
+    }
 }
 
 fn build_command_for(
@@ -1203,6 +1220,28 @@ impl ExitTracker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_spawn_path_sweeps_once_and_only_in_flatpak_host_mode() {
+        use std::time::{Duration, SystemTime};
+        let dir = tempfile::tempdir().unwrap();
+        let stale = |dir: &std::path::Path| {
+            let p = crate::flatpak::EnvFile::path_in(dir);
+            crate::flatpak::EnvFile::create(p.clone(), b"S=1\0").unwrap().handed_over();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+            p
+        };
+        let first = stale(dir.path());
+        let once = std::sync::Once::new();
+        sweep_before_spawn(Placement::Local, dir.path(), &once);
+        assert!(first.exists(), "a local spawn never sweeps");
+        sweep_before_spawn(Placement::FlatpakHost, dir.path(), &once);
+        assert!(!first.exists(), "the first Flatpak-host spawn sweeps");
+        let second = stale(dir.path());
+        sweep_before_spawn(Placement::FlatpakHost, dir.path(), &once);
+        assert!(second.exists(), "later spawns in the same process do not sweep again");
+    }
+
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
