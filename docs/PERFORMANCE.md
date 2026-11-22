@@ -224,7 +224,14 @@ pause stays off on Linux until that is measured. `trickling_output_is_read_in_ba
 
 ## Not measured yet
 
-- Startup time and memory (resident size per pane, scrollback growth).
+- Startup time and memory are not measured systematically yet. Spot readings taken while
+  building 0.1.0 (resident size from `ps`, not a benchmark):
+  - macOS arm64 (M4 Pro): about 69 MB for a freshly opened app bundle; 75.8 MB with one idle
+    pane and 120.4 MB with nine (about 5.6 MB per extra pane), with the window not drawing.
+  - NixOS on an RTX 4070 Ti: 255 to 310 MB under sway and XWayland, of which about 108 MB is
+    private; most of the rest is shared NVIDIA driver and Vulkan mappings. First window in
+    about 300 to 450 ms (900 ms cold).
+  - Scrollback growth per pane is bounded by `scrollback_lines` (see "Scrollback length").
 - Input latency end to end (key press to pixels). Only the headless echo above is measured.
 - GPU render time and frame pacing in a visible window.
 - Many panes at once.

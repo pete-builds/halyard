@@ -3,8 +3,9 @@
 ## 0.1.0 (2026-11-22): first preview
 
 The first public preview. Halyard runs as a usable terminal on macOS and on Linux (NixOS,
-Fedora, Debian, Arch, Ubuntu). Every change was reviewed by an agent that did not write it,
-and the "not yet verified" list below is part of the release.
+Fedora, Debian, Arch, Ubuntu). Changes were reviewed before merging by an agent other than
+their author (see the pull requests), and the "not yet verified" list below is part of the
+release.
 
 ### Terminal
 - Real PTY sessions on Ghostty's VT engine (libghostty-vt 0.2.2), GPU rendering through GPUI.
@@ -80,10 +81,10 @@ and the "not yet verified" list below is part of the release.
 - IME, dead keys and key repeat on a physical keyboard are not verified by a person.
 - The session API is off inside Flatpak (process ancestry cannot pass there).
 - The small-read pause that cuts flood CPU is macOS only until it is measured on Linux.
-- `grid` 0.18 advisory (integer overflow in `Grid::expand_rows`) reaches us through
+- GitHub advisory GHSA-38c5-483c-4qqp (`grid` 0.18 integer overflow) reaches Halyard through
   gpui 0.2.2 > taffy 0.9 with no upgrade path until GPUI moves; Halyard draws no CSS grid
-  layouts.
-- Memory: about 70 to 120 MB on macOS, 255 to 310 MB on NVIDIA Linux (mostly shared driver
-  mappings); not optimized yet.
+  layouts (`docs/THREAT_MODEL.md`).
+- Memory is not measured systematically or optimized yet. Spot readings: about 70 to 120 MB
+  on macOS, 255 to 310 MB on NVIDIA Linux, mostly shared driver mappings (`docs/PERFORMANCE.md`).
 - Not built yet: the optional AI assistant and MCP (roadmap phase 5), ACP agents, vertical
   tabs.
