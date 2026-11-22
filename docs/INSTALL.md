@@ -79,11 +79,11 @@ install -m 755 halyard-<version>-linux-x86_64/halyard ~/.local/bin/
 The tarball has no desktop entry or icon. Runtime libraries (the GPU toolkit loads some
 at run time, so a missing one shows as a start-up failure or a blank window):
 libxkbcommon, libxkbcommon-x11, libwayland-client, libvulkan with a Vulkan driver (Mesa or
-your vendor's), fontconfig, freetype, libxcb, libx11-xcb. On Ubuntu and Debian:
+your vendor's), fontconfig, freetype, libxcb, libx11-xcb, libx11, libxcursor, libxi, libxrandr. On Ubuntu and Debian:
 
 ```sh
 sudo apt install libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libvulkan1 \
-    mesa-vulkan-drivers libfontconfig1 libfreetype6 libxcb1 libx11-xcb1
+    mesa-vulkan-drivers libfontconfig1 libfreetype6 libxcb1 libx11-xcb1 libx11-6 libxcursor1 libxi6 libxrandr2
 ```
 
 The Linux tarballs are built by the release workflow and have not been run on a Linux

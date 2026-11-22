@@ -134,7 +134,10 @@ jobs:
         run: |
           name="halyard-${VERSION}-linux-${ARCH}"
           mkdir -p "dist/$name"
+          # The release profile keeps line tables (debug = "line-tables-only"), which makes
+          # the binary about 93 MB. Strip it for the tarball.
           install -m 755 target/release/halyard "dist/$name/halyard"
+          strip "dist/$name/halyard"
           cp packaging/linux/README.txt LICENSE-MIT LICENSE-APACHE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -rf "dist/${name:?}"

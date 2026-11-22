@@ -63,6 +63,8 @@ lipo -create \
   "$target_dir/aarch64-apple-darwin/release/halyard" \
   "$target_dir/x86_64-apple-darwin/release/halyard" \
   -output "$app/Contents/MacOS/halyard"
+# Drop debug symbol-table entries (the code is signed after this, so the signature stays valid).
+strip -S "$app/Contents/MacOS/halyard" 2> /dev/null
 chmod 755 "$app/Contents/MacOS/halyard"
 
 echo "==> icon"

@@ -12,10 +12,11 @@ Runtime libraries (install with your package manager). Halyard's GPU toolkit lin
 these at build time and loads the rest at runtime, so a missing one shows up as a failure
 to start or a blank window:
     libxkbcommon, libxkbcommon-x11, libwayland-client, libvulkan1 (plus a Vulkan driver:
-    Mesa or your vendor's), libfontconfig1, libfreetype6, libxcb1, libx11-xcb1
+    Mesa or your vendor's), libfontconfig1, libfreetype6, libxcb1, libx11-xcb1,
+    libx11, libxcursor, libxi, libxrandr
 On Ubuntu and Debian:
     sudo apt install libxkbcommon0 libxkbcommon-x11-0 libwayland-client0 libvulkan1 \
-        mesa-vulkan-drivers libfontconfig1 libfreetype6 libxcb1 libx11-xcb1
+        mesa-vulkan-drivers libfontconfig1 libfreetype6 libxcb1 libx11-xcb1 libx11-6 libxcursor1 libxi6 libxrandr2
 
 Verify the download against SHA256SUMS from the same release page. Full instructions:
 https://github.com/pete-builds/halyard/blob/main/docs/INSTALL.md
