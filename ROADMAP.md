@@ -335,23 +335,30 @@ Design: [ADR 0006](docs/adr/0006-optional-assistant.md) and [docs/assistant.md](
 prompt, never run. Each item names the tests that must pass before it is checked
 (`docs/assistant.md`, "Build plan").
 
-- [ ] Config: key sources `api_key_keychain` and `api_key_command` beside `api_key_env`, `allow_http`,
-      `max_context_bytes`, `preview_local`, with the secret-key refusal unchanged
-      (`a_key_pasted_into_a_new_field_is_rejected_and_not_echoed`, `only_one_key_source_per_provider`)
-- [ ] Provider layer (`halyard-assistant`): OpenAI-compatible and Ollama local endpoints first, Anthropic
+- [ ] Config: secret-name exemptions per table first, then key sources `api_key_keychain` and
+      `api_key_command` beside `api_key_env`, `allow_http`, `max_context_bytes`, `preview_loopback`
+      (`secret_names_are_exempt_only_in_their_own_table`, `a_key_pasted_into_a_new_field_is_rejected_and_not_echoed`,
+      `only_one_key_source_per_provider`, `api_key_command_argv_holding_a_key_is_refused`,
+      `api_key_command_needs_a_private_config_file`)
+- [ ] Provider layer (`halyard-assistant`): OpenAI-compatible and Ollama endpoints on loopback first, Anthropic
       and OpenAI hosted as opt-in; no redirects, loopback-only `localhost`, size cap
       (`request_body_matches_the_preview_byte_for_byte`, `redirects_are_not_followed`,
       `no_network_crate_outside_halyard_assistant`)
-- [ ] Explicit context only: what the user chose, redacted, hidden characters removed, capped
-      (`redaction_corpus`, `hidden_characters_are_removed_and_counted`, `context_is_only_what_the_user_chose`)
-- [ ] Insert, never execute: single line, shell in the foreground, bracketed paste on
-      (`model_output_never_runs` with its control, `insertable_rejects_every_unsafe_scalar`)
+- [ ] Explicit context only: what the user chose, hidden characters removed, then redacted, then capped,
+      the question included (`redaction_corpus`, `hidden_characters_are_removed_and_counted`,
+      `the_question_is_redacted_too`, `context_is_only_what_the_user_chose`)
+- [ ] Insert, never execute: single line, fail-closed shell-foreground and prompt-mark gate, bracketed mode
+      checked on the session thread in the same step as the write (`model_output_never_runs` with its
+      control, `insertable_rejects_every_unsafe_scalar`, `insert_requires_shell_foreground_and_bracketed_paste`,
+      `insert_rechecks_bracketed_mode_on_the_session_thread`)
 - [ ] Keys in the OS keychain (macOS Keychain, Linux Secret Service) or an env var or helper command
+      (`keychain_round_trip`, `command_runner_times_out_and_hides_output_on_failure`)
 - [ ] Assistant panel: preview, per-request consent for remote hosts, provider indicator, no background
       sending (`assistant_off_builds_nothing`, `no_request_without_a_user_send`,
-      `remote_send_needs_consent_every_time`); threat model updated
-- [ ] MCP server bridge `halyard-mcp`: a session API controller, one tool per existing scope, typing still
-      approved per request (`each_tool_needs_its_scope`, `typing_through_the_bridge_still_opens_the_dialog`)
+      `remote_send_needs_consent_every_time`, `assistant_is_off_in_the_flatpak`); threat model updated
+- [ ] MCP server bridge `halyard-mcp`: a session API controller, one tool per existing scope, one grant per
+      MCP host, never "always allow typing" (`each_tool_needs_its_scope`,
+      `typing_through_the_bridge_still_opens_the_dialog`, `the_bridge_never_holds_standing_typing`)
 - [ ] MCP client with a trust model: deferred to its own ADR after the assistant ships
       (minimum trust model in `docs/assistant.md`, section 7.4)
 

@@ -14,17 +14,26 @@ design, with the tests that will prove it, is [docs/assistant.md](../assistant.m
    failed command, suggest a command, and answer a question about a chosen part of the
    scrollback. It has no tools, no agent loop, no file access and no background activity.
 3. **A suggested command is inserted at the shell prompt, never run.** Insert is allowed
-   only when the shell's line editor is in the foreground with bracketed paste on, and only
-   for a single line with no control or hidden characters. The user reads it, edits it and
-   presses Enter. No code path lets model output produce Enter or any other control byte.
-4. **Local first.** The first-class provider is a local OpenAI-compatible endpoint (Ollama,
-   llama.cpp's server, LM Studio). Hosted providers (Anthropic, OpenAI) are opt-in, and every
-   request to a host that is not loopback needs its own consent after a preview of the exact
-   text.
+   only for a single line with no control or hidden characters, only when a fail-closed
+   check finds the shell holding the terminal (and, with shell integration, sitting at a
+   prompt), and only through a session command that checks bracketed paste and writes in
+   the same step on the session thread. The user reads it, edits it and presses Enter. No
+   code path lets model output produce Enter or any other control byte. Bracketed paste is
+   required because without it printable keys are commands in a vi-mode line editor (`k#`
+   in zsh and `kvZZ` in bash run a history line).
+4. **Local first.** The first-class provider is an OpenAI-compatible endpoint on loopback
+   (Ollama, llama.cpp's server, LM Studio). Hosted providers (Anthropic, OpenAI) are opt-in,
+   and every request to a host that is not loopback needs its own consent after a preview of
+   the exact text. The UI calls such endpoints "loopback", not "local" or "private": a
+   process on loopback can forward the text elsewhere.
 5. **Keys never live in `config.toml`.** A key comes from the OS keychain (macOS Keychain,
    the freedesktop Secret Service on Linux), an environment variable named by
-   `api_key_env`, or a helper program named by an absolute path. The existing refusal of
-   secret-looking keys (`config.rs:479-492`, `config.rs:682`) stays exactly as strict.
+   `api_key_env`, or a helper program named by an absolute path whose argv is checked for
+   key-shaped values. The existing refusal of secret-looking keys (`config.rs:479-492`,
+   `config.rs:682`) is not relaxed. It has a gap at `main`: names in the schema are exempt
+   at any depth under `[ai]`, so `[ai] api_key_env = "<key>"` only warns. The config PR
+   closes that first, by exempting each name only in its own table, before adding any new
+   name.
 6. **A new crate, `halyard-assistant`, owns all network code.** It has no GPUI and no
    `halyard-term` dependency, so it cannot touch a PTY. HTTP is blocking `ureq` on a worker
    thread, the same "threads, not an async runtime" choice the session API made
@@ -32,8 +41,13 @@ design, with the tests that will prove it, is [docs/assistant.md](../assistant.m
 7. **MCP in v1 is a server, not a client.** Halyard ships `halyard-mcp`, a stdio MCP server
    that is an ordinary paired controller of the existing session API. It adds no authority:
    each MCP tool maps to one existing grant scope, and typing still goes through the
-   per-request approval dialog. An MCP **client** (the assistant calling user-configured
-   tools) is deferred until the assistant has shipped and been reviewed.
+   per-request approval dialog: the bridge never holds "always allow typing" (it pairs with
+   an additive `standing_input: false` parameter and refuses any grant that has it), and it
+   keeps one grant per MCP host (`--client-name`). An MCP **client** (the assistant calling
+   user-configured tools) is deferred until the assistant has shipped and been reviewed.
+8. **No assistant in the Flatpak in v1.** The Flatpak has no network permission
+   (`packaging/flatpak/io.github.pete_builds.Halyard.yml:31`) and CI pins that; its own
+   loopback is not the host's. Enabling it there is a later, separate decision.
 
 ## Why
 
@@ -53,7 +67,10 @@ design, with the tests that will prove it, is [docs/assistant.md](../assistant.m
   untrusted output, call tools with side effects, and it would need a new approval surface
   for arbitrary tool arguments, process spawning for stdio servers, and network access for
   remote ones. That is a second project.
-- Local endpoints keep text on the machine by default and need no account.
+- Loopback endpoints need no account, and keep text on the machine unless the process
+  listening there forwards it (a LiteLLM proxy, a cloud model served by Ollama, an
+  `ssh -L` tunnel). Halyard cannot see past the socket, so it says "loopback" and states
+  this as a residual risk rather than promising privacy.
 - `ureq` (3.5.2, MIT OR Apache-2.0, checked on crates.io 2026-11-22) is small and blocking.
   The TLS stack it uses (`rustls` 0.23.46, `ring` 0.17.14) is already in `Cargo.lock`
   through GPUI. GPUI's own HTTP client is not used: it is async, tied to the GPUI executor,
@@ -85,14 +102,15 @@ design, with the tests that will prove it, is [docs/assistant.md](../assistant.m
 
 ## Consequences
 
+- The session API gains one additive pairing parameter, `standing_input`, for the bridge.
 - New crates: `halyard-assistant` (library) and `halyard-mcp` (binary). New dependencies
   are `ureq`, a keychain path on each platform (`security-framework` 3.7.0 on macOS and
   `oo7` 0.5.0 on Linux, both already in `Cargo.lock` through GPUI) and, for the bridge
   only, `rmcp`. Each one passes `cargo deny` in the PR that adds it, and the PR lists the
   `cargo tree` diff.
-- `[[ai.providers]]` gains `api_key_keychain`, `api_key_command` and `allow_http`. Each
-  contains a secret-looking fragment or sits under `[ai]`, so each must be added to the
-  `PROVIDER` schema (`config.rs:469-475`) by name, and the existing tests
+- `[[ai.providers]]` gains `api_key_keychain`, `api_key_command` and `allow_http`. Secret
+  name exemptions become per table first (`secret_names_are_exempt_only_in_their_own_table`),
+  then each new name is added to the `PROVIDER` schema (`config.rs:469-475`), and the existing tests
   `other_secret_like_keys_are_rejected_too` and `api_key_in_config_is_rejected_with_guidance`
   (`crates/halyard-config/tests/config.rs:258-277`) must keep passing unchanged.
 - The threat model gains a prompt-injection section with its residual risk stated plainly
