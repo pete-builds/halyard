@@ -60,20 +60,10 @@ jobs:
         run: |
           flatpak install --user --noninteractive --assumeyes halyard.flatpak
           flatpak info --user io.github.pete_builds.Halyard
-      - name: Permissions are the documented ones
+      - name: Permissions are exactly the documented ones
         run: |
-          perms="$(flatpak info --user --show-permissions io.github.pete_builds.Halyard)"
-          echo "$perms"
-          for want in 'devices=dri;' 'sockets=wayland;fallback-x11;' 'org.freedesktop.Flatpak=talk' 'filesystems=host;'; do
-            if ! printf '%s\n' "$perms" | grep -qF -- "$want"; then
-              echo "missing permission: $want" >&2
-              exit 1
-            fi
-          done
-          if printf '%s\n' "$perms" | grep -q 'network'; then
-            echo "the app must not have network access" >&2
-            exit 1
-          fi
+          flatpak info --user --show-permissions io.github.pete_builds.Halyard \
+            | sh packaging/flatpak/check-permissions.sh
       - name: Smoke test inside the runtime
         run: |
           dbus-run-session -- flatpak run --user --command=sh io.github.pete_builds.Halyard \

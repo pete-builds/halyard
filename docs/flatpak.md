@@ -16,6 +16,7 @@ Everything lives in `packaging/flatpak/`:
 | `update-cargo-sources.sh`, `update-ghostty-sources.py` | Regenerate the two lists |
 | `check-sources.py` | CI check that the lists match `Cargo.lock` and the Ghostty pin |
 | `smoke-test.sh` | Checks the built binary's libraries without a display |
+| `check-permissions.sh` | CI check that the installed bundle has exactly the documented permissions |
 
 **App ID.** `io.github.pete_builds.Halyard`. Flatpak IDs are reverse-DNS names whose
 segments may not contain a hyphen, so the GitHub owner `pete-builds` is written
@@ -179,7 +180,8 @@ Verified by CI (`.github/workflows/flatpak.yml`) on every pull request:
   the Flathub `freedesktop-26.08` build container;
 - the desktop file passes `desktop-file-validate` (inside the build and on Ubuntu) and the
   metainfo passes `appstreamcli validate` (on Ubuntu; the SDK has no `appstreamcli`);
-- the installed bundle has exactly the permissions above and no network access;
+- the installed bundle has exactly the permissions above, nothing missing and nothing extra
+  (so no network access) (`check-permissions.sh`);
 - inside the Platform runtime (what users get): the binary exists, `ldd` finds every
   library it links, the libraries GPUI loads at run time are present, and `flatpak-spawn`
   is there (`smoke-test.sh`).
