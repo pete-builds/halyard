@@ -218,6 +218,14 @@ impl Frame {
         self.cells.get(usize::from(row) * usize::from(self.cols) + usize::from(col))
     }
 
+    /// Whether any visible cell is selected. Cheap: no round trip to the
+    /// session thread and no text copied (the right-click menu's Copy uses
+    /// it). A selection scrolled wholly out of view does not count.
+    #[must_use]
+    pub fn has_selection(&self) -> bool {
+        self.cells.iter().any(|c| c.flags.has(CellFlags::SELECTED))
+    }
+
     /// The text of one row, with trailing blanks trimmed. Wide spacers are
     /// skipped so wide glyphs appear once.
     #[must_use]

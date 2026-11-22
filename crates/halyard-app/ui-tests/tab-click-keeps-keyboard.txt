@@ -1,0 +1,17 @@
+# After a click on a tab, typing reaches that tab's shell (the window root
+# must not take keyboard focus from it).
+sleep 1500
+resize 900 500
+sleep 300
+action new_tab
+sleep 800
+mousedown 40 16
+mouseup 40 16
+sleep 300
+type echo typed-$((6*7))
+key enter
+sleep 600
+dump
+expect active 0
+expect typed-42
+quit

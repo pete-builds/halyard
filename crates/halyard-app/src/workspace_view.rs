@@ -175,6 +175,11 @@ impl WorkspaceView {
                 this.apply_settings(window, cx);
             }),
             cx.observe_window_activation(window, |this, window, cx| {
+                // Coming back to a window whose focused element went away
+                // while it was inactive: give the keyboard to the pane.
+                if window.is_window_active() && window.focused(cx).is_none() {
+                    this.focus_active_pane(window, cx);
+                }
                 this.approval_window_activated(window, cx);
                 this.refresh_chrome(window, cx);
                 for p in this.panes.values() {
@@ -449,8 +454,8 @@ impl WorkspaceView {
         if self.palette.is_some() {
             return;
         }
-        if let Some(f) = self.overlay_focus() {
-            window.focus(&f.clone());
+        if let Some(f) = self.overlay_focus(window) {
+            window.focus(&f);
             return;
         }
         match self.model.focused().and_then(|id| self.panes.get(&id)) {
@@ -523,11 +528,14 @@ impl WorkspaceView {
     }
 
     /// Close `ids`, asking first if a command is running in any of them.
-    /// `what` names them: "pane", "tab" or "other tabs".
+    /// `what` names them: "pane", "tab" or "other tabs". With `keep` (Close
+    /// Other Tabs), nothing closes if that tab has gone by the time the user
+    /// answers, which would otherwise close the whole window.
     fn close_panes_confirmed(
         &mut self,
         ids: Vec<PaneId>,
         what: &'static str,
+        keep: Option<tab_ui::TabRef>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -558,6 +566,9 @@ impl WorkspaceView {
         cx.spawn_in(window, async move |this, cx| {
             if answer.await == Ok(0) {
                 this.update_in(cx, |this, window, cx| {
+                    if !tab_ui::still_kept(keep.as_ref(), &this.model) {
+                        return;
+                    }
                     for id in ids {
                         this.close_pane(id, window, cx);
                     }
@@ -571,7 +582,7 @@ impl WorkspaceView {
     /// Close the focused pane, asking first if a command is running in it.
     fn close_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.model.focused() else { return };
-        self.close_panes_confirmed(vec![id], "pane", window, cx);
+        self.close_panes_confirmed(vec![id], "pane", None, window, cx);
     }
 
     /// The close button: close at once when idle, else ask.
@@ -1046,7 +1057,7 @@ impl WorkspaceView {
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.model.tabs().get(index) else { return };
         let ids = tab.root.panes();
-        self.close_panes_confirmed(ids, "tab", window, cx);
+        self.close_panes_confirmed(ids, "tab", None, window, cx);
     }
 
     fn render_panes(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {

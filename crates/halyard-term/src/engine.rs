@@ -1497,6 +1497,19 @@ mod tests {
     }
 
     #[test]
+    fn frames_report_whether_anything_visible_is_selected() {
+        let mut e = engine();
+        e.write(b"hello world");
+        assert!(!e.frame().unwrap().has_selection());
+        e.select_word(0, 0).unwrap();
+        assert!(e.frame().unwrap().has_selection());
+        e.selection_clear().unwrap();
+        assert!(!e.frame().unwrap().has_selection());
+        e.select_all().unwrap();
+        assert!(e.frame().unwrap().has_selection());
+    }
+
+    #[test]
     fn select_all_takes_scrollback_and_screen() {
         // Five rows on screen; the first lines scroll into scrollback.
         let mut e = engine();

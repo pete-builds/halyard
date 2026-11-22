@@ -63,6 +63,26 @@ jobs:
           RUSTFLAGS: ""
         run: cargo check --manifest-path vendor/xattr/Cargo.toml
 
+  ui:
+    # A real window driven by the debug-script harness (scripts/ui-check.sh):
+    # keyboard focus after tab clicks and in-place renames, right-click routing.
+    # Unit tests cannot see these (docs/testing.md).
+    name: window scripts (macos-15)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.15.2
+          use-cache: false
+      - name: Toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ui
+      - name: Window scripts
+        run: scripts/ui-check.sh
+
   deny:
     runs-on: ubuntu-24.04
     steps:

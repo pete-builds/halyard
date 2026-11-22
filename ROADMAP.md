@@ -141,9 +141,13 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       or into the old rename box went nowhere. Verified on macOS arm64 by debug script
       (double click, type, Enter; both menus; Copy, Paste and Split Right picked from the
       pane menu; keyboard selection; Shift+right-click under mouse reporting; a control run
-      without the focus fix failed). No Clear item: there is no clear action yet. Not
+      without the focus fix failed). Kept as window scripts run by `scripts/ui-check.sh`
+      (`crates/halyard-app/ui-tests/`: rename in place, a tab click keeping the keyboard, a
+      pane exiting mid-rename, a click elsewhere saving, right-click routing), each shown
+      failing against the bug it guards. No Clear item: there is no clear action yet. Not
       verified: Linux windows, a real mouse's right button (scripts post a Control-click,
-      which GPUI maps to the same right-button event), answering a close prompt from a menu.
+      which GPUI maps to the same right-button event), answering a close prompt from a menu,
+      Cmd-Tab away and back with a menu or name field open (scripts cannot activate a window).
 - [x] TOML config and token-based themes, bundled themes (library: `crates/halyard-config`, tests named in docs/themes.md)
 - [x] Settings wired into the app with live reload: font family, size and line height,
       padding, cursor style and blink, scrollback, shell and arguments, working directory,

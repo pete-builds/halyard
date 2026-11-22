@@ -29,7 +29,11 @@
 //! - `activate`: bring the app and this window to the front.
 //! - `closebutton`: press the window's close button (`-[NSWindow performClose:]`).
 //! - `dump`: print the focused pane's frame text and render count to stderr.
-//! - `quit`: quit the app.
+//! - `expect <text>`, `reject <text>`: check that the text `dump` would print
+//!   contains (or does not contain) `<text>`. A failed check prints
+//!   `halyard: check failed`, and `quit` then exits with status 1, so a
+//!   script is a test (`scripts/ui-check.sh`).
+//! - `quit`: quit the app (status 1 if a check failed).
 //!
 //! Lines starting with `#` and blank lines are ignored.
 
@@ -55,6 +59,8 @@ pub enum Step {
     Resize(f32, f32),
     /// Print the latest frame's text.
     Dump,
+    /// Check the dump text contains (`true`) or lacks (`false`) a string.
+    Check(bool, String),
     /// Run a config action by name.
     Action(String),
     /// A mouse event at a window position.
@@ -168,6 +174,9 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
             "rightdown" => Step::Mouse(mouse_args(arg, n, cmd, Button::Right, MouseKind::Down)?),
             "rightup" => Step::Mouse(mouse_args(arg, n, cmd, Button::Right, MouseKind::Up)?),
             "action" => Step::Action(arg.trim().to_owned()),
+            "expect" | "reject" if !arg.trim().is_empty() => {
+                Step::Check(cmd == "expect", arg.trim().to_owned())
+            }
             "copy" => {
                 let parts: Vec<&str> = arg.split_whitespace().collect();
                 let [from, to] = parts[..] else {
@@ -228,6 +237,7 @@ pub fn start<H: Host + 'static>(window: &mut Window, cx: &mut Context<H>) {
             }
         };
     cx.spawn_in(window, async move |this, cx| {
+        let mut failed = false;
         for step in steps {
             let result = match step {
                 Step::Sleep(d) => {
@@ -320,6 +330,16 @@ pub fn start<H: Host + 'static>(window: &mut Window, cx: &mut Context<H>) {
                         eprintln!("halyard: {}", host.script_dump(window, cx));
                     })
                     .map_err(|e| e.to_string()),
+                Step::Check(want, ref text) => this
+                    .update_in(cx, |host, window, cx| {
+                        let dump = host.script_dump(window, cx);
+                        if dump.contains(text.as_str()) != want {
+                            failed = true;
+                            let verb = if want { "expect" } else { "reject" };
+                            eprintln!("halyard: check failed: {verb} `{text}` in:\n{dump}");
+                        }
+                    })
+                    .map_err(|e| e.to_string()),
                 Step::CloseButton => cx
                     .update(|window, _| native_view(window))
                     .map_err(|e| e.to_string())
@@ -331,9 +351,12 @@ pub fn start<H: Host + 'static>(window: &mut Window, cx: &mut Context<H>) {
                         window.activate_window();
                     })
                     .map_err(|e| e.to_string()),
+                // A failed check ends the run with status 1 for the runner.
+                Step::Quit if failed => std::process::exit(1),
                 Step::Quit => cx.update(|_, cx| cx.quit()).map_err(|e| e.to_string()),
             };
             if let Err(e) = result {
+                failed = true;
                 eprintln!("halyard: debug script step failed: {e}");
             }
         }
@@ -561,7 +584,7 @@ mod tests {
 
     #[test]
     fn parses_every_command() {
-        let s = "# comment\n\nsleep 250\ntype ls -la\nkey ctrl-c\nshot /tmp/a.png\nselect 0 1 4 1\nresize 640 400\ndump\naction split_right\nmousedown 1 2\nmousemove 3 4\nmouseup 5 6\nrightdown 7 8 shift\nrightup 7 8\nmousedown 9 10 clicks=2\ncopy /a /b\nquit\n";
+        let s = "# comment\n\nsleep 250\ntype ls -la\nkey ctrl-c\nshot /tmp/a.png\nselect 0 1 4 1\nresize 640 400\ndump\naction split_right\nmousedown 1 2\nmousemove 3 4\nmouseup 5 6\nrightdown 7 8 shift\nrightup 7 8\nmousedown 9 10 clicks=2\nexpect names [Some(\"Build\")\nreject  not found \ncopy /a /b\nquit\n";
         let mouse = |button, kind, x, y| Mouse { button, kind, x, y, clicks: 1, shift: false };
         assert_eq!(
             parse(s).unwrap(),
@@ -583,6 +606,8 @@ mod tests {
                 }),
                 Step::Mouse(mouse(Button::Right, MouseKind::Up, 7.0, 8.0)),
                 Step::Mouse(Mouse { clicks: 2, ..mouse(Button::Left, MouseKind::Down, 9.0, 10.0) }),
+                Step::Check(true, "names [Some(\"Build\")".into()),
+                Step::Check(false, "not found".into()),
                 Step::Copy(PathBuf::from("/a"), PathBuf::from("/b")),
                 Step::Quit,
             ]
@@ -598,5 +623,7 @@ mod tests {
         assert!(parse("rightdown 1 2 ctrl").is_err(), "unknown modifier");
         assert!(parse("mousedown 1 2 clicks=x").is_err());
         assert!(parse("copy /only-one").is_err());
+        assert!(parse("expect").is_err(), "nothing to check");
+        assert!(parse("reject   ").is_err(), "nothing to check");
     }
 }

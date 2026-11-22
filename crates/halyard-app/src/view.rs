@@ -775,7 +775,7 @@ impl TerminalView {
             );
             if self.menu_press {
                 // Leave the selection alone: Copy in the menu needs it.
-                let has_selection = self.session.selection_text().is_some_and(|t| !t.is_empty());
+                let has_selection = frame.has_selection();
                 cx.emit(PaneEvent::ContextMenu { position: ev.position, has_selection });
                 cx.stop_propagation();
                 return;
@@ -836,8 +836,12 @@ impl TerminalView {
             }
             return;
         }
-        if self.session.latest_frame().mouse_tracking {
-            let button = ev.pressed_button.and_then(Self::button);
+        let button = ev.pressed_button.and_then(Self::button);
+        if decide::report_motion(
+            self.session.latest_frame().mouse_tracking,
+            self.menu_press,
+            button,
+        ) {
             let input = self.mouse_input(
                 MouseAction::Motion,
                 button,

@@ -51,6 +51,12 @@ impl TabRef {
     }
 }
 
+/// Whether a confirmed close may go ahead: true unless it must keep a tab
+/// (Close Other Tabs) and that tab has closed in the meantime.
+pub(super) fn still_kept(keep: Option<&TabRef>, model: &Workspace) -> bool {
+    keep.is_none_or(|t| t.index(model).is_some())
+}
+
 /// Save a typed tab name on `target`. An empty name clears it, so the tab
 /// shows its automatic title again. `auto` is the automatic title the field
 /// started with when the tab had no name: confirming it unchanged leaves the
@@ -121,9 +127,15 @@ impl WorkspaceView {
         }
     }
 
-    /// The focus handle an open field or menu holds, for `focus_active_pane`.
-    pub(super) fn overlay_focus(&self) -> Option<&FocusHandle> {
-        self.menu.as_ref().map(|m| &m.focus)
+    /// The focus handle an open menu, or a name field that has the keyboard,
+    /// keeps through `focus_active_pane`. A layout change while a name is
+    /// being typed (a pane exiting in another tab, a tool focusing a session)
+    /// must not hand the rest of the name to a shell.
+    pub(super) fn overlay_focus(&self, window: &Window) -> Option<FocusHandle> {
+        if let Some(m) = &self.menu {
+            return Some(m.focus.clone());
+        }
+        self.rename.as_ref().filter(|r| r.focus.is_focused(window)).map(|r| r.focus.clone())
     }
 
     // ------------------------------------------------------------- rename
@@ -150,10 +162,17 @@ impl WorkspaceView {
         let auto = name.is_none().then(|| self.tab_title(index, cx));
         let edit = LineEdit::new(name.as_deref().or(auto.as_deref()).unwrap_or_default());
         let focus = cx.focus_handle();
-        // Focus moving anywhere else (a click on a pane or another tab, the
-        // palette, a dialog) keeps the typed name, like a text field does.
-        let blur = cx.on_blur(&focus, window, |this, window, cx| {
-            this.commit_rename(false, window, cx);
+        // Focus moving anywhere else (the palette, a dialog) keeps the typed
+        // name, like a text field does; clicks are handled by the field's
+        // `on_mouse_down_out`.
+        // GPUI also reports a blur when the window goes inactive (Cmd-Tab)
+        // while the field keeps focus: then it stays open with the keyboard
+        // for when the user comes back.
+        let held = focus.clone();
+        let blur = cx.on_blur(&focus, window, move |this, window, cx| {
+            if !held.is_focused(window) {
+                this.commit_rename(false, window, cx);
+            }
         });
         window.focus(&focus);
         self.rename = Some(RenameUi { target, edit, auto, focus, _blur: blur });
@@ -276,6 +295,11 @@ impl WorkspaceView {
                 window.prevent_default();
                 cx.stop_propagation();
             })
+            // A click anywhere else saves the name before it lands. Not left
+            // to the blur: GPUI reports none while the window is inactive.
+            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                this.commit_rename(false, window, cx);
+            }))
             .flex_1()
             .min_w(px(0.0))
             .overflow_hidden()
@@ -345,8 +369,16 @@ impl WorkspaceView {
         }
         self.commit_rename(false, window, cx);
         let focus = cx.focus_handle();
-        let blur =
-            cx.on_blur(&focus, window, |this, window, cx| this.close_menu(false, window, cx));
+        // Focus moving elsewhere closes the menu. GPUI also reports a blur
+        // when the window goes inactive while the menu keeps focus: it closes
+        // then too, as native menus do, and hands the keyboard to the pane,
+        // or the window would come back focused on a handle that no longer
+        // draws.
+        let held = focus.clone();
+        let blur = cx.on_blur(&focus, window, move |this, window, cx| {
+            let deactivated = held.is_focused(window);
+            this.close_menu(deactivated, window, cx);
+        });
         window.focus(&focus);
         self.menu = Some(MenuUi {
             menu: Menu::new(entries),
@@ -406,7 +438,7 @@ impl WorkspaceView {
                             .filter(|j| *j != i)
                             .flat_map(|j| self.model.tabs()[j].root.panes())
                             .collect();
-                        self.close_panes_confirmed(ids, "other tabs", window, cx);
+                        self.close_panes_confirmed(ids, "other tabs", Some(t), window, cx);
                     }
                     Item::MoveTabLeft | Item::MoveTabRight => {
                         let to =
@@ -571,6 +603,9 @@ impl WorkspaceView {
         cx.stop_propagation();
         match ev.button {
             MouseButton::Left => {
+                // A click elsewhere saves a name being typed; `after_change`
+                // below would otherwise leave the keyboard in the field.
+                self.commit_rename(false, window, cx);
                 if self.model.select_tab(index) {
                     self.after_change(window, cx);
                     if ev.click_count >= 2 {
@@ -598,7 +633,10 @@ impl WorkspaceView {
                 .collect();
             (items, m.focus.is_focused(window))
         });
-        format!("rename (tab, text, focused) {rename:?}; menu (items, focused) {menu:?}")
+        format!(
+            "rename (tab, text, focused) {rename:?}; menu (items, focused) {menu:?}; window active {}",
+            window.is_window_active()
+        )
     }
 }
 
@@ -621,6 +659,17 @@ mod tests {
         ws.close_pane(a);
         assert!(commit_name(&mut ws, &c, "Build", None));
         assert_eq!(names(&ws), [None, Some("Build"), None], "the name is on C, now second");
+    }
+
+    #[test]
+    fn close_other_tabs_does_nothing_once_the_kept_tab_is_gone() {
+        let (mut ws, _) = Workspace::new();
+        let b = ws.new_tab();
+        let keep = TabRef::of(&ws, 1).unwrap();
+        assert!(still_kept(None, &ws), "plain closes always go ahead");
+        assert!(still_kept(Some(&keep), &ws));
+        ws.close_pane(b);
+        assert!(!still_kept(Some(&keep), &ws), "the kept tab exited while the dialog was up");
     }
 
     #[test]
