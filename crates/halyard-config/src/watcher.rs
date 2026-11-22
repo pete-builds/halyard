@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
+use notify::event::CreateKind;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::config::{Config, ConfigError, Loaded};
@@ -46,6 +47,7 @@ impl ConfigWatcher {
     /// Returns the underlying [`notify::Error`] when the OS watch cannot be set up.
     pub fn new(path: &Path, debounce: Duration) -> notify::Result<Self> {
         let file_name = path.file_name().map(std::ffi::OsStr::to_os_string);
+        let target = path.to_path_buf();
         let (raw_tx, raw_rx) = mpsc::channel::<()>();
         let (out_tx, out_rx) = mpsc::channel::<ConfigEvent>();
         let err_tx: Sender<ConfigEvent> = out_tx.clone();
@@ -60,7 +62,14 @@ impl ConfigWatcher {
                             | EventKind::Remove(_)
                             | EventKind::Any
                     );
-                    let ours = ev.paths.iter().any(|p| p.file_name() == file_name.as_deref());
+                    // A newly created ancestor directory counts too: inotify registers a watch
+                    // on it only after it exists, so a file written straight away can be missed.
+                    let dir_created =
+                        matches!(ev.kind, EventKind::Create(CreateKind::Folder | CreateKind::Any));
+                    let ours = ev.paths.iter().any(|p| {
+                        p.file_name() == file_name.as_deref()
+                            || (dir_created && target.starts_with(p))
+                    });
                     if relevant && ours {
                         // A send error means the worker already stopped; nothing to do.
                         let _ = raw_tx.send(());
