@@ -775,3 +775,30 @@ fn rows_stay_on_their_line_when_scrollback_drops_old_rows() {
         assert_eq!(rows[1] - rows[0], 20_001, "{rows:?} {h:?}");
     }
 }
+
+#[test]
+fn palette_change_on_an_idle_prompt_publishes_a_recolored_frame() {
+    // The window learns the desktop is dark after the panes started (Wayland
+    // reads the portal asynchronously) and recolors them while each shell sits
+    // idle at its prompt. No output follows, so the new colors must reach the
+    // screen from the palette change alone.
+    let s = spawn(80, 24);
+    // Let the prompt's output settle, then forget its events.
+    std::thread::sleep(Duration::from_millis(100));
+    while s.events().try_recv().is_ok() {}
+    let before = s.latest_frame();
+    let p = Palette {
+        background: halyard_term::Rgb::new(0xf4, 0xf1, 0xea),
+        foreground: halyard_term::Rgb::new(0x20, 0x20, 0x20),
+        ..Palette::default()
+    };
+    assert_ne!(before.background, p.background, "the test needs a different background");
+    s.set_palette(p.clone());
+    let f = wait_for(&s, "a recolored frame", |f| f.background == p.background);
+    assert!(f.generation > before.generation, "a new frame was published");
+    // The body is painted from the cells too: blank cells and the prompt follow.
+    assert_eq!(f.cell(79, 23).unwrap().bg, p.background, "a blank cell");
+    let row = (0..f.rows).find(|&r| f.row_text(r).starts_with(PROMPT.trim_end())).unwrap();
+    assert_eq!(f.cell(0, row).unwrap().fg, p.foreground, "the prompt text");
+    assert_eq!(f.cell(0, row).unwrap().bg, p.background, "the prompt background");
+}

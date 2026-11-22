@@ -137,6 +137,11 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       (`every_default_binding_is_loaded_except_unbuilt_actions`). Screenshots on macOS arm64
       (PR body). Not verified: the bar cursor in a focused window (the scripted window is never
       the active window), the system appearance switching live.
+      Open bug: on KDE Plasma 6 Wayland (v0.1.1, desktop dark, no config) the tab bar turned
+      Halyard Night while the idle terminal body stayed Halyard Day. Ruled out: the session not
+      publishing after a palette change
+      (`palette_change_on_an_idle_prompt_publishes_a_recolored_frame`,
+      `palette_change_after_a_frame_recolors_the_next_frame`). Real-desktop check pending.
 - [x] Command palette: Primary+Shift+P, fuzzy filter (`palette.rs`: `fuzzy_matches_subsequences_ignoring_case`,
       `word_starts_and_runs_rank_higher`, `every_built_action_has_a_command_with_a_shortcut_name`),
       every action with its shortcut, Switch Theme with live preview and revert on Escape,

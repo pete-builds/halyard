@@ -551,3 +551,33 @@ fn no_theme_error_or_warning_ever_echoes_a_value() {
     }
     assert!(checked > 100 && errors > 40, "checked {checked}, errors {errors}: not a real test");
 }
+
+#[test]
+fn chrome_surface_is_the_terminal_background_in_every_bundled_theme() {
+    // docs/themes.md: `surface` is `bg`. The window's chrome (tab bar area) and
+    // the terminal body are then one color, so a body left on another theme
+    // (a light body under dark chrome) is a visible bug, not a design choice.
+    let reg = ThemeRegistry::bundled();
+    for e in reg.entries() {
+        let t = &e.theme;
+        assert_eq!(t.ui.surface, t.terminal.background, "{}: ui.surface", t.name);
+        assert_eq!(t.palette().background, t.terminal.background, "{}: engine palette", t.name);
+    }
+}
+
+#[test]
+fn the_default_theme_for_each_appearance_matches_that_appearance() {
+    // With no config file the theme follows the desktop: Day when light, Night
+    // when dark. Chrome and body both come from that one theme.
+    let reg = ThemeRegistry::bundled();
+    let selection = halyard_config::ThemeSelection::default();
+    for appearance in [Appearance::Light, Appearance::Dark] {
+        let (t, fell_back) = reg.get_or_default(selection.name_for(appearance), appearance);
+        assert!(!fell_back, "{appearance:?}: the default name resolves");
+        assert_eq!(t.appearance, appearance, "{}", t.name);
+        assert_eq!(t.ui.surface, t.terminal.background, "{}", t.name);
+    }
+    let light = reg.default_for(Appearance::Light);
+    let dark = reg.default_for(Appearance::Dark);
+    assert_ne!(light.terminal.background, dark.terminal.background);
+}
