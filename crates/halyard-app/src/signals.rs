@@ -127,11 +127,21 @@ mod tests {
     #[test]
     fn integration_script_in_a_real_shell_makes_blocks() {
         let dir = tempfile::tempdir().unwrap();
-        let (shell, program) = ["/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash"]
+        // Fixed FHS paths first, then $PATH: Nix build sandboxes have no /bin/zsh
+        // or /bin/bash, only the shells their derivation puts on PATH.
+        let on_path = |name: &str| {
+            std::env::var_os("PATH").and_then(|paths| {
+                std::env::split_paths(&paths).map(|d| d.join(name)).find(|p| p.is_file())
+            })
+        };
+        let program = ["/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash"]
             .iter()
-            .find(|p| std::path::Path::new(p).exists())
-            .map(|p| (Shell::from_program(p).unwrap(), PathBuf::from(p)))
+            .map(PathBuf::from)
+            .find(|p| p.exists())
+            .or_else(|| on_path("zsh"))
+            .or_else(|| on_path("bash"))
             .expect("zsh or bash");
+        let shell = Shell::from_program(program.to_str().expect("utf-8 path")).unwrap();
         let script = dir.path().join(shell.script_file_name());
         std::fs::write(&script, halyard_shell::integration_script(shell)).unwrap();
         let rc = dir.path().join("rc");

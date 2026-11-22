@@ -503,6 +503,28 @@ fn observer_sees_the_cursor_row_at_each_mark() {
     assert!(*chunks.lock().unwrap() >= 1);
 }
 
+/// Newlines earlier in the same chunk move the cursor before the mark: the row
+/// must be read after the engine has the bytes up to the mark, not before the
+/// chunk (which would report the `a` line).
+#[test]
+fn the_mark_row_counts_newlines_earlier_in_the_same_chunk() {
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let chunks = Arc::new(Mutex::new(0));
+    let observer = RowAtOsc { rows: Arc::clone(&rows), chunks: Arc::clone(&chunks) };
+    let s = Session::spawn(SessionConfig { observer: Some(Box::new(observer)), ..config(40, 10) })
+        .expect("spawn");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    // One printf, one write: `a`, `b` and `c` reach the PTY with the mark.
+    run(&s, "printf 'a\\nb\\nc\\033]0;y\\007\\n'; echo nl-done");
+    let f = wait_for(&s, "the end", |f| row_equal(f, "nl-done").is_some());
+    let rows = rows.lock().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let c = absolute_row_of(&f, "c").expect("c on screen");
+    let a = absolute_row_of(&f, "a").expect("a on screen");
+    assert_eq!(c, a + 2);
+    assert_eq!(rows[0], c, "the mark is on the `c` line: {rows:?}");
+}
+
 #[test]
 fn an_invalid_session_id_is_replaced() {
     for bad in ["", "has space", "semi;colon", &"x".repeat(129)] {
