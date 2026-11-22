@@ -225,7 +225,7 @@ let
       commonArgs
       // {
         inherit cargoArtifacts;
-        cargoTestExtraArgs = "--workspace";
+        cargoTestExtraArgs = "--workspace --no-fail-fast";
         nativeBuildInputs = commonArgs.nativeBuildInputs ++ ptyTestPrograms;
         # The sandbox's HOME (/homeless-shelter) does not exist. Tests that
         # start shells and programs which read $HOME get a real, empty one.
