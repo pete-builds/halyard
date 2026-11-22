@@ -436,8 +436,23 @@ pub fn load(path: &Path) -> LoadResult {
     parse(&text)
 }
 
+/// Whether `dir` is Halyard's own default state directory (what
+/// [`state_dir_with`] gives without `HALYARD_STATE_DIR`).
+#[must_use]
+pub fn is_default_state_dir(
+    dir: &Path,
+    env: impl Fn(&str) -> Option<OsString>,
+    macos: bool,
+) -> bool {
+    let without_override = |k: &str| if k == "HALYARD_STATE_DIR" { None } else { env(k) };
+    state_dir_with(without_override, macos).is_some_and(|d| d == dir)
+}
+
 /// Write the state atomically (temporary file, fsync, rename) with mode
-/// 0600 in a directory with mode 0700 (created, or tightened if it exists).
+/// 0600 in a directory with mode 0700. The directory is chmodded to 0700
+/// only when this call created it or it is Halyard's own default
+/// directory: a `HALYARD_STATE_DIR` pointing at a folder the user owns for
+/// other reasons (home, a shared folder) keeps its mode.
 /// A state directory that is a symlink is refused, and the temporary file
 /// is created fresh without following symlinks.
 ///
@@ -449,13 +464,14 @@ pub fn save(path: &Path, state: &SavedState) -> std::io::Result<()> {
     if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(std::io::Error::other("the state directory is a symlink; not writing there"));
     }
+    let existed = dir.exists();
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(dir)?;
     #[cfg(unix)]
-    {
+    if !existed || is_default_state_dir(dir, |k| std::env::var_os(k), cfg!(target_os = "macos")) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
