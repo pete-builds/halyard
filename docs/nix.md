@@ -8,7 +8,7 @@ It provides the package, a dev shell, a Home Manager module and a NixOS module.
 
 ```sh
 nix build github:pete-builds/halyard      # the package, into ./result
-nix run github:pete-builds/halyard        # launch the terminal (once the app crate lands)
+nix run github:pete-builds/halyard        # launch the terminal
 nix develop                              # Rust, Zig 0.15.2, libraries, cargo-deny
 nix flake check                          # package, tests, clippy, fmt, pins, modules
 ```
@@ -168,7 +168,9 @@ evaluation error, not a silent override.
 without printing the value, any key named like a secret (containing key, token, secret,
 password, passwd or auth), the same rule Halyard applies when it reads the file. For an AI
 provider, export the key in an environment variable and name it with
-`api_key_env = "ANTHROPIC_API_KEY"`.
+`api_key_env = "ANTHROPIC_API_KEY"`. This guards the rendered `config.toml` only: a credential
+written in your own `.nix` files is already in the store, because a flake-based configuration
+copies its source there.
 
 The written `config.toml` and theme files are checked in CI by halyard-config's own parser
 (`crates/halyard-config/examples/check_files.rs`).
@@ -200,7 +202,11 @@ The `nix` workflow (`.github/workflows/nix.yml`) runs on `ubuntu-24.04` (x86_64-
 `ubuntu-24.04-arm` (aarch64-linux) and `macos-15` (aarch64-darwin):
 
 * `nix flake check`: the package build, `cargo test`, clippy with `-D warnings`, rustfmt, the
-  Ghostty pin check with its control, and the module checks.
+  Ghostty pin check with its control, `package-contents` (`bin/halyard`, and on Linux the
+  desktop entry, icons and every dlopened library resolving through RUNPATH, with a control),
+  and the module checks (the Home Manager output is loaded by halyard-config's parser).
+* On ubuntu-24.04, a Home Manager config with an `api_key` in `settings` must fail to evaluate
+  without printing the key's value.
 * `nix develop` runs fmt, clippy and the tests the way a contributor would.
 * On Linux, a control build first proves the sandbox has no network, so the package building
   in that sandbox shows the build is offline.

@@ -66,9 +66,10 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       pinned as inputs), on x86_64-linux, aarch64-linux, aarch64-darwin (`nix` workflow:
       `nix flake check` incl. `checks.*.ghostty-pin`, plus the sandbox network control).
       x86_64-darwin is not offered: the pinned nixpkgs dropped it.
-- [ ] `nix run`: `apps.default` runs the packaged `halyard`, whose RUNPATH resolves all 14
-      libraries GPUI dlopens (`checks.*.package-contents`). Package built and inspected on real
-      NixOS hardware; a window opening from `nix run` is not yet verified (NixOS VM test, #7)
+- [x] `nix run`: `apps.default` runs the packaged `halyard`, whose RUNPATH resolves all 14
+      libraries GPUI dlopens (`checks.*.package-contents`, with a control). On real NixOS
+      hardware (x86_64, KDE Plasma 6 Wayland, RTX 4070 Ti) at 5936fd0: `nix flake check` passed
+      and `nix run` opened Halyard. Not covered: aarch64-linux and X11 sessions on hardware
 - [ ] NixOS VM test: launches under Wayland and X11, screenshots
 - [x] macOS app bundle: `packaging/macos/build-app.sh` builds a universal `Halyard.app` (ad-hoc
       signed, icon from `packaging/icon/`) and a zip. Verified by hand on macOS arm64: built from
@@ -77,8 +78,9 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       the Intel slice has not been run, and the app is NOT notarized (see `docs/INSTALL.md`)
 - [x] Linux desktop entry and icon: `dist/linux/halyard.desktop` (`StartupWMClass=halyard`) and
       `dist/icons/halyard.svg` plus PNG 16 to 512, installed by the Nix package and checked by
-      `checks.x86_64-linux.package-contents` (`desktop-file-validate`). Not yet seen in a desktop
-      launcher
+      `checks.*.package-contents` on x86_64-linux and aarch64-linux (`desktop-file-validate`,
+      `StartupWMClass=halyard` matching the app id "halyard") and inspected in the package built on
+      the real NixOS box. Not yet seen in a desktop launcher menu
 - [ ] Real-hardware runs: macOS arm64 (cypher), NixOS on a real GPU (pending)
 
 ## Phase 2: modern UI
