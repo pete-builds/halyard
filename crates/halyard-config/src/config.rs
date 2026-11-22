@@ -11,11 +11,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use toml::de::{DeTable, DeValue};
 
 use crate::keys::{Action, KeyChord, Keymap, Platform, UNBIND};
-use crate::locate::{
-    find_header_line, find_key_line, key_at_offset, line_of_offset, section_at_offset,
-};
+use crate::locate::{Index, line_of_offset, parse_doc, value_free};
 use crate::theme::{Appearance, DEFAULT_DARK, DEFAULT_LIGHT};
 
 /// The commented default configuration, as printed by `halyard config --print-default`.
@@ -200,9 +199,10 @@ impl TryFrom<String> for WorkingDirectory {
             p if p.starts_with('/') || p == "~" || p.starts_with("~/") => {
                 Ok(Self::Path(PathBuf::from(p)))
             }
-            other => Err(format!(
-                "`{other}` is not valid: use `home`, `inherit`, or an absolute path (or one starting with `~/`)"
-            )),
+            _ => Err(
+                "not valid: use `home`, `inherit`, or an absolute path (or one starting with `~/`)"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -365,83 +365,124 @@ pub struct Config {
 // ---------------------------------------------------------------------------
 
 const TOP_KEYS: &[&str] = &["font", "window", "terminal", "theme", "keybindings", "ai", "agents"];
-const FONT_KEYS: &[&str] = &["family", "size", "line_height", "bold_is_bright"];
-const WINDOW_KEYS: &[&str] =
-    &["padding_x", "padding_y", "opacity", "blur", "decorations", "initial_cols", "initial_rows"];
-const TERMINAL_KEYS: &[&str] = &[
-    "scrollback_lines",
-    "shell",
-    "working_directory",
-    "cursor_style",
-    "cursor_blink",
-    "copy_on_select",
-    "confirm_close_running",
+
+/// What a key's value must be. The checks run on the parsed document, so no error needs to
+/// quote the value to say what was wrong.
+#[derive(Clone, Copy)]
+enum Kind {
+    Bool,
+    Number,
+    Int(i128, i128),
+    Str,
+    StrArray,
+    Enum(&'static [&'static str]),
+    /// Checked by dedicated code.
+    Custom,
+}
+
+impl Kind {
+    fn describe(self) -> String {
+        match self {
+            Kind::Bool => "a boolean (true or false)".into(),
+            Kind::Number => "a number".into(),
+            Kind::Int(lo, hi) => format!("an integer from {lo} to {hi}"),
+            Kind::Str => "a string".into(),
+            Kind::StrArray => "an array of strings".into(),
+            Kind::Enum(names) => {
+                let list: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
+                format!("one of {}", list.join(", "))
+            }
+            Kind::Custom => "a valid value".into(),
+        }
+    }
+
+    fn accepts(self, v: &DeValue<'_>) -> bool {
+        match (self, v) {
+            (Kind::Bool, DeValue::Boolean(_))
+            | (Kind::Number, DeValue::Integer(_) | DeValue::Float(_))
+            | (Kind::Str, DeValue::String(_))
+            | (Kind::Custom, _) => true,
+            (Kind::Int(lo, hi), DeValue::Integer(i)) => {
+                i128::from_str_radix(i.as_str(), i.radix()).is_ok_and(|n| (lo..=hi).contains(&n))
+            }
+            (Kind::StrArray, DeValue::Array(a)) => {
+                a.iter().all(|x| matches!(x.get_ref(), DeValue::String(_)))
+            }
+            (Kind::Enum(names), DeValue::String(s)) => names.contains(&s.as_ref()),
+            _ => false,
+        }
+    }
+}
+
+type Schema = &'static [(&'static str, Kind)];
+
+const FONT: Schema = &[
+    ("family", Kind::Str),
+    ("size", Kind::Number),
+    ("line_height", Kind::Number),
+    ("bold_is_bright", Kind::Bool),
 ];
-const SHELL_KEYS: &[&str] = &["program", "args"];
-const THEME_KEYS: &[&str] = &["name", "light", "dark"];
-const AI_KEYS: &[&str] = &["enabled", "providers"];
-const PROVIDER_KEYS: &[&str] = &["name", "kind", "base_url", "model", "api_key_env"];
-const AGENTS_KEYS: &[&str] = &["notify_on_waiting", "detect"];
+const WINDOW: Schema = &[
+    ("padding_x", Kind::Number),
+    ("padding_y", Kind::Number),
+    ("opacity", Kind::Number),
+    ("blur", Kind::Bool),
+    ("decorations", Kind::Enum(&["full", "none", "transparent_titlebar"])),
+    ("initial_cols", Kind::Int(0, 65_535)),
+    ("initial_rows", Kind::Int(0, 65_535)),
+];
+const TERMINAL: Schema = &[
+    ("scrollback_lines", Kind::Int(0, 4_294_967_295)),
+    ("shell", Kind::Custom),
+    ("working_directory", Kind::Str),
+    ("cursor_style", Kind::Enum(&["block", "bar", "underline"])),
+    ("cursor_blink", Kind::Bool),
+    ("copy_on_select", Kind::Bool),
+    ("confirm_close_running", Kind::Bool),
+];
+const SHELL: Schema = &[("program", Kind::Str), ("args", Kind::StrArray)];
+const THEME: Schema = &[("name", Kind::Str), ("light", Kind::Str), ("dark", Kind::Str)];
+const AI: Schema = &[("enabled", Kind::Bool), ("providers", Kind::Custom)];
+const PROVIDER: Schema = &[
+    ("name", Kind::Str),
+    ("kind", Kind::Enum(&["openai-compatible", "anthropic", "ollama"])),
+    ("base_url", Kind::Str),
+    ("model", Kind::Str),
+    ("api_key_env", Kind::Str),
+];
+const AGENTS: Schema = &[("notify_on_waiting", Kind::Bool), ("detect", Kind::StrArray)];
+
 /// Substrings that make a key name look like it holds a secret (matched case-insensitively).
 /// Applies to every key under `[ai]`, except the documented names such as `api_key_env`.
 const SECRET_FRAGMENTS: &[&str] = &["key", "token", "secret", "password", "passwd", "auth"];
 
-/// Shown instead of serde's or toml's own message for anything wrong inside `[ai]`, because
-/// those messages quote the offending value and a user may have pasted a key there.
-const AI_REDACTED: &str = "invalid value or syntax; details withheld because the value of an \
-     `[ai]` key could be a secret and is never echoed. See docs/configuration.md for the \
-     expected type, and if you pasted a key here, revoke it";
-
-/// Whether `key` is a documented `[ai]` or `[[ai.providers]]` key.
-fn is_known_ai_key(key: &str) -> bool {
-    AI_KEYS.contains(&key) || PROVIDER_KEYS.contains(&key)
+fn in_schema(schema: Schema, key: &str) -> bool {
+    schema.iter().any(|(n, _)| *n == key)
 }
 
 /// Whether an undocumented `[ai]` key looks like it holds a secret.
 fn is_secret_key(key: &str) -> bool {
-    if is_known_ai_key(key) {
+    if in_schema(AI, key) || in_schema(PROVIDER, key) {
         return false;
     }
     let lower = key.to_ascii_lowercase();
     SECRET_FRAGMENTS.iter().any(|f| lower.contains(f))
 }
 
-/// Whether the section name is `ai` or inside it.
-fn is_ai_section(section: &str) -> bool {
-    section == "ai" || section.starts_with("ai.")
+type Spanned<T> = toml::Spanned<T>;
+
+fn entry<'a, 'i>(t: &'a DeTable<'i>, name: &str) -> Option<&'a Spanned<DeValue<'i>>> {
+    t.iter().find(|(k, _)| k.get_ref().as_ref() == name).map(|(_, v)| v)
 }
 
-/// Best-effort line of `key` in `section`, falling back to the table header, then to
-/// the key that holds an inline table (`shell = { ... }`).
-fn line_for(src: &str, section: &str, occurrence: usize, key: &str) -> Option<usize> {
-    find_key_line(src, section, occurrence, key)
-        .or_else(|| find_header_line(src, section, occurrence))
-        .or_else(|| {
-            let (parent, last) = section.rsplit_once('.')?;
-            find_key_line(src, parent, 0, last)
-        })
+fn sub_table<'a, 'i>(t: &'a DeTable<'i>, name: &str) -> Option<&'a DeTable<'i>> {
+    entry(t, name).and_then(|v| v.get_ref().as_table())
 }
 
-fn unknown_in(
-    out: &mut Vec<ConfigWarning>,
-    src: &str,
-    table: &toml::Table,
-    section: &str,
-    known: &[&str],
-) {
-    for k in table.keys().filter(|k| !known.contains(&k.as_str())) {
-        let full = if section.is_empty() { k.clone() } else { format!("{section}.{k}") };
-        let line = if section.is_empty() {
-            find_key_line(src, "", 0, k).or_else(|| find_header_line(src, k, 0))
-        } else {
-            line_for(src, section, 0, k)
-        };
-        let mut message = "unknown key, ignored".to_string();
-        if let Some(near) = known.iter().find(|c| near_miss(c, k)) {
-            message.push_str(&format!(" (did you mean `{near}`?)"));
-        }
-        out.push(ConfigWarning { key: full, line, message });
-    }
+fn key_line(src: &str, t: &DeTable<'_>, name: &str) -> Option<usize> {
+    t.iter()
+        .find(|(k, _)| k.get_ref().as_ref() == name)
+        .map(|(k, _)| line_of_offset(src, k.span().start))
 }
 
 /// Cheap typo detector: equal after removing `-` and `_`, or about one edit apart.
@@ -468,87 +509,122 @@ fn near_miss(known: &str, given: &str) -> bool {
     head + tail + 1 >= x.len().max(y.len())
 }
 
-fn collect_warnings(src: &str, root: &toml::Table) -> Vec<ConfigWarning> {
+/// Unknown keys in a section become warnings. Under `[ai]` the name is NOT shown, because an
+/// unknown name there may be a pasted secret.
+fn unknown_in(
+    out: &mut Vec<ConfigWarning>,
+    src: &str,
+    table: &DeTable<'_>,
+    section: &str,
+    schema: Option<Schema>,
+    known_top: &[&str],
+    hide_names: bool,
+) {
+    for (k, _) in table {
+        let name = k.get_ref().as_ref();
+        let known = schema.map_or_else(|| known_top.contains(&name), |s| in_schema(s, name));
+        if known {
+            continue;
+        }
+        let line = Some(line_of_offset(src, k.span().start));
+        if hide_names {
+            let place = if section.contains("providers") { "[[ai.providers]]" } else { "[ai]" };
+            out.push(ConfigWarning {
+                key: section.to_string(),
+                line,
+                message: format!("unknown key in {place}, ignored (the name is not shown)"),
+            });
+            continue;
+        }
+        let full = if section.is_empty() { name.to_string() } else { format!("{section}.{name}") };
+        let mut message = "unknown key, ignored".to_string();
+        let names: Vec<&str> =
+            schema.map_or_else(|| known_top.to_vec(), |s| s.iter().map(|(n, _)| *n).collect());
+        if let Some(near) = names.iter().find(|c| near_miss(c, name)) {
+            message.push_str(&format!(" (did you mean `{near}`?)"));
+        }
+        out.push(ConfigWarning { key: full, line, message });
+    }
+}
+
+fn collect_warnings(src: &str, root: &DeTable<'_>) -> Vec<ConfigWarning> {
     let mut w = Vec::new();
-    unknown_in(&mut w, src, root, "", TOP_KEYS);
-    let sub = |name: &str| root.get(name).and_then(toml::Value::as_table);
-    let sections: [(&str, &[&str]); 6] = [
-        ("font", FONT_KEYS),
-        ("window", WINDOW_KEYS),
-        ("terminal", TERMINAL_KEYS),
-        ("theme", THEME_KEYS),
-        ("ai", AI_KEYS),
-        ("agents", AGENTS_KEYS),
-    ];
-    for (name, known) in sections {
-        if let Some(t) = sub(name) {
-            unknown_in(&mut w, src, t, name, known);
+    unknown_in(&mut w, src, root, "", None, TOP_KEYS, false);
+    for (name, schema) in [
+        ("font", FONT),
+        ("window", WINDOW),
+        ("terminal", TERMINAL),
+        ("theme", THEME),
+        ("agents", AGENTS),
+    ] {
+        if let Some(t) = sub_table(root, name) {
+            unknown_in(&mut w, src, t, name, Some(schema), &[], false);
         }
     }
-    if let Some(shell) =
-        sub("terminal").and_then(|t| t.get("shell")).and_then(toml::Value::as_table)
-    {
-        unknown_in(&mut w, src, shell, "terminal.shell", SHELL_KEYS);
+    if let Some(shell) = sub_table(root, "terminal").and_then(|t| sub_table(t, "shell")) {
+        unknown_in(&mut w, src, shell, "terminal.shell", Some(SHELL), &[], false);
     }
-    for (i, t) in providers(root).enumerate() {
-        for k in t.keys().filter(|k| !PROVIDER_KEYS.contains(&k.as_str()) && !is_secret_key(k)) {
-            w.push(ConfigWarning {
-                key: format!("ai.providers[{i}].{k}"),
-                line: line_for(src, "ai.providers", i, k),
-                message: "unknown key, ignored".into(),
-            });
+    if let Some(ai) = sub_table(root, "ai") {
+        unknown_in(&mut w, src, ai, "ai", Some(AI), &[], true);
+        for (i, p) in provider_tables(ai).enumerate() {
+            unknown_in(&mut w, src, p, &format!("ai.providers[{i}]"), Some(PROVIDER), &[], true);
         }
     }
     w
 }
 
-fn providers(root: &toml::Table) -> impl Iterator<Item = &toml::Table> {
-    root.get("ai")
-        .and_then(toml::Value::as_table)
-        .and_then(|t| t.get("providers"))
-        .and_then(toml::Value::as_array)
+fn provider_tables<'a, 'i>(ai: &'a DeTable<'i>) -> impl Iterator<Item = &'a DeTable<'i>> {
+    entry(ai, "providers")
+        .and_then(|v| v.get_ref().as_array())
         .into_iter()
-        .flatten()
-        .filter_map(toml::Value::as_table)
+        .flat_map(|a| a.iter())
+        .filter_map(|v| v.get_ref().as_table())
 }
 
-fn secret_error(key: &str, line: Option<usize>) -> ConfigError {
+fn secret_error(section: &str, line: Option<usize>) -> ConfigError {
     ConfigError::at(
-        key,
+        section,
         line,
-        "Halyard never stores API keys in the config file. Export the key in an environment \
-         variable (or keep it in your keychain or secret manager and export it from there) \
-         and set `api_key_env = \"NAME_OF_VARIABLE\"` instead",
+        "a key here is named like a secret (key, token, secret, password or auth; the name is \
+         not shown). Halyard never stores API keys in the config file. Export the key in an \
+         environment variable (or keep it in your keychain or secret manager and export it \
+         from there) and set `api_key_env = \"NAME_OF_VARIABLE\"` instead",
     )
 }
 
-/// Reject any secret-looking key anywhere under `[ai]`, including keys nested in tables
-/// such as `headers`. Only key NAMES are reported, never values.
-fn reject_secrets(src: &str, root: &toml::Table) -> Result<(), ConfigError> {
-    let Some(ai) = root.get("ai").and_then(toml::Value::as_table) else {
-        return Ok(());
-    };
-    if let Some(k) = ai.keys().find(|k| is_secret_key(k)) {
-        return Err(secret_error(&format!("ai.{k}"), line_for(src, "ai", 0, k)));
+/// Find a secret-looking key name anywhere under `table`, however deeply nested.
+fn find_secret_name(src: &str, table: &DeTable<'_>) -> Option<usize> {
+    for (k, v) in table {
+        if is_secret_key(k.get_ref().as_ref()) {
+            return Some(line_of_offset(src, k.span().start));
+        }
+        let nested = match v.get_ref() {
+            DeValue::Table(t) => find_secret_name(src, t),
+            DeValue::Array(a) => a
+                .iter()
+                .filter_map(|x| x.get_ref().as_table())
+                .find_map(|t| find_secret_name(src, t)),
+            _ => None,
+        };
+        if nested.is_some() {
+            return nested;
+        }
     }
-    for (i, t) in providers(root).enumerate() {
-        if let Some(k) = t.keys().find(|k| is_secret_key(k)) {
-            return Err(secret_error(
-                &format!("ai.providers[{i}].{k}"),
-                line_for(src, "ai.providers", i, k),
-            ));
-        }
-        for (outer, v) in t {
-            if let Some(inner) = v.as_table()
-                && let Some(k) = inner.keys().find(|k| is_secret_key(k))
-            {
-                let section = format!("ai.providers.{outer}");
-                return Err(secret_error(
-                    &format!("ai.providers[{i}].{outer}.{k}"),
-                    line_for(src, &section, 0, k),
-                ));
-            }
-        }
+    None
+}
+
+/// Reject any secret-looking key name anywhere under `[ai]`. Decided from the parsed tree, so
+/// quoting, dotted keys and multi-line strings cannot hide one. Names are never reported.
+fn reject_secrets(src: &str, root: &DeTable<'_>) -> Result<(), ConfigError> {
+    let Some(ai) = sub_table(root, "ai") else { return Ok(()) };
+    if let Some(line) = find_secret_name(src, ai) {
+        // Say where: the nearest documented section, never the name.
+        let providers: Vec<&DeTable<'_>> = provider_tables(ai).collect();
+        let section = providers
+            .iter()
+            .position(|p| find_secret_name(src, p).is_some())
+            .map_or_else(|| "ai".to_string(), |i| format!("ai.providers[{i}]"));
+        return Err(secret_error(&section, Some(line)));
     }
     Ok(())
 }
@@ -566,39 +642,163 @@ fn valid_env_name(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+fn type_error(path: &str, line: Option<usize>, kind: Kind) -> ConfigError {
+    ConfigError::at(path, line, format!("expected {}", kind.describe()))
+}
+
+/// Check every value's type, enum membership and integer range against the schema.
+/// The messages state what was expected, never what was found.
+fn check_section(
+    src: &str,
+    path: &str,
+    table: &DeTable<'_>,
+    schema: Schema,
+) -> Result<(), ConfigError> {
+    for (k, v) in table {
+        let name = k.get_ref().as_ref();
+        if let Some((_, kind)) = schema.iter().find(|(n, _)| *n == name)
+            && !kind.accepts(v.get_ref())
+        {
+            return Err(type_error(
+                &format!("{path}.{name}"),
+                Some(line_of_offset(src, k.span().start)),
+                *kind,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_keys(
+    path: &str,
+    table: &DeTable<'_>,
+    parent_line: Option<usize>,
+    names: &[&str],
+) -> Result<(), ConfigError> {
+    for n in names {
+        if entry(table, n).is_none() {
+            return Err(ConfigError::at(path, parent_line, format!("missing required key `{n}`")));
+        }
+    }
+    Ok(())
+}
+
+fn check_types(src: &str, root: &DeTable<'_>) -> Result<(), ConfigError> {
+    for name in TOP_KEYS {
+        if let Some(v) = entry(root, name)
+            && !matches!(v.get_ref(), DeValue::Table(_))
+        {
+            return Err(ConfigError::at(
+                name,
+                key_line(src, root, name),
+                "expected a table (a section)",
+            ));
+        }
+    }
+    for (name, schema) in [
+        ("font", FONT),
+        ("window", WINDOW),
+        ("terminal", TERMINAL),
+        ("theme", THEME),
+        ("agents", AGENTS),
+        ("ai", AI),
+    ] {
+        if let Some(t) = sub_table(root, name) {
+            check_section(src, name, t, schema)?;
+        }
+    }
+    if let Some(t) = sub_table(root, "terminal") {
+        if let Some(wd) = entry(t, "working_directory").and_then(|v| match v.get_ref() {
+            DeValue::String(s) => Some(s.as_ref().to_string()),
+            _ => None,
+        }) && !(matches!(wd.as_str(), "home" | "inherit" | "~")
+            || wd.starts_with('/')
+            || wd.starts_with("~/"))
+        {
+            return Err(ConfigError::at(
+                "terminal.working_directory",
+                key_line(src, t, "working_directory"),
+                "must be `home`, `inherit`, or an absolute path (or one starting with `~/`)",
+            ));
+        }
+        if let Some(shell) = entry(t, "shell") {
+            let line = key_line(src, t, "shell");
+            let DeValue::Table(st) = shell.get_ref() else {
+                return Err(ConfigError::at(
+                    "terminal.shell",
+                    line,
+                    "expected a table with `program` and optional `args`",
+                ));
+            };
+            check_section(src, "terminal.shell", st, SHELL)?;
+            require_keys("terminal.shell", st, line, &["program"])?;
+        }
+    }
+    if let Some(kb) = entry(root, "keybindings").and_then(|v| v.get_ref().as_table()) {
+        for (k, v) in kb {
+            if !matches!(v.get_ref(), DeValue::String(_)) {
+                return Err(type_error(
+                    &format!("keybindings.{}", k.get_ref()),
+                    Some(line_of_offset(src, k.span().start)),
+                    Kind::Str,
+                ));
+            }
+        }
+    }
+    if let Some(ai) = sub_table(root, "ai")
+        && let Some(p) = entry(ai, "providers")
+    {
+        let line = key_line(src, ai, "providers");
+        let DeValue::Array(items) = p.get_ref() else {
+            return Err(ConfigError::at(
+                "ai.providers",
+                line,
+                "expected an array of tables (`[[ai.providers]]`)",
+            ));
+        };
+        for (i, item) in items.iter().enumerate() {
+            let path = format!("ai.providers[{i}]");
+            let item_line = Some(line_of_offset(src, item.span().start));
+            let DeValue::Table(t) = item.get_ref() else {
+                return Err(ConfigError::at(&path, item_line, "expected a table"));
+            };
+            check_section(src, &path, t, PROVIDER)?;
+            require_keys(&path, t, item_line, &["name", "kind", "model"])?;
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     /// Parse and validate a config file's text.
     ///
     /// Unknown keys become warnings; everything else that is wrong is an error
-    /// naming the key and line.
+    /// naming the key and line. No error or warning ever contains a VALUE from the
+    /// file, because any value might be a pasted secret. Messages hold key paths, line
+    /// numbers and what was expected. Under `[ai]` they do not hold unknown key names
+    /// either. See "Error messages" in `docs/configuration.md`.
     ///
     /// # Errors
     /// Returns a [`ConfigError`] for TOML syntax errors, wrong types, unknown
     /// enum values, out-of-range numbers, bad key chords, a key stored in the
     /// config, and similar.
     pub fn parse(src: &str) -> Result<Loaded, ConfigError> {
-        let root: toml::Table = toml::from_str(src).map_err(|e| {
-            let in_ai = e.span().is_some_and(|s| is_ai_section(&section_at_offset(src, s.start)));
-            ConfigError {
-                path: None,
-                key: None,
-                line: e.span().map(|s| line_of_offset(src, s.start)),
-                message: if in_ai { AI_REDACTED.to_string() } else { e.message().to_string() },
-            }
+        let doc = parse_doc(src).map_err(|e| ConfigError {
+            path: None,
+            key: None,
+            line: e.line,
+            message: e.message,
         })?;
-        reject_secrets(src, &root)?;
-        let warnings = collect_warnings(src, &root);
+        let ix = Index::build(src, &doc, true);
+        reject_secrets(src, &doc)?;
+        check_types(src, &doc)?;
+        let warnings = collect_warnings(src, &doc);
         let config: Config = toml::from_str(src).map_err(|e| {
-            let (key, line) = match e.span() {
-                Some(s) => key_at_offset(src, s.start),
-                None => (None, 1),
-            };
-            let in_ai = key.as_deref().is_some_and(|k| k == "ai" || k.starts_with("ai."))
-                || e.span().is_some_and(|s| is_ai_section(&section_at_offset(src, s.start)));
-            let message = if in_ai { AI_REDACTED.to_string() } else { e.message().to_string() };
-            ConfigError { path: None, key, line: Some(line), message }
+            let key = e.span().and_then(|s| ix.path_at(s.start));
+            let line = e.span().map(|s| line_of_offset(src, s.start));
+            ConfigError { path: None, key, line, message: value_free(e.message()) }
         })?;
-        config.validate(src)?;
+        config.validate(&ix)?;
         Ok(Loaded { config, warnings })
     }
 
@@ -621,14 +821,14 @@ impl Config {
         })
     }
 
-    fn validate(&self, src: &str) -> Result<(), ConfigError> {
+    fn validate(&self, ix: &Index) -> Result<(), ConfigError> {
         let range =
             |section: &str, key: &str, v: f64, lo: f64, hi: f64| -> Result<(), ConfigError> {
                 if v.is_nan() || v < lo || v > hi {
                     Err(ConfigError::at(
                         &format!("{section}.{key}"),
-                        line_for(src, section, 0, key),
-                        format!("{v} is out of range; expected {lo} to {hi}"),
+                        ix.line(&format!("{section}.{key}")),
+                        format!("is out of range; expected {lo} to {hi}"),
                     ))
                 } else {
                     Ok(())
@@ -638,7 +838,7 @@ impl Config {
         if f.family.trim().is_empty() {
             return Err(ConfigError::at(
                 "font.family",
-                line_for(src, "font", 0, "family"),
+                ix.line("font.family"),
                 "must not be empty",
             ));
         }
@@ -653,32 +853,35 @@ impl Config {
         if t.shell.as_ref().is_some_and(|s| s.program.trim().is_empty()) {
             return Err(ConfigError::at(
                 "terminal.shell.program",
-                line_for(src, "terminal.shell", 0, "program"),
+                ix.line("terminal.shell.program"),
                 "must not be empty",
             ));
         }
-        self.validate_theme(src)?;
+        self.validate_theme(ix)?;
         for (i, p) in self.ai.providers.iter().enumerate() {
-            self.validate_provider(src, i, p)?;
+            self.validate_provider(ix, i, p)?;
         }
         for (i, name) in self.agents.detect.iter().enumerate() {
             if name.trim().is_empty() {
                 return Err(ConfigError::at(
                     &format!("agents.detect[{i}]"),
-                    line_for(src, "agents", 0, "detect"),
+                    ix.line("agents.detect"),
                     "process names must not be empty",
                 ));
             }
         }
-        self.keymap_checked(Platform::Mac, src)?;
-        self.keymap_checked(Platform::Linux, src)?;
+        self.keymap_checked(Platform::Mac, Some(ix))?;
+        self.keymap_checked(Platform::Linux, Some(ix))?;
         Ok(())
     }
 
-    fn validate_theme(&self, src: &str) -> Result<(), ConfigError> {
+    fn validate_theme(&self, ix: &Index) -> Result<(), ConfigError> {
         // `light` and `dark` default to the bundled pair, so a conflict can only
         // be seen from what the user actually wrote.
-        let written = |k: &str| find_key_line(src, "theme", 0, k);
+        let written = |k: &str| {
+            let p = format!("theme.{k}");
+            ix.has(&p).then(|| ix.line(&p)).flatten()
+        };
         if self.theme.name.is_some()
             && let Some(l) = written("light").or_else(|| written("dark"))
         {
@@ -695,12 +898,12 @@ impl Config {
 
     fn validate_provider(
         &self,
-        src: &str,
+        ix: &Index,
         i: usize,
         p: &ProviderConfig,
     ) -> Result<(), ConfigError> {
-        let l = |k: &str| line_for(src, "ai.providers", i, k);
         let key = |k: &str| format!("ai.providers[{i}].{k}");
+        let l = |k: &str| ix.line(&key(k));
         if p.name.trim().is_empty() {
             return Err(ConfigError::at(&key("name"), l("name"), "must not be empty"));
         }
@@ -754,12 +957,16 @@ impl Config {
         Ok(())
     }
 
-    fn keymap_checked(&self, platform: Platform, src: &str) -> Result<Keymap, ConfigError> {
+    fn keymap_checked(
+        &self,
+        platform: Platform,
+        ix: Option<&Index>,
+    ) -> Result<Keymap, ConfigError> {
         let mut map = Keymap::defaults(platform);
         let mut seen: BTreeMap<KeyChord, &str> = BTreeMap::new();
         for (chord_s, action_s) in &self.keybindings {
             let key = format!("keybindings.{chord_s}");
-            let line = find_key_line(src, "keybindings", 0, chord_s);
+            let line = ix.and_then(|ix| ix.line(&key));
             let chord = KeyChord::parse(chord_s, platform)
                 .map_err(|e| ConfigError::at(&key, line, e.to_string()))?;
             if let Some(prev) = seen.insert(chord, chord_s) {
@@ -778,7 +985,7 @@ impl Config {
                         &key,
                         line,
                         format!(
-                            "`{action_s}` is not an action; use `none` or one of: {}",
+                            "the value is not an action (it is not shown); use `none` or one of: {}",
                             names.join(", ")
                         ),
                     )
@@ -796,7 +1003,7 @@ impl Config {
     /// A bad chord or action name. [`Config::parse`] already rejects these, so
     /// this only fails for a `Config` built by hand.
     pub fn keymap(&self, platform: Platform) -> Result<Keymap, ConfigError> {
-        self.keymap_checked(platform, "")
+        self.keymap_checked(platform, None)
     }
 }
 

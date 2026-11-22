@@ -168,3 +168,71 @@ fn a_constant_event_stream_still_reloads_within_the_cap() {
     // Cap is 500 ms after the first event; allow scheduling and file system latency.
     assert!(at < Duration::from_millis(1100), "first reload took {at:?}");
 }
+
+/// Discard events until none arrives for `quiet`.
+fn drain(w: &ConfigWatcher, quiet: Duration) {
+    while w.recv_timeout(quiet).is_some() {}
+}
+
+#[test]
+fn a_themes_directory_created_after_startup_is_watched() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    fs::write(&file, "").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let w = ConfigWatcher::new(&file, Duration::from_millis(50)).unwrap();
+    let themes = dir.path().join("themes");
+    fs::create_dir(&themes).unwrap();
+    // Creating the directory is itself an event; let it and the new watch settle.
+    let _ = wait_for(&w, "themes dir created", |_| true);
+    drain(&w, Duration::from_millis(600));
+    fs::write(themes.join("mine.toml"), "name = \"x\"\n").unwrap();
+    let _ = wait_for(&w, "a theme file written into the new themes dir", |_| true);
+}
+
+#[test]
+fn a_relative_config_path_that_does_not_exist_yet_is_noticed() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    let w = ConfigWatcher::new(std::path::Path::new("sub/config.toml"), Duration::from_millis(50));
+    std::env::set_current_dir(&before).unwrap();
+    let w = w.unwrap();
+    let file = dir.path().join("sub").join("config.toml");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "[font]\nsize = 37\n").unwrap();
+    let ev = wait_for(&w, "size 37 for a relative path", |e| {
+        e.as_ref().is_ok_and(|l| (l.config.font.size - 37.0).abs() < 0.01)
+    });
+    assert!(ev.is_ok());
+}
+
+#[test]
+fn a_deleted_and_recreated_config_directory_is_noticed_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_dir = dir.path().join("halyard");
+    let file = cfg_dir.join("config.toml");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::write(&file, "[font]\nsize = 12\n").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let w = ConfigWatcher::new(&file, Duration::from_millis(50)).unwrap();
+
+    fs::remove_dir_all(&cfg_dir).unwrap();
+    let _ = wait_for(&w, "defaults after the directory is deleted", |e| {
+        e.as_ref().is_ok_and(|l| l.config == Config::default())
+    });
+    drain(&w, Duration::from_millis(600));
+    fs::create_dir(&cfg_dir).unwrap();
+    fs::write(&file, "[font]\nsize = 41\n").unwrap();
+    let _ = wait_for(&w, "size 41 after the directory is recreated", |e| {
+        e.as_ref().is_ok_and(|l| (l.config.font.size - 41.0).abs() < 0.01)
+    });
+    // And once more, to show the moved watch works the same way a second time.
+    fs::remove_dir_all(&cfg_dir).unwrap();
+    drain(&w, Duration::from_millis(600));
+    fs::create_dir(&cfg_dir).unwrap();
+    fs::write(&file, "[font]\nsize = 42\n").unwrap();
+    let _ = wait_for(&w, "size 42 after a second recreate", |e| {
+        e.as_ref().is_ok_and(|l| (l.config.font.size - 42.0).abs() < 0.01)
+    });
+}

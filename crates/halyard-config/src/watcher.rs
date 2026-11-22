@@ -1,12 +1,12 @@
 //! Live reload: watch the config file and hand back the new configuration or the error.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use notify::event::CreateKind;
+use notify::event::{CreateKind, RemoveKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::config::{Config, ConfigError, Loaded, themes_dir_for};
@@ -28,9 +28,13 @@ pub const MAX_DEBOUNCE: Duration = Duration::from_millis(500);
 /// replacing the file (write a temp file, rename over it) are noticed. If the
 /// directory does not exist yet, the nearest existing ancestor is watched
 /// non-recursively, and the watch moves one level deeper each time the next
-/// directory on the way to the file appears. (notify's non-recursive mode reports
-/// only direct children, so a recursive watch of something like `$HOME` is never needed.)
-/// A deleted file reloads as the defaults.
+/// directory on the way to the file appears, and back up when a watched directory is
+/// deleted. (notify's non-recursive mode reports only direct children, so a recursive
+/// watch of something like `$HOME` is never needed.) The watched directory's own parent is
+/// watched too, so that deleting and recreating the directory is noticed. The `themes/`
+/// directory is watched as soon as it exists, including when it is created after startup.
+/// A relative path is made absolute against the working directory when the watcher is
+/// created. A deleted file reloads as the defaults.
 ///
 /// After the first event of a burst the reload waits until no further event has
 /// arrived for `debounce`, but never longer than [`MAX_DEBOUNCE`] in total.
@@ -45,10 +49,29 @@ pub struct ConfigWatcher {
 
 /// What the notify callback tells the worker thread.
 enum Raw {
-    /// The config file or themes directory changed.
+    /// The config file or something in the themes directory changed.
     Changed,
-    /// A directory on the way to the config file appeared: move the watch deeper.
+    /// A directory on the way to the config file appeared or vanished: move the watch.
     Rewatch,
+    /// The themes directory itself appeared or vanished: move the watch and reload.
+    ChangedRewatch,
+}
+
+/// Make `path` absolute against `cwd` and drop `.` and `..` components lexically, so a path
+/// that does not exist yet still compares equal to the paths file systems report.
+fn absolutize(cwd: &Path, path: &Path) -> PathBuf {
+    let joined = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+    let mut out = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Canonicalize the longest existing prefix of `path` and re-append the rest, so a path
@@ -72,12 +95,16 @@ fn canon_lenient(path: &Path) -> PathBuf {
 }
 
 /// The directories to watch for `path`, all non-recursive: the config's parent (or the
-/// nearest existing ancestor of it) and the themes directory when it exists.
+/// nearest existing ancestor of it), that directory's own parent (so deleting and
+/// recreating it is seen), and the themes directory when it exists.
 fn watch_roots(path: &Path) -> Vec<PathBuf> {
     let parent =
         path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     let root = parent.ancestors().find(|a| a.is_dir()).unwrap_or_else(|| Path::new("."));
     let mut roots = vec![root.to_path_buf()];
+    if let Some(up) = root.parent().filter(|p| !p.as_os_str().is_empty()) {
+        roots.push(up.to_path_buf());
+    }
     let themes = themes_dir_for(path);
     if themes.is_dir() {
         roots.push(themes);
@@ -85,18 +112,23 @@ fn watch_roots(path: &Path) -> Vec<PathBuf> {
     roots
 }
 
-fn rewatch(watcher: &Mutex<RecommendedWatcher>, old: &mut Vec<PathBuf>, path: &Path) {
-    let Ok(mut w) = watcher.lock() else { return };
+/// Recompute the watch set and apply the difference. New roots are watched BEFORE the
+/// old ones are released, so there is no moment with nothing watched. Returns whether the
+/// set changed.
+fn rewatch(watcher: &Mutex<RecommendedWatcher>, old: &mut Vec<PathBuf>, path: &Path) -> bool {
+    let Ok(mut w) = watcher.lock() else { return false };
     let new = watch_roots(path);
-    for r in old.iter().filter(|r| !new.contains(r)) {
-        // The directory may be gone already; there is nothing to undo then.
-        let _ = w.unwatch(r);
-    }
     for r in new.iter().filter(|r| !old.contains(r)) {
         // Best effort: a directory that vanished again is picked up by the next event.
         let _ = w.watch(r, RecursiveMode::NonRecursive);
     }
+    for r in old.iter().filter(|r| !new.contains(r)) {
+        // The directory may be gone already; there is nothing to undo then.
+        let _ = w.unwatch(r);
+    }
+    let changed = *old != new;
     *old = new;
+    changed
 }
 
 impl ConfigWatcher {
@@ -107,6 +139,7 @@ impl ConfigWatcher {
     /// # Errors
     /// Returns the underlying [`notify::Error`] when the OS watch cannot be set up.
     pub fn new(path: &Path, debounce: Duration) -> notify::Result<Self> {
+        let path = &absolutize(&std::env::current_dir().map_err(notify::Error::io)?, path);
         let target = canon_lenient(path);
         let themes = canon_lenient(&themes_dir_for(path));
         let (raw_tx, raw_rx) = mpsc::channel::<Raw>();
@@ -126,19 +159,32 @@ impl ConfigWatcher {
                     if !relevant {
                         return;
                     }
-                    // A newly created directory on the way to the file: inotify registers a
-                    // watch on it only after it exists, so move the watch there.
-                    let dir_created =
-                        matches!(ev.kind, EventKind::Create(CreateKind::Folder | CreateKind::Any));
+                    // A directory appearing or vanishing: it may be on the way to the file, or
+                    // the themes directory, so the watch set may need to move.
+                    let structural = matches!(
+                        ev.kind,
+                        EventKind::Create(CreateKind::Folder | CreateKind::Any)
+                            | EventKind::Remove(RemoveKind::Folder | RemoveKind::Any)
+                    );
                     let mut msg = None;
                     for p in &ev.paths {
                         let p = canon_lenient(p);
+                        if p == themes && structural {
+                            msg = Some(Raw::ChangedRewatch);
+                            break;
+                        }
                         if p == target || p == themes || p.starts_with(&themes) {
                             msg = Some(Raw::Changed);
                             break;
                         }
-                        if dir_created && target.starts_with(&p) {
-                            msg = Some(Raw::Rewatch);
+                        if structural && target.starts_with(&p) {
+                            // A removed ancestor takes the file with it, so reload (to the
+                            // defaults); a created one only moves the watch.
+                            msg = Some(if matches!(ev.kind, EventKind::Remove(_)) {
+                                Raw::ChangedRewatch
+                            } else {
+                                Raw::Rewatch
+                            });
                         }
                     }
                     if let Some(m) = msg {
@@ -165,14 +211,18 @@ impl ConfigWatcher {
         let shared = Arc::clone(&watcher);
         thread::Builder::new().name("halyard-config-watch".into()).spawn(move || {
             while let Ok(first) = raw_rx.recv() {
-                let mut reload = matches!(first, Raw::Changed);
-                if matches!(first, Raw::Rewatch) {
-                    rewatch(&shared, &mut roots, &owned);
-                    // The file may have been written before the new watch existed.
-                    reload = owned.exists();
-                    if !reload {
-                        continue;
+                let reload = match first {
+                    Raw::Changed => true,
+                    Raw::ChangedRewatch => {
+                        rewatch(&shared, &mut roots, &owned);
+                        true
                     }
+                    // The file may have been written before the new watch existed; but a
+                    // directory appearing elsewhere on the way is not a reload by itself.
+                    Raw::Rewatch => rewatch(&shared, &mut roots, &owned) && owned.exists(),
+                };
+                if !reload {
+                    continue;
                 }
                 let started = Instant::now();
                 loop {
@@ -182,7 +232,9 @@ impl ConfigWatcher {
                     }
                     match raw_rx.recv_timeout(debounce.min(left)) {
                         Ok(Raw::Changed) => {}
-                        Ok(Raw::Rewatch) => rewatch(&shared, &mut roots, &owned),
+                        Ok(Raw::Rewatch | Raw::ChangedRewatch) => {
+                            rewatch(&shared, &mut roots, &owned);
+                        }
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => return,
                     }

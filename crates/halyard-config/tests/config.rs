@@ -184,7 +184,9 @@ fn unknown_provider_and_shell_keys_warn() {
     let src = "[terminal]\nshell = { program = \"sh\", colour = 1 }\n[[ai.providers]]\nname = \"a\"\nkind = \"anthropic\"\nmodel = \"m\"\nflavor = \"x\"\n";
     let w = Config::parse(src).unwrap().warnings;
     assert!(w.iter().any(|w| w.key == "terminal.shell.colour" && w.line == Some(2)), "{w:?}");
-    assert!(w.iter().any(|w| w.key == "ai.providers[0].flavor" && w.line == Some(7)), "{w:?}");
+    // Under [ai] the unknown key's name is not shown, only where it is.
+    assert!(w.iter().any(|w| w.key == "ai.providers[0]" && w.line == Some(7)), "{w:?}");
+    assert!(w.iter().all(|w| !w.to_string().contains("flavor")), "{w:?}");
 }
 
 #[test]
@@ -200,7 +202,7 @@ fn invalid_enum_value_names_key_and_line() {
     let e = err("[terminal]\ncursor_style = \"sparkle\"\n");
     assert_eq!(e.key.as_deref(), Some("terminal.cursor_style"));
     assert_eq!(e.line, Some(2));
-    assert!(e.message.contains("sparkle") && e.message.contains("block"), "{e}");
+    assert!(e.message.contains("block") && !e.to_string().contains("sparkle"), "{e}");
 }
 
 #[test]
@@ -246,7 +248,8 @@ fn error_display_includes_path_when_loaded_from_a_file() {
 fn api_key_in_config_is_rejected_with_guidance() {
     let src = "[[ai.providers]]\nname = \"a\"\nkind = \"anthropic\"\nmodel = \"m\"\napi_key = \"sk-ant-abc\"\n";
     let e = err(src);
-    assert_eq!(e.key.as_deref(), Some("ai.providers[0].api_key"));
+    // The section and line, not the key's name: an unknown name under [ai] may be a secret.
+    assert_eq!(e.key.as_deref(), Some("ai.providers[0]"));
     assert_eq!(e.line, Some(5));
     assert!(e.message.contains("api_key_env") && e.message.contains("environment"), "{e}");
     assert!(!e.to_string().contains("sk-ant-abc"), "the secret must not be echoed back");
@@ -352,7 +355,8 @@ fn secret_like_key_names_are_rejected_case_insensitively_anywhere_under_ai() {
         // Directly under [ai], not only in a provider.
         let top = format!("[ai]\n\"{k}\" = \"{SECRET}\"\n");
         let e = err(&top);
-        assert_eq!(e.key.as_deref(), Some(format!("ai.{k}").as_str()));
+        assert_eq!(e.key.as_deref(), Some("ai"));
+        assert!(!e.to_string().contains(k), "key name {k} must not be echoed: {e}");
         assert!(e.message.contains("never stores API keys"), "{k}: {e}");
         assert_secret_absent(&top, SECRET);
         // Nested in a table inside a provider, e.g. headers.
@@ -379,7 +383,7 @@ fn provider_validation() {
     assert_eq!(e.key.as_deref(), Some("ai.providers[1].name"));
     assert_eq!(e.line, Some(7));
     let e = err("[[ai.providers]]\nname = \"a\"\nkind = \"carrier-pigeon\"\nmodel = \"m\"\n");
-    assert_eq!(e.key.as_deref(), Some("ai.providers.kind"));
+    assert_eq!(e.key.as_deref(), Some("ai.providers[0].kind"));
     assert!(!e.to_string().contains("carrier-pigeon"), "[ai] values are never echoed: {e}");
     let ok = Config::parse("[[ai.providers]]\nname = \"c\"\nkind = \"anthropic\"\nmodel = \"m\"\n")
         .unwrap();
@@ -425,7 +429,7 @@ fn bad_keybinding_chord_names_key_and_line() {
 fn bad_keybinding_action_lists_valid_actions() {
     let e = err("[keybindings]\n\"cmd+k\" = \"teleport\"\n");
     assert_eq!(e.key.as_deref(), Some("keybindings.cmd+k"));
-    assert!(e.message.contains("teleport") && e.message.contains("new_tab"), "{e}");
+    assert!(e.message.contains("new_tab") && !e.to_string().contains("teleport"), "{e}");
 }
 
 #[test]
@@ -474,4 +478,174 @@ fn themes_dir_sits_next_to_config() {
         themes_dir_for(&PathBuf::from("/h/.config/halyard/config.toml")),
         PathBuf::from("/h/.config/halyard/themes")
     );
+}
+
+// ---------------------------------------------------------------------------
+// No error or warning ever contains a value from the file
+// ---------------------------------------------------------------------------
+
+const SENT: &str = "ZQXSENT7731";
+
+/// Parse `src`. Every error and warning, in Display and Debug form, must be free of
+/// [`SENT`]. Returns whether it was an error.
+fn leak_check(src: &str) -> bool {
+    match Config::parse(src) {
+        Err(e) => {
+            let shown = format!("{e} || {e:?}");
+            assert!(!shown.contains(SENT), "error leaked for {src:?}: {shown}");
+            true
+        }
+        Ok(l) => {
+            for w in &l.warnings {
+                let shown = format!("{w} || {w:?}");
+                assert!(!shown.contains(SENT), "warning leaked for {src:?}: {shown}");
+            }
+            false
+        }
+    }
+}
+
+#[test]
+fn quoted_ai_headers_do_not_hide_a_value_from_redaction() {
+    for header in ["[\"ai\"]", "['ai']", "[ \"ai\" ]", "[ai]"] {
+        assert!(leak_check(&format!("{header}\nenabled = \"{SENT}\"\n")), "{header}");
+    }
+    for header in ["[[\"ai\".providers]]", "[['ai'.providers]]", "[[ai.\"providers\"]]"] {
+        let src = format!("{header}\nname = \"a\"\nmodel = \"m\"\nkind = \"{SENT}\"\n");
+        assert!(leak_check(&src), "{header}");
+    }
+}
+
+#[test]
+fn dotted_ai_keys_do_not_hide_a_value_from_redaction() {
+    assert!(leak_check(&format!("\"ai\".enabled = \"{SENT}\"\n")));
+    assert!(leak_check(&format!("ai.enabled = \"{SENT}\"\n")));
+    assert!(leak_check(&format!("ai = {{ enabled = \"{SENT}\" }}\n")));
+    assert!(leak_check(&format!(
+        "[ai]\nproviders = [{{ name = \"a\", model = \"m\", kind = \"{SENT}\" }}]\n"
+    )));
+}
+
+#[test]
+fn a_header_lookalike_in_a_multiline_string_does_not_move_the_section() {
+    // Line scanning saw `[font]` inside the string and blamed `font.enabled`.
+    let src = format!("[ai]\nnote = \"\"\"\n[font]\n\"\"\"\nenabled = \"{SENT}\"\n");
+    assert!(leak_check(&src));
+    let src = format!("[ai]\nnote = \"\"\"\n[font]\nenabled = 1\n\"\"\"\nenabled = \"{SENT}\"\n");
+    assert!(leak_check(&src));
+    // The reported location is structural: the real `enabled`, not the one in the string.
+    let e = err(&src);
+    assert_eq!(e.key.as_deref(), Some("ai.enabled"), "{e}");
+    assert_eq!(e.line, Some(6), "{e}");
+}
+
+#[test]
+fn secret_names_are_found_through_quoting_dotted_keys_and_multiline_strings() {
+    for src in [
+        format!("[\"ai\"]\n\"API_KEY\" = \"{SENT}\"\n"),
+        format!("\"ai\".\"x-api-key\" = \"{SENT}\"\n"),
+        format!("ai.Authorization = \"{SENT}\"\n"),
+        format!(
+            "[[ai.providers]]\nname = \"a\"\nkind = \"ollama\"\nmodel = \"m\"\nheaders.Authorization = \"{SENT}\"\n"
+        ),
+        format!("[ai]\nnote = \"\"\"\n[font]\n\"\"\"\nPASSWORD = \"{SENT}\"\n"),
+    ] {
+        let e = err(&src);
+        assert!(e.message.contains("never stores API keys"), "{src:?}: {e}");
+        assert!(leak_check(&src));
+    }
+}
+
+#[test]
+fn unknown_key_names_under_ai_are_not_echoed_but_elsewhere_they_are() {
+    let src = format!("[ai]\nenabled = false\n{SENT} = 1\n[font]\n{SENT}_font = 1\n");
+    let l = Config::parse(&src).unwrap();
+    let ai = l.warnings.iter().find(|w| w.key == "ai").expect("a warning for [ai]");
+    assert!(ai.message.contains("unknown key in [ai]") && ai.line == Some(3), "{ai}");
+    assert!(!format!("{ai:?}").contains(SENT));
+    assert!(
+        l.warnings.iter().any(|w| w.key == format!("font.{SENT}_font")),
+        "key names outside [ai] may be shown: {:?}",
+        l.warnings
+    );
+}
+
+#[test]
+fn no_error_or_warning_ever_echoes_a_value_whatever_the_section() {
+    let forms = [
+        format!("\"{SENT}\""),
+        format!("'{SENT}'"),
+        format!("[\"{SENT}\"]"),
+        format!("{{ k = \"{SENT}\" }}"),
+        format!("\"\"\"\n{SENT}\n[font]\n\"\"\""),
+        SENT.to_string(),
+        format!("\"{SENT}"),
+        format!("[{SENT}"),
+        format!("{{ {SENT} = 1 }}"),
+    ];
+    let keys = [
+        "font.family",
+        "font.size",
+        "font.line_height",
+        "font.bold_is_bright",
+        "window.padding_x",
+        "window.opacity",
+        "window.blur",
+        "window.decorations",
+        "window.initial_cols",
+        "terminal.scrollback_lines",
+        "terminal.shell",
+        "terminal.working_directory",
+        "terminal.cursor_style",
+        "terminal.cursor_blink",
+        "theme.name",
+        "theme.light",
+        "theme.dark",
+        "keybindings.cmd+k",
+        "keybindings.cmd+shift+k",
+        "agents.notify_on_waiting",
+        "agents.detect",
+        "ai.enabled",
+        "ai.providers",
+        "ai.extra",
+        "p.name",
+        "p.kind",
+        "p.base_url",
+        "p.model",
+        "p.api_key_env",
+        "p.extra",
+        "p.api_key",
+        "top",
+    ];
+    // How the dotted path is spelled: plain header, quoted header, dotted key at the top.
+    let styles = ["header", "quoted", "dotted"];
+    let (mut checked, mut errors) = (0, 0);
+    for key in keys {
+        for form in &forms {
+            for style in styles {
+                let (section, k) = key.split_once('.').unwrap_or(("", key));
+                let kq = if k.contains('+') { format!("\"{k}\"") } else { k.to_string() };
+                let text = match (section, style) {
+                    ("", _) => format!("{kq} = {form}\n"),
+                    ("p", "header") => format!(
+                        "[[ai.providers]]\nname = \"a\"\nkind = \"anthropic\"\nmodel = \"m\"\n{kq} = {form}\n"
+                    ),
+                    ("p", "quoted") => format!(
+                        "[[\"ai\".\"providers\"]]\nname = \"a\"\nkind = \"anthropic\"\nmodel = \"m\"\n{kq} = {form}\n"
+                    ),
+                    ("p", _) => format!(
+                        "ai.providers = [{{ name = \"a\", kind = \"anthropic\", model = \"m\", {kq} = {form} }}]\n"
+                    ),
+                    (sec, "header") => format!("[{sec}]\n{kq} = {form}\n"),
+                    (sec, "quoted") => format!("[\"{sec}\"]\n\"{k}\" = {form}\n"),
+                    (sec, _) => format!("\"{sec}\".{kq} = {form}\n"),
+                };
+                checked += 1;
+                if leak_check(&text) {
+                    errors += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 800 && errors > 400, "checked {checked}, errors {errors}: not a real test");
 }

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use halyard_term::frame::Rgb;
 use serde::{Deserialize, Serialize};
 
-use crate::locate::{find_key_line, key_at_offset, line_of_offset};
+use crate::locate::{Index, parse_doc, value_free};
 
 /// Whether a theme is meant for a dark or a light window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -483,7 +483,7 @@ struct ExportUi {
 }
 
 struct Ctx<'a> {
-    src: &'a str,
+    ix: &'a Index,
 }
 
 impl Ctx<'_> {
@@ -491,8 +491,8 @@ impl Ctx<'_> {
         Rgb::from_hex(value.trim()).ok_or_else(|| {
             ThemeError::at(
                 &format!("{section}.{key}"),
-                find_key_line(self.src, section, 0, key),
-                format!("`{value}` is not a color; expected #rrggbb"),
+                self.ix.line(&format!("{section}.{key}")),
+                "is not a color; expected #rrggbb (the value is not shown)",
             )
         })
     }
@@ -517,14 +517,20 @@ impl Theme {
     /// # Errors
     /// Returns a [`ThemeError`] naming the key and line of the first problem.
     pub fn from_toml(src: &str) -> Result<Theme, ThemeError> {
-        let raw: RawTheme = toml::from_str(src).map_err(|e| {
-            let (key, line) = match e.span() {
-                Some(span) => key_at_offset(src, span.start),
-                None => (None, 1),
-            };
-            ThemeError { file: None, key, line: Some(line), message: e.message().to_string() }
+        let doc = parse_doc(src).map_err(|e| ThemeError {
+            file: None,
+            key: None,
+            line: e.line,
+            message: e.message,
         })?;
-        let cx = Ctx { src };
+        let ix = Index::build(src, &doc, false);
+        let raw: RawTheme = toml::from_str(src).map_err(|e| ThemeError {
+            file: None,
+            key: e.span().and_then(|s| ix.path_at(s.start)),
+            line: e.span().map(|s| crate::locate::line_of_offset(src, s.start)),
+            message: value_free(e.message()),
+        })?;
+        let cx = Ctx { ix: &ix };
         let t = &raw.terminal;
         let foreground = cx.color("terminal", "foreground", &t.foreground)?;
         let background = cx.color("terminal", "background", &t.background)?;
@@ -593,11 +599,7 @@ impl Theme {
             attention: cx.opt("ui", "attention", u.attention.as_ref(), d.attention)?,
         };
         if raw.name.trim().is_empty() {
-            return Err(ThemeError::at(
-                "name",
-                find_key_line(src, "", 0, "name"),
-                "theme name must not be empty",
-            ));
+            return Err(ThemeError::at("name", ix.line("name"), "theme name must not be empty"));
         }
         Ok(Theme {
             name: raw.name,
@@ -705,7 +707,11 @@ impl Theme {
             let (k, v) = (k.trim(), v.trim().trim_matches('"'));
             let essential = |v: &str| {
                 ghostty_color(v).ok_or_else(|| {
-                    ThemeError::at(k, Some(n), format!("`{v}` is not a color Halyard can read"))
+                    ThemeError::at(
+                        k,
+                        Some(n),
+                        "is not a color Halyard can read (the value is not shown)",
+                    )
                 })
             };
             let mut optional = |v: &str, cell_is_unset: bool| -> Option<Rgb> {
@@ -717,7 +723,9 @@ impl Theme {
                     warnings.push(ThemeWarning {
                         key: k.to_string(),
                         line: Some(n),
-                        message: format!("`{v}` is not a color Halyard can read; ignored"),
+                        message:
+                            "is not a color Halyard can read; ignored (the value is not shown)"
+                                .to_string(),
                     });
                 }
                 c
@@ -728,14 +736,14 @@ impl Theme {
                         return Err(ThemeError::at(
                             "palette",
                             Some(n),
-                            format!("`{v}` is not in N=color form"),
+                            "is not in N=color form (the value is not shown)",
                         ));
                     };
                     let idx: usize = idx.trim().parse().map_err(|_| {
                         ThemeError::at(
                             "palette",
                             Some(n),
-                            format!("`{}` is not a palette index", idx.trim()),
+                            "the palette index is not a number (the value is not shown)",
                         )
                     })?;
                     let c = optional(c.trim(), false);
@@ -849,16 +857,6 @@ const XTERM_DEFAULT_ANSI: [Rgb; 16] = [
     Rgb::new(0xff, 0xff, 0xff),
 ];
 
-/// Line of the `index`-th entry of `terminal.ansi`, from the TOML parser's own spans.
-fn ansi_entry_line(src: &str, index: usize) -> Option<usize> {
-    let doc = toml::de::DeTable::parse(src).ok()?;
-    let (_, terminal) = doc.get_ref().iter().find(|(k, _)| k.get_ref().as_ref() == "terminal")?;
-    let (_, ansi) =
-        terminal.get_ref().as_table()?.iter().find(|(k, _)| k.get_ref().as_ref() == "ansi")?;
-    let item = ansi.get_ref().as_array()?.get(index)?;
-    Some(line_of_offset(src, item.span().start))
-}
-
 fn parse_ansi(cx: &Ctx<'_>, raw: &RawAnsi) -> Result<[Rgb; 16], ThemeError> {
     let mut out = [Rgb::default(); 16];
     match raw {
@@ -866,7 +864,7 @@ fn parse_ansi(cx: &Ctx<'_>, raw: &RawAnsi) -> Result<[Rgb; 16], ThemeError> {
             if list.len() != 16 {
                 return Err(ThemeError::at(
                     "terminal.ansi",
-                    find_key_line(cx.src, "terminal", 0, "ansi"),
+                    cx.ix.line("terminal.ansi"),
                     format!("expected 16 colors, found {}", list.len()),
                 ));
             }
@@ -874,8 +872,8 @@ fn parse_ansi(cx: &Ctx<'_>, raw: &RawAnsi) -> Result<[Rgb; 16], ThemeError> {
                 out[i] = Rgb::from_hex(s.trim()).ok_or_else(|| {
                     ThemeError::at(
                         &format!("terminal.ansi[{i}]"),
-                        ansi_entry_line(cx.src, i),
-                        format!("`{s}` is not a color; expected #rrggbb"),
+                        cx.ix.line(&format!("terminal.ansi[{i}]")),
+                        "is not a color; expected #rrggbb (the value is not shown)",
                     )
                 })?;
             }

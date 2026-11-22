@@ -23,10 +23,32 @@ config file (see [themes.md](themes.md)).
 * An unknown key is a warning: it is ignored and reported with its line number, with a
   "did you mean" hint for near misses.
 * An invalid value is an error that names the key and the line, for example
-  `config.toml:3: key `font.size`: 3 is out of range; expected 4 to 128`.
-* `ConfigWatcher` reports a reload after a change settles (debounced): the new config, or the
-  error for a broken edit, so the app can keep the previous settings and show it. Deleting the
-  file reloads the defaults.
+  `config.toml:3: key `font.size`: is out of range; expected 4 to 128`.
+* `ConfigWatcher` reports a reload after a change settles (debounced, and never later than
+  500 ms after the first change of a burst): the new config, or the error for a broken edit,
+  so the app can keep the previous settings and show it. Deleting the file reloads the
+  defaults. Only events for the exact config path or the `themes/` folder next to it count; a
+  `config.toml` elsewhere does not. A relative `HALYARD_CONFIG` is resolved against the
+  working directory when Halyard starts. The `themes/` folder is watched as soon as it exists,
+  even if it is created later.
+
+### Error messages never contain values
+
+No error or warning ever shows a value from your file, in any section, because any value
+might be a pasted secret. A message holds a key path, a line number, and what was expected,
+for example `expected a number` or `expected one of `block`, `bar`, `underline``. The same
+holds for theme files and for the Ghostty importer.
+
+Which key names can appear in a message:
+
+* Keys Halyard defines (`font.size`, `ai.providers[0].kind`, a chord under `[keybindings]`).
+* An unknown key name OUTSIDE `[ai]`, in the "unknown key" warning with its "did you mean" hint.
+* Never an unknown or secret-looking key name under `[ai]`, at any depth. Those are reported as
+  "unknown key in [ai]" (or "in [[ai.providers]]") with the section and the line, because a
+  pasted key can end up as a key name. Open that line to see it.
+
+These checks read the parsed document, not the text lines, so quoted headers (`["ai"]`),
+dotted keys (`"ai".enabled = ...`) and multi-line strings cannot hide a section.
 
 ## `[font]`
 
@@ -156,10 +178,12 @@ api_key_env = "ANTHROPIC_API_KEY"
 | `model` | Model identifier. |
 | `api_key_env` | The NAME of an environment variable holding the key. |
 
-**Keys never go in this file.** A provider entry with `api_key` (or `token`, `secret`,
-`password`, `key`) is rejected with an error telling you to export the key and name the
+**Keys never go in this file.** Any key under `[ai]`, at any depth, whose name contains
+`key`, `token`, `secret`, `password`, `passwd` or `auth` (in any letter case, for example
+`API_KEY`, `Authorization`, `x-api-key`) is rejected with an error telling you to export the key and name the
 variable. `api_key_env` must look like a variable name, so pasting a key there is rejected
-too, and the error never echoes the value back. If you pasted a real key into a config file
+too. A `base_url` with credentials in it (`https://user:KEY@host/`) is rejected. No error ever
+echoes a value back. If you pasted a real key into a config file
 at any point, revoke it.
 
 ## `[agents]`

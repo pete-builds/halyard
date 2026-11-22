@@ -201,7 +201,7 @@ fn theme_errors_name_key_and_line() {
     let unknown = "name = \"X\"\nbogus = 1\n[terminal]\nforeground = \"#ffffff\"\nbackground = \"#000000\"\nansi = []\n";
     let e = Theme::from_toml(unknown).unwrap_err();
     assert_eq!(e.line, Some(2));
-    assert!(e.message.contains("bogus"), "{e}");
+    assert_eq!(e.key.as_deref(), Some("bogus"));
 
     let e = Theme::from_toml("name = \"X\"\n[ui]\nsurface = \"red\"\n[terminal]\nforeground = \"#ffffff\"\nbackground = \"#000000\"\nansi = []\n").unwrap_err();
     assert!(e.key.is_some());
@@ -467,4 +467,87 @@ fn a_theme_fails_on_foreground_contrast_alone() {
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].what, "terminal.foreground");
     assert!((f[0].required - 4.5).abs() < f64::EPSILON);
+}
+
+/// Sentinel placed in every value position of generated theme text. No error or warning,
+/// from any theme entry point, may contain it.
+const THEME_SENTINEL: &str = "ZQXTHEME4417";
+
+#[test]
+fn no_theme_error_or_warning_ever_echoes_a_value() {
+    let s = THEME_SENTINEL;
+    let forms = [
+        format!("\"{s}\""),
+        format!("'{s}'"),
+        format!("[\"{s}\"]"),
+        format!("{{ k = \"{s}\" }}"),
+        format!("\"\"\"\n{s}\n[ui]\n\"\"\""),
+        s.to_string(),
+        format!("\"{s}"),
+        format!("[{s}"),
+        "12345".to_string(),
+    ];
+    let keys = [
+        "name",
+        "appearance",
+        "high_contrast",
+        "terminal.foreground",
+        "terminal.background",
+        "terminal.cursor",
+        "terminal.ansi",
+        "ui.surface",
+        "ui.accent",
+        "ui.text",
+    ];
+    let mut checked = 0;
+    let mut errors = 0;
+    for key in keys {
+        for form in &forms {
+            let (section, k) = key.split_once('.').map_or(("", key), |(a, b)| (a, b));
+            let mut text = String::from("name = \"X\"\n");
+            if section.is_empty() {
+                text = format!("{k} = {form}\n");
+            } else {
+                text.push_str("[terminal]\nforeground = \"#ffffff\"\nbackground = \"#000000\"\n");
+                if section == "ui" {
+                    text.push_str(&format!("[ui]\n{k} = {form}\n"));
+                } else if k == "ansi" {
+                    text.push_str(&format!("ansi = {form}\n"));
+                } else {
+                    text.push_str(&format!("{k} = {form}\n"));
+                }
+            }
+            checked += 1;
+            if let Err(e) = Theme::from_toml(&text) {
+                errors += 1;
+                let shown = format!("{e} {e:?}");
+                assert!(!shown.contains(s), "leak for {text:?}: {shown}");
+            }
+        }
+    }
+    // Ghostty importer, errors and warnings.
+    for form in &forms {
+        for line in [
+            format!("background = {form}\nforeground = #ffffff\n"),
+            format!("background = #000000\nforeground = {form}\n"),
+            format!("background = #000000\nforeground = #ffffff\ncursor-color = {form}\n"),
+            format!("background = #000000\nforeground = #ffffff\nselection-background = {form}\n"),
+            format!("background = #000000\nforeground = #ffffff\npalette = 1={form}\n"),
+            format!("background = #000000\nforeground = #ffffff\npalette = {form}\n"),
+        ] {
+            checked += 1;
+            match Theme::from_ghostty_with_warnings("x", &line) {
+                Err(e) => {
+                    errors += 1;
+                    assert!(!format!("{e} {e:?}").contains(s), "leak for {line:?}: {e}");
+                }
+                Ok((_, w)) => {
+                    for x in w {
+                        assert!(!format!("{x} {x:?}").contains(s), "leak for {line:?}: {x}");
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 100 && errors > 40, "checked {checked}, errors {errors}: not a real test");
 }
