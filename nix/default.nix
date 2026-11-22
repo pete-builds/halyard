@@ -187,6 +187,19 @@ let
     }
   );
 
+  # halyard-config's `check_files` example: the real parser, used by the Home
+  # Manager module check to validate the files the module writes.
+  configChecker = craneLib.buildPackage (
+    commonArgs
+    // {
+      inherit cargoArtifacts;
+      pname = "halyard-config-check";
+      cargoExtraArgs = "--locked -p halyard-config --example check_files";
+      doCheck = false;
+      doNotRemoveReferencesToVendorDir = true;
+    }
+  );
+
   # Programs the PTY integration tests drive when they are present.
   ptyTestPrograms = [
     pkgs.vim
@@ -249,5 +262,6 @@ in
     hasApp
     checks
     devShell
+    configChecker
     ;
 }

@@ -95,6 +95,7 @@
             nixpkgs
             home-manager
             ;
+          inherit (build.${pkgs.stdenv.hostPlatform.system}) configChecker;
         }
       );
 

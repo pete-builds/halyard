@@ -4,11 +4,14 @@
 # renders the files the module writes, and compares them (parsed as TOML) with
 # hand-written expectations. Controls: a comparison against a wrong expectation
 # must fail, and a conflicting definition must be an evaluation error.
+# The written files are also loaded by halyard-config's own parser
+# (`configChecker`, its `check_files` example), with a broken file as control.
 {
   pkgs,
   self,
   nixpkgs,
   home-manager,
+  configChecker,
 }:
 let
   inherit (pkgs) lib stdenv;
@@ -64,9 +67,27 @@ let
     enable = true;
     package = fakeHalyard;
     settings = {
-      font.line_height = 1.3;
-      window.opacity = 0.95;
+      font = {
+        line_height = 1.3;
+        bold_is_bright = true;
+      };
+      window = {
+        opacity = 0.95;
+        initial_cols = 120;
+      };
       theme.name = "Rope and Brass";
+      # Exempt from the secret-name rule: api_key_env holds a variable name.
+      ai = {
+        enabled = true;
+        providers = [
+          {
+            name = "claude";
+            kind = "anthropic";
+            model = "claude-sonnet-4-5";
+            api_key_env = "ANTHROPIC_API_KEY";
+          }
+        ];
+      };
     };
     font = {
       family = "JetBrains Mono";
@@ -93,9 +114,24 @@ let
         family = "JetBrains Mono";
         size = 14.5;
         line_height = 1.3;
+        bold_is_bright = true;
       };
-      window.opacity = 0.95;
+      window = {
+        opacity = 0.95;
+        initial_cols = 120;
+      };
       theme.name = "Rope and Brass";
+      ai = {
+        enabled = true;
+        providers = [
+          {
+            name = "claude";
+            kind = "anthropic";
+            model = "claude-sonnet-4-5";
+            api_key_env = "ANTHROPIC_API_KEY";
+          }
+        ];
+      };
       keybindings = {
         "primary+k" = "command_palette";
         "cmd+q" = "none";
@@ -109,8 +145,25 @@ let
       name = "plain";
       terminal = terminalColors;
     };
-    wrongConfig = lib.recursiveUpdate expected.config { font.size = 12; };
+    # Controls for the comparison: a wrong value, and right values of the
+    # wrong type (Python alone would call 1 == True and 120 == 120.0 equal).
+    wrongValue = lib.recursiveUpdate expected.config { font.size = 12; };
+    wrongBoolType = lib.recursiveUpdate expected.config { font.bold_is_bright = 1; };
+    wrongNumberType = lib.recursiveUpdate expected.config { window.initial_cols = 120.0; };
   };
+
+  # Secret-looking key names must stop evaluation before anything reaches the
+  # store, whether under `ai` or anywhere else.
+  rejects =
+    settings:
+    let
+      c = hmEval {
+        enable = true;
+        package = null;
+        inherit settings;
+      };
+    in
+    !(builtins.tryEval (builtins.seq (file c "config.toml").outPath true)).success;
 
   minimal = hmEval {
     enable = true;
@@ -141,6 +194,24 @@ let
     "default package is the flake's package" =
       hasPackage withDefaultPackage self.packages.${system}.default;
     "conflicting font.family is an error" = conflictRejected;
+    "an api_key under ai.providers is refused" = rejects {
+      ai.providers = [
+        {
+          name = "claude";
+          kind = "anthropic";
+          model = "m";
+          api_key = "sk-halyard-canary";
+        }
+      ];
+    };
+    "a token-like name in any section is refused" = rejects { window.Auth_Token = "x"; };
+    "a nested secret-like name is refused" = rejects { terminal.shell.password = "x"; };
+    # Control for the rule itself: the same shape without the secret passes.
+    "api_key_env and keybindings pass the secret rule" =
+      !(rejects {
+        keybindings."primary+k" = "command_palette";
+        ai.providers = [ { api_key_env = "ANTHROPIC_API_KEY"; } ];
+      });
     "disabled module writes nothing" =
       !(builtins.any (lib.hasPrefix "halyard/") (builtins.attrNames disabled.xdg.configFile));
   };
@@ -154,7 +225,8 @@ let
         got = tomllib.load(f)
     with open(json_path) as f:
         want = json.load(f)
-    if got != want:
+    # Canonical JSON keeps types apart: true is not 1, 120 is not 120.0.
+    if json.dumps(got, sort_keys=True) != json.dumps(want, sort_keys=True):
         print(f"mismatch in {toml_path}:\n got:  {got}\n want: {want}", file=sys.stderr)
         sys.exit(1)
     print(f"ok: {toml_path}")
@@ -171,12 +243,27 @@ in
         python3 ${compare} ${file full "themes/rope-and-brass.toml"} ${json "rope" expected.ropeAndBrass}
         python3 ${compare} ${file full "themes/plain.toml"} ${json "plain" expected.plain}
 
-        # Control: the comparison must notice a wrong value.
-        if python3 ${compare} ${file full "config.toml"} ${json "wrong" expected.wrongConfig} 2>/dev/null; then
-          echo "control failed: a wrong expectation matched" >&2
+        # Controls: the comparison must notice a wrong value and a wrong type.
+        for wrong in ${json "wrong-value" expected.wrongValue} ${json "wrong-bool" expected.wrongBoolType} ${json "wrong-number" expected.wrongNumberType}; do
+          if python3 ${compare} ${file full "config.toml"} "$wrong" 2>/dev/null; then
+            echo "control failed: $wrong matched" >&2
+            exit 1
+          fi
+        done
+        echo "control ok: wrong values and wrong types are rejected"
+
+        # The real parser: halyard-config must load every file without an error
+        # or a warning.
+        ${configChecker}/bin/check_files \
+          --config ${file full "config.toml"} \
+          --theme ${file full "themes/rope-and-brass.toml"} \
+          --theme ${file full "themes/plain.toml"}
+        # Control: a file halyard-config rejects must fail the checker.
+        if ${configChecker}/bin/check_files --config ${pkgs.writeText "bad-config.toml" "[font]\nsize = 3.0\n"}; then
+          echo "control failed: check_files accepted font.size = 3.0" >&2
           exit 1
         fi
-        echo "control ok: a wrong expectation is rejected"
+        echo "control ok: check_files rejects an invalid config"
 
         cat > "$out" <<'EOF'
         ${builtins.toJSON evalFacts}
@@ -186,6 +273,27 @@ in
 // lib.optionalAttrs stdenv.hostPlatform.isLinux {
   nixos-module =
     let
+      nixosWith =
+        halyardConfig:
+        (nixpkgs.lib.nixosSystem {
+          inherit system;
+          modules = [
+            self.nixosModules.default
+            {
+              programs.halyard = halyardConfig;
+              boot.loader.grub.enable = false;
+              fileSystems."/" = {
+                device = "/dev/null";
+                fsType = "ext4";
+              };
+              system.stateVersion = "25.11";
+            }
+          ];
+        }).config;
+      nixosWithoutFonts = nixosWith {
+        enable = true;
+        package = fakeHalyard;
+      };
       nixos =
         (nixpkgs.lib.nixosSystem {
           inherit system;
@@ -195,6 +303,7 @@ in
               programs.halyard = {
                 enable = true;
                 package = fakeHalyard;
+                fonts.enable = true;
               };
               boot.loader.grub.enable = false;
               fileSystems."/" = {
@@ -208,6 +317,9 @@ in
       facts = {
         "package is in systemPackages" = builtins.elem fakeHalyard nixos.environment.systemPackages;
         "graphics stack is enabled" = nixos.hardware.graphics.enable;
+        "fonts.enable installs JetBrains Mono" = builtins.elem pkgs.jetbrains-mono nixos.fonts.packages;
+        "fonts are off by default" =
+          !(builtins.elem pkgs.jetbrains-mono nixosWithoutFonts.fonts.packages);
       };
       failed = lib.filterAttrs (_: ok: !ok) facts;
     in
