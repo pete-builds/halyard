@@ -57,6 +57,10 @@ struct Session {
     base: usize,
     /// Event count when the `READY1` marker first appeared in the output.
     ready_at: Option<usize>,
+    /// Bytes of `raw` already searched for terminal queries.
+    answered_upto: usize,
+    /// Terminal queries answered.
+    answers: usize,
 }
 
 impl Session {
@@ -119,6 +123,8 @@ impl Session {
             raw: Vec::new(),
             base: 0,
             ready_at: None,
+            answered_upto: 0,
+            answers: 0,
         }
     }
 
@@ -136,14 +142,7 @@ impl Session {
                 self.raw.extend_from_slice(&chunk);
                 let events = &mut self.events;
                 self.scanner.feed(&chunk, |_, e| events.push(e));
-                // Answer the primary device attributes query, as a terminal does;
-                // fish 4 waits for the answer before drawing its first prompt.
-                if chunk.windows(3).any(|w| w == b"\x1b[c")
-                    || chunk.windows(4).any(|w| w == b"\x1b[0c")
-                {
-                    let _ = self.writer.write_all(b"\x1b[?62;22c");
-                    let _ = self.writer.flush();
-                }
+                self.answer_queries();
                 if self.ready_at.is_none() && String::from_utf8_lossy(&self.raw).contains("READY1")
                 {
                     self.ready_at = Some(before);
@@ -154,16 +153,67 @@ impl Session {
         }
     }
 
+    /// Answers the terminal queries shells send, the way a terminal does: primary
+    /// device attributes, cursor position (DSR 6) and the OSC 11 background color.
+    /// fish 4 sends all three at every prompt, waits for DA1 before its first prompt,
+    /// and repaints when answers are missing. Queries split across chunks are found.
+    fn answer_queries(&mut self) {
+        const QUERIES: [(&[u8], &[u8]); 4] = [
+            (b"\x1b[c", b"\x1b[?62;22c"),
+            (b"\x1b[0c", b"\x1b[?62;22c"),
+            (b"\x1b[6n", b"\x1b[1;1R"),
+            (b"\x1b]11;?", b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
+        ];
+        const LONGEST: usize = 6;
+        let mut pos = self.answered_upto;
+        loop {
+            let hay = &self.raw[pos..];
+            let next = QUERIES
+                .iter()
+                .filter_map(|(q, a)| {
+                    hay.windows(q.len()).position(|w| w == *q).map(|i| (pos + i, q.len(), *a))
+                })
+                .min_by_key(|(i, _, _)| *i);
+            let Some((at, len, answer)) = next else {
+                break;
+            };
+            let _ = self.writer.write_all(answer);
+            let _ = self.writer.flush();
+            self.answers += 1;
+            pos = at + len;
+        }
+        // Leave a tail unsearched in case a query is split across chunks.
+        self.answered_upto = pos.max(self.raw.len().saturating_sub(LONGEST - 1));
+    }
+
     /// Events since the script was ready.
     fn events(&self) -> &[ShellEvent] {
         &self.events[self.base..]
     }
 
-    /// Prompts fully drawn since the script was ready: both A and B seen.
+    /// Prompts drawn since the script was ready, counting a redrawn prompt (A and B
+    /// again with no command in between) once: the B marks of the collapsed marks.
     fn prompts(&self) -> usize {
-        let count = |f: fn(&ShellEvent) -> bool| self.events().iter().filter(|e| f(e)).count();
-        count(|e| matches!(e, ShellEvent::PromptStart { .. }))
-            .min(count(|e| matches!(e, ShellEvent::CommandInputStart)))
+        collapse_redraws(&mark_list(self.events())).iter().filter(|m| **m == Mark::B).count()
+    }
+
+    /// Raw B marks since the script was ready, redraws included.
+    fn raw_input_starts(&self) -> usize {
+        self.events().iter().filter(|e| matches!(e, ShellEvent::CommandInputStart)).count()
+    }
+
+    /// Sends an empty line and waits for the prompt to be drawn again. An empty line
+    /// is not a command, so in the collapsed count it is the same prompt.
+    fn send_empty_line(&mut self) {
+        let before = self.raw_input_starts();
+        self.send("");
+        let deadline = Instant::now() + STEP_TIMEOUT;
+        while self.raw_input_starts() <= before {
+            self.pump(deadline);
+            if self.raw_input_starts() <= before && Instant::now() >= deadline {
+                self.timeout("the prompt after an empty line");
+            }
+        }
     }
 
     fn timeout(&self, what: &str) -> ! {
@@ -244,22 +294,82 @@ impl Session {
     }
 }
 
-/// The marks only, with D's exit status.
-fn marks(events: &[ShellEvent]) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    A,
+    B,
+    C,
+    D(Option<i32>),
+}
+
+fn mark_list(events: &[ShellEvent]) -> Vec<Mark> {
     events
         .iter()
         .filter_map(|e| match e {
-            ShellEvent::PromptStart { .. } => Some("A".to_string()),
-            ShellEvent::CommandInputStart => Some("B".to_string()),
-            ShellEvent::CommandExecuted => Some("C".to_string()),
-            ShellEvent::CommandFinished { exit_code, .. } => Some(match exit_code {
-                Some(c) => format!("D{c}"),
-                None => "D".to_string(),
-            }),
+            ShellEvent::PromptStart { .. } => Some(Mark::A),
+            ShellEvent::CommandInputStart => Some(Mark::B),
+            ShellEvent::CommandExecuted => Some(Mark::C),
+            ShellEvent::CommandFinished { exit_code, .. } => Some(Mark::D(*exit_code)),
             _ => None,
+        })
+        .collect()
+}
+
+/// Drops prompt redraws: an A that follows a B with nothing executed in between
+/// (and the B after it), and a repeated B. The block model treats these the same
+/// way (`blocks::tests::repeated_prompt_marks_are_one_redrawn_prompt`). An empty
+/// line also collapses, since it is not a command either.
+fn collapse_redraws(marks: &[Mark]) -> Vec<Mark> {
+    let mut out: Vec<Mark> = Vec::new();
+    let mut in_redraw = false;
+    for &m in marks {
+        match m {
+            Mark::A if out.last() == Some(&Mark::B) => in_redraw = true,
+            Mark::B if in_redraw => in_redraw = false,
+            Mark::B if out.last() == Some(&Mark::B) => {}
+            _ => {
+                in_redraw = false;
+                out.push(m);
+            }
+        }
+    }
+    out
+}
+
+fn marks_text(marks: &[Mark]) -> String {
+    marks
+        .iter()
+        .map(|m| match m {
+            Mark::A => "A".to_string(),
+            Mark::B => "B".to_string(),
+            Mark::C => "C".to_string(),
+            Mark::D(Some(c)) => format!("D{c}"),
+            Mark::D(None) => "D".to_string(),
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// The marks exactly as emitted, with D's exit status.
+fn marks(events: &[ShellEvent]) -> String {
+    marks_text(&mark_list(events))
+}
+
+/// The marks with prompt redraws collapsed.
+fn collapsed_marks(events: &[ShellEvent]) -> String {
+    marks_text(&collapse_redraws(&mark_list(events)))
+}
+
+#[test]
+fn collapsing_redraws() {
+    use Mark::*;
+    let fish = [A, B, C, D(Some(0)), A, B, A, B, C, D(Some(1)), A, B, B, A, B];
+    assert_eq!(marks_text(&collapse_redraws(&fish)), "A B C D0 A B C D1 A B");
+    // Nothing to collapse.
+    let plain = [A, B, C, D(Some(0)), A, B];
+    assert_eq!(collapse_redraws(&plain), plain.to_vec());
+    // A prompt without B (some scripts) followed by a command is kept.
+    assert_eq!(marks_text(&collapse_redraws(&[A, C, D(None), A, B])), "A C D A B");
 }
 
 fn cwds(events: &[ShellEvent]) -> Vec<String> {
@@ -321,8 +431,19 @@ fn start(
 /// `setup` installs the user's own hooks before the script is sourced; the hooks
 /// print `USERHOOK` at each prompt and leave `$?` at 7, which must not leak into the
 /// reported exit status.
-fn exercise(shell: Shell, program: &Path, args: &[&str], setup: &str) {
-    let (mut s, dir) = start(shell, &format!("{shell:?}"), program, args, setup, &[], &[]);
+///
+/// With `exact`, the raw marks must match too (zsh and bash never redraw); without
+/// it only the collapsed marks are checked (fish 4 repaints its prompt).
+fn exercise(
+    shell: Shell,
+    program: &Path,
+    args: &[&str],
+    setup: &str,
+    exact: bool,
+    env: &[(&str, &str)],
+) -> Vec<ShellEvent> {
+    let name = format!("{shell:?}-{}", env.len());
+    let (mut s, dir) = start(shell, &name, program, args, setup, &[], env);
     let odd = dir.join("dir with space é");
     std::fs::create_dir_all(&odd).unwrap();
     let odd_str = odd.to_str().unwrap().to_string();
@@ -330,27 +451,36 @@ fn exercise(shell: Shell, program: &Path, args: &[&str], setup: &str) {
     s.wait_prompts(1, "ready");
     s.send("true");
     s.wait_prompts(2, "true");
-    s.send("");
-    s.wait_prompts(3, "empty line");
+    s.send_empty_line();
     s.send("false");
-    s.wait_prompts(4, "false");
+    s.wait_prompts(3, "false");
     s.send("cd /tmp");
-    s.wait_prompts(5, "cd /tmp");
+    s.wait_prompts(4, "cd /tmp");
     s.send(&format!("cd '{odd_str}'"));
-    s.wait_prompts(6, "cd odd dir");
+    s.wait_prompts(5, "cd odd dir");
     s.send("echo 'a;b\\c' | cat");
-    s.wait_prompts(7, "pipeline");
+    s.wait_prompts(6, "pipeline");
     s.send("echo HOOKS-$__user_count");
-    s.wait_prompts(8, "hook count");
+    s.wait_prompts(7, "hook count");
     let events = s.events().to_vec();
     let raw = String::from_utf8_lossy(&s.raw).into_owned();
+    let answers = s.answers;
     s.finish();
+    eprintln!("{shell:?}: answered {answers} terminal queries; raw marks {}", marks(&events));
 
     assert_eq!(
-        marks(&events),
-        "A B C D0 A B A B C D1 A B C D0 A B C D0 A B C D0 A B C D0 A B",
-        "{shell:?} marks; raw output: {raw:?}"
+        collapsed_marks(&events),
+        "A B C D0 A B C D1 A B C D0 A B C D0 A B C D0 A B C D0 A B",
+        "{shell:?} marks; raw marks {}; raw output: {raw:?}",
+        marks(&events)
     );
+    if exact {
+        assert_eq!(
+            marks(&events),
+            "A B C D0 A B A B C D1 A B C D0 A B C D0 A B C D0 A B C D0 A B",
+            "{shell:?} raw marks; raw output: {raw:?}"
+        );
+    }
 
     let lines = command_lines(&events);
     assert_eq!(
@@ -366,11 +496,15 @@ fn exercise(shell: Shell, program: &Path, args: &[&str], setup: &str) {
         "{shell:?} command lines"
     );
 
-    let dirs = cwds(&events);
-    assert_eq!(dirs.len(), 8, "{shell:?} one OSC 7 per prompt: {dirs:?}");
+    let mut dirs = cwds(&events);
+    if exact {
+        assert_eq!(dirs.len(), 8, "{shell:?} one OSC 7 per prompt: {dirs:?}");
+    }
+    dirs.dedup();
+    assert_eq!(dirs.len(), 3, "{shell:?} start, /tmp, odd dir: {dirs:?}");
     assert!(same_dir(&dirs[0], &dir), "{shell:?} start dir {dirs:?}");
-    assert!(same_dir(&dirs[4], Path::new("/tmp")), "{shell:?} /tmp: {dirs:?}");
-    assert!(same_dir(&dirs[5], &odd), "{shell:?} odd dir: {dirs:?}");
+    assert!(same_dir(&dirs[1], Path::new("/tmp")), "{shell:?} /tmp: {dirs:?}");
+    assert!(same_dir(&dirs[2], &odd), "{shell:?} odd dir: {dirs:?}");
 
     // The user's hooks still ran at every prompt and saw their own commands.
     assert!(raw.matches("USERHOOK").count() >= 7, "{shell:?} user prompt hook kept; raw: {raw:?}");
@@ -385,6 +519,7 @@ fn exercise(shell: Shell, program: &Path, args: &[&str], setup: &str) {
     assert!(count >= 6, "{shell:?} user preexec hook kept, count {count}; raw: {raw:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
+    events
 }
 
 #[test]
@@ -392,13 +527,15 @@ fn zsh_integration() {
     let Some(zsh) = require_shell("zsh", "zsh_integration") else {
         return;
     };
-    exercise(
+    let _ = exercise(
         Shell::Zsh,
         &zsh,
         &["-f", "-i"],
         "typeset -gi __user_count=0; __user_pre() { __user_count+=1 }; \
          __user_precmd() { print -n USERHOOK; return 7 }; \
          preexec_functions+=(__user_pre); precmd_functions+=(__user_precmd)",
+        true,
+        &[],
     );
 }
 
@@ -407,30 +544,68 @@ fn bash_integration() {
     let Some(bash) = require_shell("bash", "bash_integration") else {
         return;
     };
-    exercise(
+    let _ = exercise(
         Shell::Bash,
         &bash,
         BASH_ARGS,
         "__user_count=0; trap '__user_count=$((__user_count+1))' DEBUG; \
          PROMPT_COMMAND='printf USERHOOK; (exit 7)'",
+        true,
+        &[],
     );
 }
 
 #[test]
 fn fish_integration() {
-    let Some(fish) = require_shell("fish", "fish_integration") else {
-        return;
-    };
-    let version = std::process::Command::new(&fish).arg("--version").output().unwrap();
-    eprintln!("fish_integration: {}", String::from_utf8_lossy(&version.stdout).trim());
-    exercise(
-        Shell::Fish,
-        &fish,
-        &["--no-config", "-i"],
-        "set -g __user_count 0; \
-         function __user_pre --on-event fish_preexec; set -g __user_count (math $__user_count + 1); end; \
-         function __user_prompt --on-event fish_prompt; printf USERHOOK; end",
-    );
+    // fish 4 marks prompts itself (no `aid=`); fish 3 gets the script's marks.
+    if let Some((major, events)) = fish_exercise("fish_integration", &[]) {
+        assert_eq!(prompt_aids(&events), major < 4, "fish {major}: who emitted the marks");
+    }
+}
+
+/// fish 4 with its own marking turned off: the script must emit the marks itself.
+/// On fish 3 the setting is unknown and changes nothing.
+#[test]
+fn fish_integration_without_native_marks() {
+    let env = [("fish_features", "no-mark-prompt")];
+    if let Some((major, events)) = fish_exercise("fish_integration_without_native_marks", &env) {
+        assert!(prompt_aids(&events), "fish {major}: the script must emit the marks");
+    }
+}
+
+/// True when every prompt mark carries `aid=` (the script's marks), false when none
+/// do (fish's own). A mix fails the test.
+fn prompt_aids(events: &[ShellEvent]) -> bool {
+    let aids: Vec<bool> = events
+        .iter()
+        .filter_map(|e| match e {
+            ShellEvent::PromptStart { aid } => Some(aid.is_some()),
+            _ => None,
+        })
+        .collect();
+    assert!(!aids.is_empty());
+    assert!(aids.iter().all(|a| *a == aids[0]), "mixed prompt marks: {aids:?}");
+    aids[0]
+}
+
+const FISH_SETUP: &str = "set -g __user_count 0; \
+     function __user_pre --on-event fish_preexec; set -g __user_count (math $__user_count + 1); end; \
+     function __user_prompt --on-event fish_prompt; printf USERHOOK; end";
+
+/// Runs the standard sequence in fish; returns fish's major version and the events.
+fn fish_exercise(test: &str, env: &[(&str, &str)]) -> Option<(u32, Vec<ShellEvent>)> {
+    let fish = require_shell("fish", test)?;
+    let out = std::process::Command::new(&fish).arg("--version").output().unwrap();
+    let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    eprintln!("{test}: {version}");
+    let major = version
+        .rsplit(' ')
+        .next()
+        .and_then(|v| v.split('.').next())
+        .and_then(|m| m.parse().ok())
+        .expect("fish version");
+    let events = exercise(Shell::Fish, &fish, &["--no-config", "-i"], FISH_SETUP, false, env);
+    Some((major, events))
 }
 
 /// bash: command lines stay exact past history entry 9, 99 and 999.
@@ -534,13 +709,35 @@ fn bash_ignoreboth_repeats_are_marked() {
     s.wait_prompts(3, "make again");
     s.send(" echo hidden");
     s.wait_prompts(4, "space-prefixed");
-    s.send("");
-    s.wait_prompts(5, "empty line");
+    s.send_empty_line();
     let events = s.events().to_vec();
     s.finish();
     assert_eq!(marks(&events), "A B C D0 A B C D0 A B C D0 A B A B");
     // Only the first `make` reached history, so only it has a command line.
     assert_eq!(command_lines(&events), vec!["make"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// bash: a compound command another tool puts in front of PROMPT_COMMAND after the
+/// script was sourced is never taken for the user's command, so empty lines do not
+/// become blocks.
+#[test]
+fn bash_prepended_prompt_command_is_not_a_command() {
+    let Some(bash) = require_shell("bash", "bash_prepended_prompt_command_is_not_a_command") else {
+        return;
+    };
+    let (mut s, dir) = start(Shell::Bash, "bash-prepend", &bash, BASH_ARGS, "", &[], &[]);
+    s.send("PROMPT_COMMAND='[[ -n $HOME ]] && __pc_seen=1;'\"$PROMPT_COMMAND\"");
+    s.wait_prompts(2, "prepend");
+    s.send_empty_line();
+    s.send_empty_line();
+    s.send("echo \"pc=$__pc_seen\"");
+    s.wait_prompts(3, "echo pc");
+    let events = s.events().to_vec();
+    let raw = String::from_utf8_lossy(&s.raw).into_owned();
+    s.finish();
+    assert_eq!(marks(&events), "A B C D0 A B A B A B C D0 A B", "raw {raw:?}");
+    assert!(raw.contains("pc=1\r\n"), "the prepended command still runs; raw {raw:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

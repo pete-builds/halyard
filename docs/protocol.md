@@ -120,3 +120,17 @@ For reference, the other sequences Halyard reads (all parsed by
 | `OSC 0`, `1`, `2` | Titles. |
 | `BEL` | Bell. |
 | `CSI ? 1049 h/l` (also 1047, 47) | Alternate screen. |
+
+How the block model reads them (`crates/halyard-shell/src/blocks.rs`):
+
+* A and B repeated with no C in between are one prompt drawn again, never a new or
+  empty block. fish 4 repaints its prompt this way (after `cd`, and while it waits
+  for answers to the terminal queries it sends at every prompt).
+* Shells are told apart by `aid=`. Shells that send none count as one more shell,
+  so fish 4's own marks (no `aid`) nest correctly with Halyard's zsh and bash
+  scripts (which send `aid=$$`) in either direction.
+* fish: fish 4 emits OSC 133 itself unless `fish_features` has `no-mark-prompt`;
+  Halyard's fish script then adds only OSC 7, and emits the marks itself on fish 3
+  or with marking turned off. fish 4.0.0 sends no command text, fish 4.0 to 4.2
+  send no B mark, and fish 4.8 and later turn marking off when they believe they
+  run in Konsole.

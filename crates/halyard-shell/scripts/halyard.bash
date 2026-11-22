@@ -59,8 +59,34 @@ __halyard_prompt_end() {
     *) PS1=$PS1'\[\033]133;B\007\]' ;;
   esac
   __halyard_hist=$(HISTTIMEFORMAT='' builtin history 1)
+  __halyard_keep_first
   __halyard_at_prompt=1
   return "$ret"
+}
+
+# Keeps __halyard_prompt_start first in PROMPT_COMMAND. It clears the "at the
+# prompt" flag, so when it runs first nothing else in PROMPT_COMMAND can be taken
+# for the user's command by the DEBUG trap, whatever its text. Commands that other
+# tools put in front of it after this script was sourced are moved behind it here,
+# and take effect from the next prompt.
+__halyard_keep_first() {
+  if [[ $__halyard_pc_array == 1 ]]; then
+    [[ ${PROMPT_COMMAND[0]} == "$__halyard_start_cmd" ]] && return 0
+    local -a rest=()
+    local el
+    for el in "${PROMPT_COMMAND[@]}"; do
+      el=${el//"$__halyard_start_cmd"/}
+      [[ -n ${el//[[:space:];]/} ]] && rest+=("$el")
+    done
+    PROMPT_COMMAND=("$__halyard_start_cmd" "${rest[@]}")
+  else
+    # shellcheck disable=SC2128 # a scalar here
+    case $PROMPT_COMMAND in
+      "$__halyard_start_cmd"$'\n'*) return 0 ;;
+    esac
+    # shellcheck disable=SC2178 # a scalar PROMPT_COMMAND stays a scalar
+    PROMPT_COMMAND=$__halyard_start_cmd$'\n'${PROMPT_COMMAND//"$__halyard_start_cmd"/}
+  fi
 }
 
 # True when $1 is exactly one of the commands in PROMPT_COMMAND (split on newlines
@@ -95,9 +121,13 @@ __halyard_preexec() {
   local line
   line=$(HISTTIMEFORMAT='' builtin history 1)
   if [[ $line == "$__halyard_hist" ]]; then
-    # History did not move: either PROMPT_COMMAND is running after an empty line,
+    # History did not move: either PROMPT_COMMAND is starting after an empty line,
     # or history did not record this command (ignorespace, ignoredups, set +o
-    # history). Only a command that is literally part of PROMPT_COMMAND is skipped.
+    # history). __halyard_keep_first makes __halyard_prompt_start the first
+    # command of PROMPT_COMMAND, and it clears the flag; a command that is
+    # literally part of PROMPT_COMMAND is also skipped, for tools that keep
+    # putting themselves first.
+    [[ $BASH_COMMAND == "$__halyard_start_cmd" ]] && return 0
     __halyard_in_prompt_command "$BASH_COMMAND" && return 0
     line=
   else
@@ -138,7 +168,9 @@ __halyard_setup_cmd='if [[ -n ${__halyard_setup-} ]]; then eval "__halyard_trap_
 __halyard_start_cmd=__halyard_prompt_start
 __halyard_end_cmd=__halyard_prompt_end
 
+__halyard_pc_array=0
 if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
+  __halyard_pc_array=1
   PROMPT_COMMAND=("$__halyard_start_cmd" "${PROMPT_COMMAND[@]}" "$__halyard_setup_cmd" "$__halyard_end_cmd")
 else
   # shellcheck disable=SC2178 # a scalar PROMPT_COMMAND stays a scalar

@@ -26,11 +26,14 @@
 //! * **C without A or B**: a Running block with no prompt row.
 //! * **C while a block is already running**: the earlier block lost its D. It is
 //!   closed as [`BlockState::Unknown`].
-//! * **A while a block is running**: if both marks carry different `aid=` values, a
-//!   nested shell started (for example `bash` typed at a zsh prompt). The outer block
-//!   stays running underneath, and the outer shell's own D (matched by `aid`) closes
-//!   it later, discarding whatever the inner shell left open. Without `aid` on both,
-//!   the running block lost its D and is closed as Unknown at the new prompt's row.
+//! * **A while a block is running**: a shell is identified by its `aid=`, and all
+//!   shells that send none (fish 4's own marks, many third-party scripts) count as
+//!   one more identity. If the A comes from the shell that owns a running block, that
+//!   block (and anything nested in it) lost its D and is closed as Unknown at the new
+//!   prompt's row. Otherwise a nested shell started (for example `bash` typed at a
+//!   zsh prompt): the outer block stays running underneath, and the outer shell's
+//!   own D closes it later, discarding whatever the inner shell left open. A D
+//!   without `aid` belongs to the innermost running block without one.
 //! * **Alternate screen**: marks that arrive while the alternate screen is active are
 //!   ignored and counted, because rows there do not belong to the main screen's
 //!   scrollback. The running block is flagged [`Block::used_alt_screen`].
@@ -99,7 +102,10 @@ pub struct Block {
     pub id: BlockId,
     /// Command text, from OSC 633;E, kitty's `cmdline_url`, or [`BlockTracker::set_command`].
     pub command: Option<String>,
-    /// Working directory reported by OSC 7 when the command started.
+    /// Working directory reported by OSC 7 when the command started, sanitized for
+    /// display. It may differ from the real directory, or name another host: use
+    /// `ReportedCwd::local_path` (from the scanner's `Cwd` event) for anything that
+    /// touches the file system.
     pub cwd: Option<String>,
     /// When output started (C).
     pub started_at: Option<SystemTime>,
@@ -272,18 +278,10 @@ impl<C: Clock> BlockTracker<C> {
     }
 
     fn prompt_start(&mut self, aid: Option<String>, row: u64) {
-        if let Some(top_aid) = self.running.last().map(|b| b.aid.clone()) {
-            let matching = aid
-                .as_ref()
-                .and_then(|a| self.running.iter().position(|b| b.aid.as_ref() == Some(a)));
-            match matching {
-                // The same shell prompts again: everything from its block up lost D.
-                Some(i) => self.close_unknown_from(i, row),
-                // A different shell prompts while ours runs: nested shell.
-                None if aid.is_some() && top_aid.is_some() => {}
-                // No way to tell: assume the running block lost its D.
-                None => self.close_unknown_from(self.running.len() - 1, row),
-            }
+        // The same shell prompts again: everything from its block up lost D.
+        // Otherwise a different shell prompts while ours runs: a nested shell.
+        if let Some(i) = self.innermost_of(aid.as_deref()) {
+            self.close_unknown_from(i, row);
         }
         let mut p = match self.pending.take() {
             // A redraw keeps what was already known about this prompt.
@@ -331,10 +329,19 @@ impl<C: Clock> BlockTracker<C> {
         self.running.push(block);
     }
 
+    /// The innermost running block of the shell with this `aid` (or of the shells
+    /// without one, for `None`).
+    fn innermost_of(&self, aid: Option<&str>) -> Option<usize> {
+        self.running.iter().rposition(|b| b.aid.as_deref() == aid)
+    }
+
     fn finished(&mut self, exit_code: Option<i32>, aid: Option<&str>, row: u64) {
-        let target =
-            aid.and_then(|a| self.running.iter().position(|b| b.aid.as_deref() == Some(a)));
-        if let Some(i) = target {
+        let target = self.innermost_of(aid);
+        if self.pending.as_ref().is_some_and(|p| p.aid.as_deref() == aid) {
+            // D right after this shell's own prompt, with no C: an aborted prompt.
+            self.pending = None;
+            self.stats.aborted_prompts += 1;
+        } else if let Some(i) = target {
             // The shell that ran block i is back. Anything an inner shell left open
             // went away with it.
             self.pending = None;
@@ -441,7 +448,8 @@ impl<C: Clock> BlockTracker<C> {
         self.alt_screen
     }
 
-    /// The working directory last reported by OSC 7.
+    /// The working directory last reported by OSC 7, sanitized for display only. It
+    /// may not be a usable local path; see `ReportedCwd::local_path`.
     pub fn cwd(&self) -> Option<&str> {
         self.cwd.as_deref()
     }

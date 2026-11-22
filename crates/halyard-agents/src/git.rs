@@ -80,7 +80,9 @@ fn read_small(path: &Path) -> Option<String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
+        // Non-blocking so a FIFO swapped in cannot hang the open; no controlling
+        // terminal in case the path names a tty.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
     }
     let file = options.open(path).ok()?;
     if !file.metadata().ok()?.is_file() {

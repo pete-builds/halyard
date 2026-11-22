@@ -2,13 +2,19 @@
 #
 # Emits OSC 7 with the working directory on every prompt. fish 4 already marks
 # prompts and commands itself with OSC 133 (A, B, C with `cmdline_url`, D with the
-# exit status), so on fish 4 and later this script adds only OSC 7. On fish 3 it
-# also emits the OSC 133 marks and OSC 633;E with the command line.
+# exit status), so when fish's own marking is on this script adds only OSC 7.
+# Otherwise (fish 3, or fish 4 with `set -Ua fish_features no-mark-prompt`) it also
+# emits the OSC 133 marks and OSC 633;E with the command line.
+#
+# Known gaps of fish's own marks, not filled here: fish 4.0.0 sends no command text,
+# fish 4.0 to 4.2 send no B mark, and fish 4.8 and later turn marking off when they
+# believe they run in Konsole (`status test-feature` may not reflect that). Its marks
+# carry no `aid=`; Halyard's block model treats an aid-less shell as its own level.
 #
 # Source it from ~/.config/fish/config.fish. It is safe to source more than once,
 # and it does nothing unless TERM_PROGRAM is Halyard and the shell is interactive.
-# It adds event handlers; on fish 3 it also wraps fish_prompt to append the B mark,
-# and the user's prompt function still draws the prompt.
+# It adds event handlers; when it emits marks it also wraps fish_prompt to append the
+# B mark, and the user's prompt function still draws the prompt.
 #
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
@@ -19,7 +25,18 @@ if test "$TERM_PROGRAM" = Halyard; and status is-interactive; and not set -q __h
         printf '\e]7;file://%s%s\a' $hostname (string escape --style=url -- $PWD)
     end
 
-    if string match -qr '^[0-3]\.' -- $version
+    # Does fish mark prompts itself? fish 3: no. fish 4: yes unless the mark-prompt
+    # feature is off. `status test-feature` returns 0 (on), 1 (off), or 2 (no such
+    # feature: fish 4.0.0 to 4.0.5, which always mark).
+    set -l __halyard_native_marks 0
+    if not string match -qr '^[0-3]\.' -- $version
+        status test-feature mark-prompt 2>/dev/null
+        if test $status -ne 1
+            set __halyard_native_marks 1
+        end
+    end
+
+    if test $__halyard_native_marks = 0
         function __halyard_prompt_mark --on-event fish_prompt
             printf '\e]133;A;aid=%d\a' $fish_pid
         end

@@ -407,3 +407,82 @@ fn hostile_marks_through_the_scanner() {
     assert_eq!(t.running_depth(), MAX_NESTING);
     assert_eq!(t.history().len(), 100);
 }
+
+#[test]
+fn repeated_prompt_marks_are_one_redrawn_prompt() {
+    // fish 4 repaints its prompt (after `cd`, or while waiting for terminal query
+    // answers): A and B arrive again with no C in between. That is the same prompt,
+    // never a new block, an empty block, or an aborted prompt.
+    let mut h = H::new();
+    h.a(0).b(0).e("true").c(1).d(Some(0), 2);
+    h.a(2).b(2).a(2).b(2).a(3).b(3).b(3).e("false").c(4).d(Some(1), 5);
+    let hist = h.hist();
+    assert_eq!(hist.len(), 2, "{hist:?}");
+    assert_eq!(hist[1].command.as_deref(), Some("false"));
+    assert_eq!((hist[1].prompt_row, hist[1].input_row), (Some(3), Some(3)));
+    assert_eq!(h.t.stats(), TrackerStats::default());
+    // The same through the scanner, with fish 4's own marks.
+    let mut scanner = crate::scanner::Scanner::new();
+    let mut t = BlockTracker::new(SystemClock, 10);
+    let stream = b"\x1b]133;A;click_events=1\x1b\\> \x1b]133;B\x1b\\\
+        \x1b]133;C;cmdline_url=cd%20/tmp\x07\x1b]133;D;0\x07\
+        \x1b]133;A;click_events=1\x1b\\> \x1b]133;B\x1b\\\
+        \x1b]133;A;click_events=1\x1b\\> \x1b]133;B\x1b\\\
+        \x1b]133;C;cmdline_url=false\x07\x1b]133;D;1\x07\
+        \x1b]133;A;click_events=1\x1b\\> \x1b]133;B\x1b\\";
+    let mut row = 0;
+    scanner.feed(stream, |_, ev| {
+        t.on_event(&ev, row);
+        row += 1;
+    });
+    let cmds: Vec<_> = t.history().map(|b| (b.command.clone(), b.exit_code)).collect();
+    assert_eq!(cmds, vec![(Some("cd /tmp".into()), Some(0)), (Some("false".into()), Some(1))]);
+    assert_eq!(t.stats(), TrackerStats::default());
+    assert!(t.pending_prompt_row().is_some());
+}
+
+#[test]
+fn aidless_outer_shell_with_aid_shell_nested() {
+    // fish 4 (own marks, no aid) runs bash with Halyard's script (aid "b").
+    let mut h = H::new();
+    h.a(0).b(0).e("bash").c(1);
+    h.a_aid("b", 1).b(1).e("true").c(2).d_aid(Some(0), "b", 2);
+    h.a_aid("b", 2).b(2);
+    // `exit` in bash sends no D; fish's D (no aid) closes its own `bash` block.
+    h.d(Some(0), 3);
+    let got: Vec<_> =
+        h.hist().iter().map(|b| (b.command.clone().unwrap(), b.state, b.exit_code)).collect();
+    assert_eq!(
+        got,
+        vec![
+            ("true".to_string(), BlockState::Finished, Some(0)),
+            ("bash".to_string(), BlockState::Finished, Some(0)),
+        ]
+    );
+    assert!(h.t.running().is_none());
+    assert_eq!(h.t.stats(), TrackerStats::default());
+}
+
+#[test]
+fn aidless_shell_nested_in_aid_shell() {
+    // zsh (aid "z") runs fish 4 (no aid).
+    let mut h = H::new();
+    h.a_aid("z", 0).b(0).e("fish").c(1);
+    h.a(1).b(1).e("ls").c(2).d(Some(0), 3);
+    h.a(3).b(3);
+    h.d_aid(Some(0), "z", 4);
+    let got: Vec<_> =
+        h.hist().iter().map(|b| (b.command.clone().unwrap(), b.state, b.exit_code)).collect();
+    assert_eq!(
+        got,
+        vec![
+            ("ls".to_string(), BlockState::Finished, Some(0)),
+            ("fish".to_string(), BlockState::Finished, Some(0)),
+        ]
+    );
+    assert_eq!(h.t.stats(), TrackerStats::default());
+    // A D without aid that follows an aid-less prompt is still an aborted prompt.
+    h.a(5).b(5).d(Some(130), 6);
+    assert_eq!(h.t.stats().aborted_prompts, 1);
+    assert_eq!(h.hist().len(), 2);
+}
