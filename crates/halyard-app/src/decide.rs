@@ -1,7 +1,7 @@
 //! Small decisions the pane view makes, kept out of the view so they can be
 //! unit tested without a window.
 
-use halyard_term::{KeyCode, MouseButton};
+use halyard_term::{CursorShape, KeyCode, MouseButton};
 
 /// What a turn of the mouse wheel does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,11 +45,26 @@ pub fn exit_closes_pane(code: Option<i32>) -> bool {
 }
 
 /// Whether to ask before pasting `text`: the setting is on, the program has
-/// not enabled bracketed paste (so a newline would run a command), and the
-/// text is not safe (holds a line break or a paste-end marker).
+/// not enabled bracketed paste (so a line break would run a command), and the
+/// text is not safe: it holds a newline, a carriage return (which a shell
+/// also treats as Enter), or a paste-end marker.
 #[must_use]
 pub fn paste_needs_confirmation(setting: bool, bracketed: bool, text: &str) -> bool {
-    setting && !bracketed && !halyard_term::paste_is_safe(text)
+    setting && !bracketed && (text.contains('\r') || !halyard_term::paste_is_safe(text))
+}
+
+/// A pane draws as focused only when it has keyboard focus AND its window is
+/// the active window; otherwise it shows the hollow cursor.
+#[must_use]
+pub fn pane_has_focus(focused: bool, window_active: bool) -> bool {
+    focused && window_active
+}
+
+/// The cursor shape to draw: the given shape when focused, a hollow block
+/// when not.
+#[must_use]
+pub fn drawn_cursor(has_focus: bool, shape: CursorShape) -> CursorShape {
+    if has_focus { shape } else { CursorShape::HollowBlock }
 }
 
 #[cfg(test)]
@@ -88,5 +103,23 @@ mod tests {
         );
         assert!(!paste_needs_confirmation(false, false, "ls\nrm\n"), "setting off");
         assert!(!paste_needs_confirmation(true, false, "one line"), "safe text");
+    }
+
+    #[test]
+    fn carriage_returns_count_as_line_breaks() {
+        // Pastejacking: a bare CR runs the line in a shell just like LF.
+        assert!(paste_needs_confirmation(true, false, "echo hi\rrm -rf x\r"));
+        assert!(paste_needs_confirmation(true, false, "echo hi\r"));
+        assert!(!paste_needs_confirmation(true, true, "echo hi\rrm\r"));
+    }
+
+    #[test]
+    fn unfocused_or_inactive_panes_draw_a_hollow_cursor() {
+        assert!(pane_has_focus(true, true));
+        assert!(!pane_has_focus(true, false), "window behind another app");
+        assert!(!pane_has_focus(false, true));
+        assert_eq!(drawn_cursor(true, CursorShape::Bar), CursorShape::Bar);
+        assert_eq!(drawn_cursor(false, CursorShape::Bar), CursorShape::HollowBlock);
+        assert_eq!(drawn_cursor(false, CursorShape::Block), CursorShape::HollowBlock);
     }
 }

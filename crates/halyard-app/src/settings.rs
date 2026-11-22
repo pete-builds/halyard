@@ -75,7 +75,7 @@ impl Settings {
                 let keymap = match config.keymap(Platform::current()) {
                     Ok(k) => k,
                     Err(e) => {
-                        notices.push(describe_error(&e));
+                        notices.push(describe_keymap_error(&e));
                         Keymap::defaults(Platform::current())
                     }
                 };
@@ -138,6 +138,17 @@ pub fn describe_error(e: &ConfigError) -> String {
         ..e.clone()
     };
     format!("{short} (config not applied, keeping the previous settings)")
+}
+
+/// Banner line for a keybinding problem found after parsing: only the
+/// keybindings fall back to the defaults, everything else in the file applies.
+#[must_use]
+pub fn describe_keymap_error(e: &ConfigError) -> String {
+    let short = ConfigError {
+        path: e.path.as_deref().and_then(Path::file_name).map(PathBuf::from),
+        ..e.clone()
+    };
+    format!("{short} (using the default keybindings; the rest of the config is applied)")
 }
 
 /// Font settings for a pane.
@@ -289,6 +300,22 @@ mod tests {
         s.apply(Config::parse("[font]\nsize = 11\n"));
         assert_eq!(s.font().size, 11.0);
         assert!(s.notices.is_empty());
+    }
+
+    #[test]
+    fn a_bad_keybinding_keeps_the_rest_of_the_config() {
+        // `Config::parse` rejects bad chords, so build one by hand, as an
+        // embedder or a future loader could.
+        let mut config = Config::default();
+        config.font.size = 21.0;
+        config.keybindings.insert("cmd+".into(), "new_tab".into());
+        let mut s = Settings::defaults();
+        s.apply(Ok(Loaded { config, warnings: Vec::new() }));
+        assert_eq!(s.font().size, 21.0, "the rest is applied");
+        assert_eq!(s.keymap, Keymap::defaults(Platform::current()));
+        assert_eq!(s.notices.len(), 1, "{:?}", s.notices);
+        assert!(s.notices[0].contains("the rest of the config is applied"), "{:?}", s.notices);
+        assert!(!s.notices[0].contains("not applied"), "{:?}", s.notices);
     }
 
     #[test]

@@ -391,7 +391,7 @@ impl TerminalView {
     /// in a window behind another app draws as unfocused (hollow cursor).
     #[must_use]
     pub fn has_focus(&self, window: &Window) -> bool {
-        self.focus.is_focused(window) && window.is_window_active()
+        decide::pane_has_focus(self.focus.is_focused(window), window.is_window_active())
     }
 
     /// Select between two cells (debug scripts).
@@ -552,6 +552,7 @@ impl TerminalView {
             if ev.click_count >= 2 {
                 self.session.select_word(col, row);
                 self.selecting = false;
+                self.selection_made(cx);
             } else {
                 self.session.selection_start(col, row);
                 self.selecting = true;
@@ -963,7 +964,7 @@ fn paint_grid(origin: Point<Pixels>, state: &PaintState, window: &mut Window, cx
             .cell(cursor.col, cursor.row)
             .is_some_and(|c| c.flags.has(halyard_term::CellFlags::WIDE));
         let b = cell_bounds(cursor.col, cursor.row, if wide { 2 } else { 1 });
-        let shape = if state.focused { state.cursor_shape } else { CursorShape::HollowBlock };
+        let shape = decide::drawn_cursor(state.focused, state.cursor_shape);
         match shape {
             CursorShape::Block => {
                 window.paint_quad(fill(b, cursor_color));
