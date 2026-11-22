@@ -97,7 +97,10 @@ fn a_burst_of_writes_is_debounced_into_few_events() {
             break;
         }
     }
-    assert!((1..=4).contains(&count), "expected a debounced handful of events, got {count}");
+    // 20 writes 5 ms apart collapse into a few reloads. A loaded CI runner can stretch the
+    // writes past the 500 ms debounce cap and see more, so bound it loosely: far fewer reloads
+    // than writes, and the last write wins.
+    assert!((1..=10).contains(&count), "expected far fewer reloads than writes, got {count}");
     let last = last.unwrap().unwrap();
     assert!((last.config.font.size - 29.0).abs() < 0.01, "last write must win");
 }

@@ -1,0 +1,26 @@
+[package]
+name = "halyard-ipc"
+description = "Halyard's local session API: an authenticated Unix socket speaking JSON-RPC 2.0, plus the halyard-msg hook client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "halyard-msg"
+path = "src/bin/halyard-msg.rs"
+
+[dependencies]
+getrandom = "0.4"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
