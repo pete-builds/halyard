@@ -18,6 +18,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Container images ship no UTF-8 locale (Arch's sets one); every desktop session has one.
+  LANG: C.UTF-8
   RUSTFLAGS: -D warnings
   # Official Zig 0.15.2 tarball; checksum from https://ziglang.org/download/index.json
   ZIG_URL: https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz

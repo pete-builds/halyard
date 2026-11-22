@@ -201,6 +201,7 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 
 ## Phase 6: production readiness
 
+- [ ] Flatpak package (see `docs/adr/0005-linux-distribution.md`)
 - [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane
 - [x] Threat model written: `docs/THREAT_MODEL.md` (cites code in PRs that were still open when it was written)
 - [ ] Security review (no outside review yet)
