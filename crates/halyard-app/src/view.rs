@@ -389,13 +389,15 @@ impl TerminalView {
         if frame.alt_screen {
             return;
         }
-        let target = blocks_ui::prompt_target(
-            signals::lock(&self.monitor).blocks(),
-            frame.scroll.offset,
-            jump,
-        );
+        // Block rows count from the session's first row; screen rows start
+        // after the rows dropped from the top of scrollback (`row_base`).
+        let (target, base) = {
+            let m = signals::lock(&self.monitor);
+            let base = m.row_base();
+            (blocks_ui::prompt_target(m.blocks(), frame.scroll.offset + base, jump), base)
+        };
         match (target, jump) {
-            (Some(row), _) => self.session.scroll(ScrollRequest::Row(row)),
+            (Some(row), _) => self.session.scroll(ScrollRequest::Row(row.saturating_sub(base))),
             (None, Jump::Next) => self.session.scroll(ScrollRequest::Bottom),
             (None, Jump::Previous) => {}
         }
@@ -405,7 +407,14 @@ impl TerminalView {
     /// without shell integration or once it scrolled out of the scrollback.
     #[must_use]
     pub fn last_output(&self) -> Option<String> {
-        let (first, last) = blocks_ui::last_output_rows(signals::lock(&self.monitor).blocks())?;
+        let (first, last, base) = {
+            let m = signals::lock(&self.monitor);
+            let (first, last) = blocks_ui::last_output_rows(m.blocks())?;
+            (first, last, m.row_base())
+        };
+        // Rows already dropped from scrollback cannot be copied.
+        let first = first.checked_sub(base)?;
+        let last = last.checked_sub(base)?;
         self.session.screen_rows_text(first, last).map(|t| blocks_ui::tidy_output(&t))
     }
 
@@ -1171,11 +1180,8 @@ impl Render for TerminalView {
         let background = to_hsla(frame.background);
         let cursor_shape = settings::effective_cursor(frame.cursor.shape, self.style.cursor);
         let failures = if self.chrome.failure.is_some() && !frame.alt_screen {
-            blocks_ui::failure_spans(
-                signals::lock(&self.monitor).blocks(),
-                frame.scroll.offset,
-                frame.rows,
-            )
+            let m = signals::lock(&self.monitor);
+            blocks_ui::failure_spans(m.blocks(), frame.scroll.offset + m.row_base(), frame.rows)
         } else {
             Vec::new()
         };

@@ -154,7 +154,10 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
   (`halyard-term::OutputObserver`, `observer_sees_the_cursor_row_at_each_mark`); a real
   zsh or bash with the integration script sourced makes blocks with rows, statuses and
   command lines (`signals::tests::integration_script_in_a_real_shell_makes_blocks`).
-  Rows drift once scrollback is full and old rows are dropped (not handled yet).
+  Rows survive a full scrollback dropping its oldest rows: the engine counts dropped
+  rows with a pinned row (`Engine::dropped_rows`) and block rows count from the
+  session's first row (`rows_stay_on_their_line_when_scrollback_drops_old_rows`,
+  `pane::tests::dropped_scrollback_moves_the_base_and_forgets_dropped_blocks`).
 - [x] Command blocks in the UI: `prev_prompt` and `next_prompt` scroll the prompt to the
   top (`blocks_ui::tests::prompt_jumps_go_to_the_nearest_block_start`, and in a real zsh
   `signals::tests::integration_script_in_a_real_shell_makes_blocks`;
@@ -164,7 +167,8 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
   palette entry that writes the script and copies the `install_line` for the configured
   shell (`integration_line_writes_the_script_and_never_follows_a_symlink`). Blocks on rows
   that `clear` erased are forgotten (`a_mark_above_the_newest_block_forgets_the_erased_blocks`,
-  `cleared_scrollback_forgets_closed_blocks`). Verified by debug-script screenshots on
+  `cleared_scrollback_forgets_closed_blocks`). A command with no output copies nothing
+  (`last_output_is_the_newest_finished_block`). Verified by debug-script screenshots on
   macOS arm64 (prompt jumps, failure bars). Not built: rerun. Not handled: rows after a
   window resize reflows lines, and a last output line without a trailing newline (it
   shares the row of the next prompt, so it is not copied).

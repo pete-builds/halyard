@@ -30,15 +30,16 @@ pub fn prompt_target<C: Clock>(blocks: &BlockTracker<C>, top: u64, jump: Jump) -
 }
 
 /// Rows `first..=last` holding the output of the most recently finished command,
-/// or `None` without one. The row of the closing D mark is left out when the
-/// output spans more than one row: shells draw the next prompt on that row. So
-/// a last line printed without a trailing newline, which shares the row with
-/// the D mark and the prompt, is not copied (the mark's column is not recorded).
+/// or `None` when it printed nothing. The row of the closing D mark is left out:
+/// shells draw the next prompt on that row. So a command whose C and D marks
+/// share a row printed no full line (`true`, or text without a newline that the
+/// prompt now shares) and gives `None`, and a last line printed without a
+/// trailing newline is not copied (the mark's column is not recorded).
 pub fn last_output_rows<C: Clock>(blocks: &BlockTracker<C>) -> Option<(u64, u64)> {
     let b = blocks.history().filter(|b| b.output_start_row.is_some()).last()?;
     let first = b.output_start_row?;
     let end = b.output_end_row?;
-    Some((first, if end > first { end - 1 } else { first }))
+    (end > first).then(|| (first, end - 1))
 }
 
 /// Trims trailing line breaks from the copied text.
@@ -74,10 +75,21 @@ pub fn failure_spans<C: Clock>(blocks: &BlockTracker<C>, top: u64, rows: u16) ->
 /// returns its path. The file is written next to its final name and renamed over
 /// it, so a symlink planted at the final name is replaced, never followed.
 pub fn write_script(dir: &Path, shell: Shell) -> io::Result<PathBuf> {
+    use std::io::Write;
+
     std::fs::create_dir_all(dir)?;
     let path = dir.join(shell.script_file_name());
     let tmp = dir.join(format!(".{}.tmp", shell.script_file_name()));
-    std::fs::write(&tmp, halyard_shell::integration_script(shell))?;
+    // The temporary name is predictable: remove whatever sits there (a symlink
+    // is removed, not followed) and create the file only if it is new.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    f.write_all(halyard_shell::integration_script(shell).as_bytes())?;
+    drop(f);
     std::fs::rename(&tmp, &path)?;
     Ok(path)
 }
@@ -139,6 +151,14 @@ mod tests {
         // Output from row 21; the D mark (and the next prompt) on row 22.
         assert_eq!(last_output_rows(&t), Some((21, 21)));
         assert_eq!(last_output_rows(&BlockTracker::new(SystemClock, 10)), None);
+        // A command with no output: C and D on the same row, which holds the
+        // next prompt. Nothing to copy, rather than the prompt.
+        let mut t = BlockTracker::new(SystemClock, 10);
+        t.on_event(&ShellEvent::PromptStart { aid: None }, 30);
+        t.on_event(&ShellEvent::CommandInputStart, 30);
+        t.on_event(&ShellEvent::CommandExecuted, 31);
+        t.on_event(&ShellEvent::CommandFinished { exit_code: Some(0), aid: None }, 31);
+        assert_eq!(last_output_rows(&t), None);
         assert_eq!(tidy_output("a\nb\n\n"), "a\nb");
         assert_eq!(tidy_output("a"), "a");
     }
@@ -165,6 +185,10 @@ mod tests {
         let scripts = dir.path().join("shell");
         std::fs::create_dir_all(&scripts).unwrap();
         std::os::unix::fs::symlink(&target, scripts.join("halyard.zsh")).unwrap();
+        // A symlink planted at the temporary name is not followed either.
+        let other = dir.path().join("other-victim");
+        std::fs::write(&other, "keep me too").unwrap();
+        std::os::unix::fs::symlink(&other, scripts.join(".halyard.zsh.tmp")).unwrap();
         let (shell, line) = integration_line(Some(Path::new("/bin/zsh")), &scripts).unwrap();
         assert_eq!(shell, Shell::Zsh);
         let path = scripts.join("halyard.zsh");
@@ -175,6 +199,8 @@ mod tests {
             halyard_shell::integration_script(Shell::Zsh)
         );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "keep me too");
+        assert!(!scripts.join(".halyard.zsh.tmp").exists());
         // Other shells: a message, nothing written.
         let err = integration_line(Some(Path::new("/bin/dash")), &scripts).unwrap_err();
         assert!(err.contains("zsh, bash and fish"), "{err}");

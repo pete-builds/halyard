@@ -25,8 +25,8 @@ use libghostty_vt::selection::{FormatOptions, SelectWordOptions, Selection};
 use libghostty_vt::style::{PaletteIndex, RgbColor, Underline};
 use libghostty_vt::terminal::{
     ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode, Point,
-    PointCoordinate, PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes,
-    SizeReportSize, TertiaryDeviceAttributes,
+    PointCoordinate, PointSpace, PrimaryDeviceAttributes, ScrollViewport,
+    SecondaryDeviceAttributes, SizeReportSize, TertiaryDeviceAttributes,
 };
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 
@@ -87,6 +87,9 @@ pub struct Engine {
     // Field order is drop order: the tracked selection anchor and the
     // iterators go before the terminal that owns their memory.
     selection_anchor: Option<TrackedGridRef>,
+    /// A pin on a primary-screen row and that row's screen y when it was
+    /// placed, for counting rows dropped from the top of scrollback.
+    drop_anchor: Option<(TrackedGridRef, u64)>,
     key_event: key::Event<'static>,
     key_encoder: key::Encoder<'static>,
     mouse_event: mouse::Event<'static>,
@@ -99,6 +102,8 @@ pub struct Engine {
     palette: Palette,
     option_as_alt: bool,
     generation: u64,
+    /// Rows dropped from the top of the primary screen's scrollback so far.
+    dropped: u64,
 }
 
 impl fmt::Debug for Engine {
@@ -198,6 +203,8 @@ impl Engine {
 
         let mut engine = Self {
             selection_anchor: None,
+            drop_anchor: None,
+            dropped: 0,
             key_event: key::Event::new().map_err(err("creating a key event"))?,
             key_encoder: key::Encoder::new().map_err(err("creating the key encoder"))?,
             mouse_event: mouse::Event::new().map_err(err("creating a mouse event"))?,
@@ -240,6 +247,44 @@ impl Engine {
         let history = self.terminal.scrollback_rows().unwrap_or(0);
         let y = self.terminal.cursor_y().unwrap_or(0);
         u64::try_from(history).unwrap_or(u64::MAX).saturating_add(u64::from(y))
+    }
+
+    /// The last count [`Engine::dropped_rows`] made.
+    #[must_use]
+    pub const fn dropped_total(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Counts rows dropped from the top of the primary screen's scrollback
+    /// since the engine started (a full scrollback drops its oldest rows in
+    /// page-sized steps, so the scrollback row count alone does not show it),
+    /// and re-pins the count on the cursor's row. Returns the total, or `None`
+    /// when the pin itself was dropped (more rows went than the scrollback
+    /// holds since the last call, so the exact count is lost; the total then
+    /// stays where it was). Rows recorded as [`Engine::cursor_screen_row`] plus
+    /// this total keep naming the same text. While the alternate screen is
+    /// active nothing is counted.
+    pub fn dropped_rows(&mut self) -> Option<u64> {
+        if matches!(self.terminal.active_screen(), Ok(Screen::Alternate)) {
+            return Some(self.dropped);
+        }
+        let mut known = true;
+        if let Some((pin, then)) = &self.drop_anchor {
+            let now = pin.snapshot(&self.terminal).ok().flatten().and_then(|g| {
+                self.terminal.point_from_grid_ref(&g, PointSpace::Screen).ok().flatten()
+            });
+            match now {
+                Some(p) => {
+                    self.dropped += then.saturating_sub(u64::from(p.y));
+                }
+                None => known = false,
+            }
+        }
+        let row = self.cursor_screen_row();
+        let point =
+            Point::Screen(PointCoordinate { x: 0, y: u32::try_from(row).unwrap_or(u32::MAX) });
+        self.drop_anchor = self.terminal.track_grid_ref(point).ok().map(|pin| (pin, row));
+        known.then_some(self.dropped)
     }
 
     /// Scrollback rows of the primary screen, or `None` while the alternate

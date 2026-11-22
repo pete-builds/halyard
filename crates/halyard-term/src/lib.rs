@@ -21,6 +21,6 @@ pub use input::{
 };
 pub use palette::Palette;
 pub use session::{
-    OutputObserver, Session, SessionConfig, SessionError, SessionEvent, default_shell,
+    History, OutputObserver, Session, SessionConfig, SessionError, SessionEvent, default_shell,
     new_session_id,
 };

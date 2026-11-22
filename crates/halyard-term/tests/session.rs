@@ -472,7 +472,7 @@ impl halyard_term::OutputObserver for RowAtOsc {
     fn at_mark(&mut self, _index: usize, row: u64) {
         self.rows.lock().unwrap().push(row);
     }
-    fn chunk_done(&mut self, _history_rows: Option<u64>) {
+    fn chunk_done(&mut self, _history: Option<halyard_term::History>) {
         *self.chunks.lock().unwrap() += 1;
     }
 }
@@ -536,4 +536,59 @@ fn rows_text_and_scroll_to_row_use_screen_rows() {
     assert_eq!(f.scroll.offset, first);
     s.scroll(ScrollRequest::Row(u64::MAX));
     wait_for(&s, "clamped at the bottom", |f| f.scroll.at_bottom());
+}
+
+/// Records rows at OSC marks and the last history report, for
+/// `rows_stay_on_their_line_when_scrollback_drops_old_rows`.
+struct DropWatch {
+    rows: Arc<Mutex<Vec<u64>>>,
+    history: Arc<Mutex<Option<halyard_term::History>>>,
+    inner: RowAtOsc,
+}
+
+impl halyard_term::OutputObserver for DropWatch {
+    fn scan(&mut self, chunk: &[u8], marks: &mut Vec<usize>) {
+        self.inner.scan(chunk, marks);
+    }
+    fn at_mark(&mut self, _index: usize, row: u64) {
+        self.rows.lock().unwrap().push(row);
+    }
+    fn chunk_done(&mut self, history: Option<halyard_term::History>) {
+        if history.is_some() {
+            *self.history.lock().unwrap() = history;
+        }
+    }
+}
+
+#[test]
+fn rows_stay_on_their_line_when_scrollback_drops_old_rows() {
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let history = Arc::new(Mutex::new(None));
+    let inner =
+        RowAtOsc { rows: Arc::new(Mutex::new(Vec::new())), chunks: Arc::new(Mutex::new(0)) };
+    let observer = DropWatch { rows: Arc::clone(&rows), history: Arc::clone(&history), inner };
+    let s = Session::spawn(SessionConfig {
+        observer: Some(Box::new(observer)),
+        scrollback_lines: 200,
+        ..config(40, 6)
+    })
+    .expect("spawn");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    // Mark A, enough lines to make the scrollback drop old rows, mark B.
+    run(
+        &s,
+        "printf 'mA\\033]0;x\\007\\n'; seq 1 20000; printf 'mB\\033]0;y\\007\\n'; echo drop-done",
+    );
+    let f = wait_for(&s, "the end", |f| (0..f.rows).any(|r| f.row_text(r) == "drop-done"));
+    let h = history.lock().unwrap().expect("a history report");
+    let rows = rows.lock().unwrap().clone();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(h.dropped > 0, "the scrollback dropped rows: {h:?}");
+    assert!(!h.lost, "{h:?}");
+    // Mark B's row, minus the rows dropped, is the screen row of `mB`.
+    let mb = (0..f.rows).find(|&r| f.row_text(r) == "mB").expect("mB on screen");
+    assert_eq!(rows[1] - h.dropped, f.scroll.offset + u64::from(mb), "{rows:?} {h:?}");
+    // And the two marks stay 20001 lines apart, though the screen rows between
+    // them were dropped.
+    assert_eq!(rows[1] - rows[0], 20_001, "{rows:?} {h:?}");
 }

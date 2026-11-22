@@ -62,14 +62,28 @@ pub trait OutputObserver: Send {
     fn scan(&mut self, chunk: &[u8], marks: &mut Vec<usize>);
     /// The engine has consumed the chunk up to mark number `index` (in the order
     /// pushed by `scan`); `row` is the cursor's row counted from the top of
-    /// scrollback (see [`Engine::cursor_screen_row`]).
+    /// scrollback (see [`Engine::cursor_screen_row`]) plus the rows dropped from
+    /// the top of scrollback so far ([`History::dropped`]), so it keeps naming
+    /// the same line as old rows are dropped. Subtract `dropped` for a row of
+    /// [`Session::screen_rows_text`] or [`crate::ScrollRequest::Row`].
     fn at_mark(&mut self, index: usize, row: u64);
-    /// The whole chunk has been consumed. `history_rows` is the number of
-    /// scrollback rows of the primary screen now (`None` while the alternate
-    /// screen is shown). When it shrinks, scrollback was cleared (`CSI 3 J`, as
-    /// `clear` sends, or a reset) and rows recorded before no longer hold the
-    /// same text.
-    fn chunk_done(&mut self, history_rows: Option<u64>);
+    /// The whole chunk has been consumed. `history` describes the primary
+    /// screen's scrollback now (`None` while the alternate screen is shown).
+    fn chunk_done(&mut self, history: Option<History>);
+}
+
+/// The primary screen's scrollback after a chunk, for an [`OutputObserver`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct History {
+    /// Scrollback rows now. When this shrinks, scrollback was cleared (`CSI 3 J`,
+    /// as `clear` sends, or a reset) and rows recorded before point at other text.
+    pub rows: u64,
+    /// Rows dropped from the top of scrollback since the session started.
+    pub dropped: u64,
+    /// True when, since the last chunk, more rows were dropped than could be
+    /// counted (more than the scrollback holds went by): `dropped` is then too
+    /// small and every row recorded before is unreliable.
+    pub lost: bool,
 }
 
 /// How to start a session.
@@ -840,14 +854,25 @@ impl SessionThread {
         self.marks.clear();
         observer.scan(chunk, &mut self.marks);
         let mut done = 0;
+        let mut lost = false;
+        let mut dropped;
         for (index, &mark) in self.marks.iter().enumerate() {
             let mark = mark.clamp(done, chunk.len());
             engine.write(&chunk[done..mark]);
             done = mark;
-            observer.at_mark(index, engine.cursor_screen_row());
+            dropped = engine.dropped_rows().unwrap_or_else(|| {
+                lost = true;
+                engine.dropped_total()
+            });
+            observer.at_mark(index, engine.cursor_screen_row().saturating_add(dropped));
         }
         engine.write(&chunk[done..]);
-        observer.chunk_done(engine.primary_history_rows());
+        dropped = engine.dropped_rows().unwrap_or_else(|| {
+            lost = true;
+            engine.dropped_total()
+        });
+        let history = engine.primary_history_rows().map(|rows| History { rows, dropped, lost });
+        observer.chunk_done(history);
     }
 
     fn run(mut self, mut engine: Engine) {

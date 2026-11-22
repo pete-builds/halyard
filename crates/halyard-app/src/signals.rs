@@ -65,12 +65,12 @@ impl OutputObserver for SignalObserver {
         self.scan.at_mark(row);
     }
 
-    fn chunk_done(&mut self, history_rows: Option<u64>) {
+    fn chunk_done(&mut self, history: Option<halyard_term::History>) {
         let now = SystemTime::now();
         let mut m = lock(&self.monitor);
         self.scan.finish(&mut m, now);
-        if let Some(rows) = history_rows {
-            m.on_history(rows);
+        if let Some(h) = history {
+            m.on_history(h.rows, h.dropped, h.lost);
         }
     }
 }

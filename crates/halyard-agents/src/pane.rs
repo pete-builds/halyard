@@ -59,8 +59,12 @@ pub struct PaneMonitor<C: Clock> {
     /// Blocks changed (a block opened or closed) since the last
     /// [`PaneMonitor::take_blocks_changed`].
     blocks_changed: bool,
-    /// Scrollback rows of the primary screen after the last chunk.
-    history_rows: Option<u64>,
+    /// Scrollback rows of the primary screen after the last chunk, plus the
+    /// rows dropped from its top by then: everything the screen ever kept.
+    history_total: Option<u64>,
+    /// Rows dropped from the top of scrollback so far. Block rows are counted
+    /// from the first row the session ever had; subtract this for screen rows.
+    row_base: u64,
 }
 
 impl<C: Clock> std::fmt::Debug for PaneMonitor<C> {
@@ -89,7 +93,8 @@ impl<C: Clock> PaneMonitor<C> {
             detected: None,
             changed: false,
             blocks_changed: false,
-            history_rows: None,
+            history_total: None,
+            row_base: 0,
         }
     }
 
@@ -158,16 +163,36 @@ impl<C: Clock> PaneMonitor<C> {
         self.apply(e, at);
     }
 
-    /// The primary screen's scrollback row count after a chunk. When it shrank,
-    /// scrollback was cleared (`clear` sends `CSI 3 J`; a reset does too) and the
-    /// rows of closed blocks point at other text now, so they are forgotten.
-    /// Running blocks and the prompt being typed are kept.
-    pub fn on_history(&mut self, rows: u64) {
-        if self.history_rows.is_some_and(|before| rows < before) {
+    /// The primary screen's scrollback after a chunk: `rows` now, `dropped`
+    /// from its top since the session started (the engine counts them, see
+    /// `halyard_term::History`), and `lost` when more went than could be
+    /// counted. Block rows count from the session's first row, so dropping old
+    /// rows moves the base ([`PaneMonitor::row_base`]) instead of the blocks;
+    /// blocks wholly above the base are forgotten.
+    ///
+    /// When the scrollback kept less than before in total (`rows + dropped`
+    /// shrank), it was cleared (`clear` sends `CSI 3 J`; a reset does too), and
+    /// when the count was lost the base is unreliable: either way closed blocks
+    /// point at other text now and are forgotten. Running blocks and the prompt
+    /// being typed are kept.
+    pub fn on_history(&mut self, rows: u64, dropped: u64, lost: bool) {
+        let total = rows.saturating_add(dropped);
+        if lost || self.history_total.is_some_and(|before| total < before) {
             self.blocks.prune_before(u64::MAX);
             self.blocks_changed = true;
+        } else if dropped > self.row_base {
+            let before = self.blocks.history().len();
+            self.blocks.prune_before(dropped);
+            self.blocks_changed |= before != self.blocks.history().len();
         }
-        self.history_rows = Some(rows);
+        self.history_total = Some(total);
+        self.row_base = dropped;
+    }
+
+    /// Rows dropped from the top of scrollback so far: block rows minus this are
+    /// screen rows (as `halyard_term::Session::screen_rows_text` counts them).
+    pub fn row_base(&self) -> u64 {
+        self.row_base
     }
 
     /// The user typed or pasted into the pane.
