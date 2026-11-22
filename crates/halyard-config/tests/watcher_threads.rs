@@ -24,14 +24,25 @@ fn thread_count() -> usize {
     }
 }
 
+/// A per-watcher leak adds one thread per cycle, so [`CYCLES`] cycles would add that many.
+/// Anything within [`SLACK`] is the system's own threads, not ours.
+const CYCLES: usize = 60;
+const SLACK: usize = 10;
+
 #[test]
 fn dropping_a_watcher_stops_and_joins_its_thread() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("config.toml");
     std::fs::write(&file, "").unwrap();
+    // On macOS the first watcher makes the system start a few process-lifetime threads
+    // (FSEvents and dispatch workers) that are never torn down and are not ours. Create and
+    // drop one watcher first, so the baseline already includes them. CI saw 5 threads
+    // against a baseline of 2 without this; the count is flat across 1, 10, 50 and 500
+    // cycles, which a leak would not be.
+    drop(ConfigWatcher::new(&file, Duration::from_millis(50)).unwrap());
     let baseline = thread_count();
     let start = Instant::now();
-    for _ in 0..50 {
+    for _ in 0..CYCLES {
         let w = ConfigWatcher::new(&file, Duration::from_millis(50)).unwrap();
         drop(w);
     }
@@ -39,9 +50,12 @@ fn dropping_a_watcher_stops_and_joins_its_thread() {
     assert!(start.elapsed() < Duration::from_secs(10), "drops were slow: {:?}", start.elapsed());
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut now = thread_count();
-    while now > baseline + 2 && Instant::now() < deadline {
+    while now > baseline + SLACK && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
         now = thread_count();
     }
-    assert!(now <= baseline + 2, "{now} threads after 50 create/drop cycles, baseline {baseline}");
+    assert!(
+        now <= baseline + SLACK,
+        "{now} threads after {CYCLES} create/drop cycles, baseline {baseline}"
+    );
 }
