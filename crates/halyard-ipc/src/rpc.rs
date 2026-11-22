@@ -102,6 +102,10 @@ pub struct Request {
 }
 
 /// Parses one line into a request, or the error response to send (with the id to use).
+// The error is large only because `serde_json::Value` grows when another workspace crate
+// enables serde_json features (feature unification). It is built at most once per
+// request line, on the error path, so boxing it would buy nothing.
+#[allow(clippy::result_large_err)]
 pub fn parse_request(line: &[u8]) -> Result<Request, (Value, RpcError)> {
     let value: Value = serde_json::from_slice(line).map_err(|e| {
         (Value::Null, RpcError::new(code::PARSE_ERROR, format!("parse error: {e}")))
