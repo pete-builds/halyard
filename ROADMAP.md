@@ -34,6 +34,8 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       launch-only check in KDE Plasma 6.6 Wayland; typing, colors, vim, htop, Ctrl+C, resize,
       paste in, and (X11) copy out and wheel scrollback all passed. Not yet: Wayland pointer
       selection and wheel (no pointer in a headless seat).
+      The window sets app id and WM_CLASS `halyard` (`APP_ID`; Linux only, not yet checked on
+      Linux).
 - [ ] Keyboard input (including Kitty protocol via the engine's encoder), Ctrl+C.
       Session side done: `keys_encode_with_terminal_modes`,
       `kitty_keyboard_flags_change_encoding`, `ctrl_c_byte_interrupts_sleep`,
@@ -82,7 +84,18 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       `tabs_move_rename_and_cycle`, `random_operations_keep_invariants`); the GPUI side is
       pending.
 - [x] TOML config and token-based themes, bundled themes (library: `crates/halyard-config`, tests named in docs/themes.md)
-- [ ] Settings wired into the app with live reload
+- [x] Settings wired into the app with live reload: font family, size and line height,
+      padding, cursor style and blink, scrollback, shell and arguments, working directory,
+      theme (following the system appearance with `light`/`dark`), palette into the engine,
+      chrome from `ui` tokens; changes apply to open panes; config errors and warnings show in
+      a dismissible banner and the last good settings stay. Keybindings come from
+      `Config::keymap`. Tests in `settings.rs` (`load_applies_the_file`,
+      `a_broken_reload_keeps_the_previous_settings`, `watcher_reload_reaches_settings`,
+      `theme_palette_reaches_the_engine_palette`, `unknown_theme_falls_back_with_a_notice`,
+      `light_and_dark_follow_the_appearance`), `keybind.rs`
+      (`every_default_binding_is_loaded_except_unbuilt_actions`). Screenshots on macOS arm64
+      (PR body). Not verified: the bar cursor in a focused window (the scripted window is never
+      the active window), the system appearance switching live.
 - [ ] Command palette
 - [ ] Persistent workspaces (layouts, cwd, names) restored on launch. Model and file format done
       in `crates/halyard-workspace` (`tests/persist.rs`: `serialization_round_trips`,

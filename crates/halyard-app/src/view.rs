@@ -6,37 +6,33 @@
 
 use std::cell::Cell as StdCell;
 use std::ops::Range;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-#[cfg(feature = "debug-script")]
-use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
-    App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
-    Focusable, Font, FontStyle, FontWeight, Hsla, KeyDownEvent, MouseButton as GpuiButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba, ScrollDelta,
-    ScrollWheelEvent, SharedString, StrikethroughStyle, Task, TextRun, UTF16Selection,
+    App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, EventEmitter,
+    FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla, KeyDownEvent,
+    MouseButton as GpuiButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, Rgba,
+    ScrollDelta, ScrollWheelEvent, SharedString, StrikethroughStyle, Task, TextRun, UTF16Selection,
     UnderlineStyle, Window, canvas, div, fill, outline, point, prelude::*, px, size,
 };
 use halyard_term::{
-    CursorShape, Frame, KeyCode, KeyInput, Modifiers, MouseAction, MouseButton, MouseInput, Rgb,
-    ScrollRequest, Session, SessionConfig, SessionError, SessionEvent,
+    CursorShape, Frame, KeyCode, KeyInput, Modifiers, MouseAction, MouseButton, MouseInput,
+    Palette, Rgb, ScrollRequest, Session, SessionConfig, SessionError, SessionEvent,
 };
 
+use crate::decide::{self, Wheel};
 use crate::grid::{self, CellSize, TextRunSpec};
+use crate::keybind::{Copy, Paste};
 use crate::keys::{KeyRoute, route_keystroke};
-use crate::{Copy, Paste};
-
-/// Space between the window edge and the grid, in logical pixels.
-pub const PADDING: f32 = 6.0;
-
-/// Font size in logical pixels.
-pub const FONT_SIZE: f32 = 14.0;
+use crate::selection::{self, MiddleClick};
+use crate::settings;
 
 /// Treat Option as Alt on macOS. Off, so Option composes characters as in
-/// other macOS apps; a config option comes with the settings work.
+/// other macOS apps. Not a config key yet.
 const OPTION_AS_ALT: bool = false;
 
 /// Preferred monospace families, first available wins.
@@ -45,6 +41,77 @@ const FONT_CANDIDATES: &[&str] = &["Menlo", "SF Mono", "Monaco"];
 #[cfg(not(target_os = "macos"))]
 const FONT_CANDIDATES: &[&str] =
     &["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "Ubuntu Mono", "Monospace"];
+
+/// The family to draw with: the configured one when it is installed, else
+/// the first installed platform monospace font. The second value is a notice
+/// for the banner when the configured family was not found (it names the
+/// fallback, never the configured value).
+#[must_use]
+pub fn resolve_font_family(configured: &str, installed: &[String]) -> (String, Option<String>) {
+    let fallback = pick_font_family(FONT_CANDIDATES, installed).to_owned();
+    if configured.eq_ignore_ascii_case("monospace") {
+        return (fallback, None);
+    }
+    match installed.iter().find(|i| i.eq_ignore_ascii_case(configured)) {
+        Some(found) => (found.clone(), None),
+        None => {
+            let notice =
+                format!("config: key `font.family`: that font is not installed; using {fallback}");
+            (fallback, Some(notice))
+        }
+    }
+}
+
+/// How a pane looks: everything that comes from the configuration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaneStyle {
+    /// Resolved font family.
+    pub family: String,
+    /// Font size in logical pixels.
+    pub font_size: f32,
+    /// Line height as a multiple of the font size.
+    pub line_height: f32,
+    /// Horizontal space between the pane edge and the grid.
+    pub padding_x: f32,
+    /// Vertical space between the pane edge and the grid.
+    pub padding_y: f32,
+    /// Cursor shape when the program has not asked for one.
+    pub cursor: CursorShape,
+    /// Whether the cursor blinks.
+    pub blink: bool,
+    /// Glyph color under a block cursor.
+    pub cursor_text: Rgb,
+    /// Write the clipboard when a selection is made.
+    pub copy_on_select: bool,
+    /// Ask before an unbracketed multi-line paste.
+    pub confirm_multiline_paste: bool,
+}
+
+/// How to start a pane's program.
+#[derive(Clone, Debug, Default)]
+pub struct PaneSpawn {
+    /// Program and arguments, or `None` for the login shell.
+    pub command: Option<(PathBuf, Vec<String>)>,
+    /// Working directory, or `None` for home.
+    pub cwd: Option<PathBuf>,
+    /// Scrollback lines.
+    pub scrollback: usize,
+    /// Starting colors.
+    pub palette: Palette,
+}
+
+/// Something a pane tells its window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PaneEvent {
+    /// The program exited cleanly: close the pane.
+    Exited,
+    /// The user dismissed the exit notice: close the pane.
+    CloseRequested,
+    /// The program set a new title.
+    TitleChanged,
+    /// The pane got keyboard focus.
+    Focused,
+}
 
 /// Pick the first candidate family that is installed, else the first one
 /// (the platform's font fallback then applies).
@@ -80,16 +147,22 @@ pub struct TerminalView {
     font: Font,
     font_size: Pixels,
     cell: CellSize,
+    style: PaneStyle,
     layout: Rc<StdCell<Layout>>,
     selecting: bool,
     marked: Option<String>,
     text_mods: Modifiers,
     exited: Option<Option<i32>>,
     scroll_accum: f32,
+    title: String,
+    /// False during the "off" half of a cursor blink.
+    blink_on: bool,
     /// Number of render passes, for debugging repaint problems.
-    renders: u64,
+    pub renders: u64,
     _pump: Task<()>,
 }
+
+impl EventEmitter<PaneEvent> for TerminalView {}
 
 impl std::fmt::Debug for TerminalView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -97,17 +170,20 @@ impl std::fmt::Debug for TerminalView {
     }
 }
 
-fn measure_cell(window: &Window, font: &Font, font_size: Pixels) -> CellSize {
+fn measure_cell(window: &Window, font: &Font, font_size: Pixels, line_height: f32) -> CellSize {
     let ts = window.text_system();
     let id = ts.resolve_font(font);
     let width =
         ts.advance(id, font_size, 'M').map_or(f32::from(font_size) * 0.6, |s| s.width.into());
-    let height = f32::from(ts.ascent(id, font_size)) + f32::from(ts.descent(id, font_size));
     let scale = window.scale_factor();
     CellSize {
         width: grid::snap_to_device(width, scale),
-        height: grid::snap_to_device(height.ceil().max(f32::from(font_size)), scale),
+        height: grid::snap_to_device((f32::from(font_size) * line_height).ceil(), scale),
     }
+}
+
+fn font_for(style: &PaneStyle) -> Font {
+    gpui::font(style.family.clone())
 }
 
 fn px_u32(v: f32) -> u32 {
@@ -128,6 +204,7 @@ pub struct Prepared {
     font: Font,
     font_size: Pixels,
     cell: CellSize,
+    style: PaneStyle,
     cols: u16,
     rows: u16,
 }
@@ -139,21 +216,31 @@ impl std::fmt::Debug for Prepared {
 }
 
 impl TerminalView {
-    /// Start a login shell sized to the window.
-    pub fn prepare(window: &Window) -> Result<Prepared, SessionError> {
-        let installed = window.text_system().all_font_names();
-        let font = gpui::font(pick_font_family(FONT_CANDIDATES, &installed));
-        let font_size = px(FONT_SIZE);
-        let cell = measure_cell(window, &font, font_size);
-        let viewport = window.viewport_size();
+    /// Start a pane's program. `area` is the expected size of the pane in
+    /// logical pixels; the pane resizes to its real size on first paint.
+    pub fn prepare(
+        window: &Window,
+        style: PaneStyle,
+        spawn: PaneSpawn,
+        area: gpui::Size<Pixels>,
+    ) -> Result<Prepared, SessionError> {
+        let font = font_for(&style);
+        let font_size = px(style.font_size);
+        let cell = measure_cell(window, &font, font_size, style.line_height);
         let (cols, rows) = grid::grid_dims(
-            f32::from(viewport.width) - 2.0 * PADDING,
-            f32::from(viewport.height) - 2.0 * PADDING,
+            f32::from(area.width) - 2.0 * style.padding_x,
+            f32::from(area.height) - 2.0 * style.padding_y,
             cell,
         );
 
         let (tx, wakeups) = mpsc::unbounded::<()>();
+        let (program, args) = spawn.command.map_or((None, Vec::new()), |(p, a)| (Some(p), a));
         let config = SessionConfig {
+            program,
+            args,
+            cwd: spawn.cwd,
+            scrollback_lines: spawn.scrollback,
+            palette: spawn.palette,
             cols,
             rows,
             cell_width: px_u32(cell.width),
@@ -167,12 +254,12 @@ impl TerminalView {
             ..SessionConfig::default()
         };
         let session = Arc::new(Session::spawn(config)?);
-        Ok(Prepared { session, wakeups, font, font_size, cell, cols, rows })
+        Ok(Prepared { session, wakeups, font, font_size, cell, style, cols, rows })
     }
 
     /// Build the view around a prepared session.
     pub fn new(prepared: Prepared, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let Prepared { session, mut wakeups, font, font_size, cell, cols, rows } = prepared;
+        let Prepared { session, mut wakeups, font, font_size, cell, style, cols, rows } = prepared;
         let pump = cx.spawn_in(window, async move |this, cx| {
             while wakeups.next().await.is_some() {
                 // Coalesce a burst of wakeups into one update.
@@ -182,135 +269,132 @@ impl TerminalView {
                 }
             }
         });
-        #[cfg(feature = "debug-script")]
-        Self::start_debug_script(window, cx);
-        let origin = point(px(PADDING), px(PADDING));
+        let origin = point(px(style.padding_x), px(style.padding_y));
+        let focus = cx.focus_handle();
+        cx.on_focus(&focus, window, |_, _, cx| cx.emit(PaneEvent::Focused)).detach();
         Self {
             session,
-            focus: cx.focus_handle(),
+            focus,
             font,
             font_size,
             cell,
+            style,
             layout: Rc::new(StdCell::new(Layout { origin, cols, rows })),
             selecting: false,
             marked: None,
             text_mods: Modifiers::NONE,
             exited: None,
             scroll_accum: 0.0,
+            title: String::new(),
+            blink_on: true,
             renders: 0,
             _pump: pump,
         }
     }
 
-    /// Run `HALYARD_DEBUG_SCRIPT` (see `debug_script`), if set.
+    /// The session behind this pane.
     #[cfg(feature = "debug-script")]
-    fn start_debug_script(window: &mut Window, cx: &mut Context<Self>) {
-        use crate::debug_script::{self, Step};
-        let Some(path) = std::env::var_os("HALYARD_DEBUG_SCRIPT") else { return };
-        let steps = match std::fs::read_to_string(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|s| debug_script::parse(&s))
-        {
-            Ok(steps) => steps,
-            Err(e) => {
-                // A scripted run with a broken script would otherwise sit
-                // idle forever.
-                eprintln!("halyard: debug script: {e}");
-                cx.quit();
-                return;
-            }
-        };
-        cx.spawn_in(window, async move |this, cx| {
-            for step in steps {
-                let result = match step {
-                    Step::Sleep(d) => {
-                        cx.background_executor().timer(d).await;
-                        Ok(())
-                    }
-                    Step::Type(text) => this
-                        .update(cx, |view, _| {
-                            for c in text.chars() {
-                                view.type_text(&c.to_string());
-                            }
-                        })
-                        .map_err(|e| e.to_string()),
-                    Step::Key(k) => match gpui::Keystroke::parse(&k) {
-                        // Through the real key handler, then the text path
-                        // the platform input method would take.
-                        Ok(keystroke) => this
-                            .update_in(cx, |view, window, _| {
-                                if !view.handle_key(&keystroke, window)
-                                    && let Some(text) = &keystroke.key_char
-                                {
-                                    view.type_text(text);
-                                }
-                            })
-                            .map_err(|e| e.to_string()),
-                        Err(e) => Err(e.to_string()),
-                    },
-                    Step::Shot(p) => {
-                        match this
-                            .update_in(cx, |_, window, _| debug_script::native_view(window))
-                            .map_err(|e| e.to_string())
-                            .and_then(|view| view)
-                        {
-                            Ok(view) => {
-                                // Outside the update: the draw it triggers
-                                // updates the window. Then let Core Animation
-                                // commit before reading the window back.
-                                debug_script::force_display(view);
-                                cx.background_executor().timer(Duration::from_millis(250)).await;
-                                debug_script::capture(view, &p)
-                                    .map(|()| eprintln!("halyard: saved {}", p.display()))
-                            }
-                            Err(e) => Err(e),
-                        }
-                    }
-                    Step::Select(c1, r1, c2, r2) => this
-                        .update(cx, |view, cx| {
-                            view.session.selection_start(c1, r1);
-                            view.session.selection_extend(c2, r2);
-                            cx.notify();
-                        })
-                        .map_err(|e| e.to_string()),
-                    Step::Resize(w, h) => this
-                        .update_in(cx, |_, window, _| window.resize(size(px(w), px(h))))
-                        .map_err(|e| e.to_string()),
-                    Step::Dump => this
-                        .update(cx, |view, _| {
-                            let f = view.session.latest_frame();
-                            eprintln!(
-                                "halyard: frame {} ({}x{}), renders {}:\n{}",
-                                f.generation,
-                                f.cols,
-                                f.rows,
-                                view.renders,
-                                f.text()
-                            );
-                        })
-                        .map_err(|e| e.to_string()),
-                    Step::Quit => cx.update(|_, cx| cx.quit()).map_err(|e| e.to_string()),
-                };
-                if let Err(e) = result {
-                    eprintln!("halyard: debug script step failed: {e}");
-                }
-            }
-        })
-        .detach();
+    #[must_use]
+    pub fn session(&self) -> &Arc<Session> {
+        &self.session
     }
 
-    fn drain_events(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The shell's working directory: the OSC 7 report when it names this
+    /// machine, else the shell process's own directory. Used verbatim.
+    #[must_use]
+    pub fn cwd(&self) -> Option<String> {
+        let frame = self.session.latest_frame();
+        if let Some(p) = frame.cwd.as_deref().and_then(|raw| {
+            halyard_workspace::persist::osc7_local_path(raw, crate::app_state::hostname())
+        }) {
+            return Some(p);
+        }
+        let dir = self.session.pid().and_then(crate::procinfo::cwd)?;
+        dir.to_str().and_then(halyard_workspace::persist::valid_cwd).map(str::to_owned)
+    }
+
+    /// Whether a command other than the shell holds the terminal.
+    #[must_use]
+    pub fn needs_close_confirmation(&self, setting: bool) -> bool {
+        self.exited.is_none()
+            && crate::procinfo::needs_close_confirmation(
+                setting,
+                self.session.pid().and_then(crate::procinfo::groups),
+            )
+    }
+
+    /// The title the program set, empty if none.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// Apply a new style (font, padding, cursor). The grid reflows on the
+    /// next paint.
+    pub fn set_style(&mut self, style: PaneStyle, window: &mut Window, cx: &mut Context<Self>) {
+        if style == self.style {
+            return;
+        }
+        self.font = font_for(&style);
+        self.font_size = px(style.font_size);
+        self.cell = measure_cell(window, &self.font, self.font_size, style.line_height);
+        self.style = style;
+        // Force a resize report on the next layout: the cell size changed.
+        let mut l = self.layout.get();
+        l.cols = 0;
+        self.layout.set(l);
+        cx.notify();
+    }
+
+    /// Change the colors.
+    pub fn set_palette(&self, palette: Palette) {
+        self.session.set_palette(palette);
+    }
+
+    /// Show or hide the cursor for blinking. Returns true when it changed.
+    pub fn set_blink(&mut self, on: bool, cx: &mut Context<Self>) -> bool {
+        if self.blink_on == on {
+            return false;
+        }
+        self.blink_on = on;
+        cx.notify();
+        true
+    }
+
+    /// Whether this pane wants its cursor to blink right now.
+    #[must_use]
+    pub fn wants_blink(&self, window: &Window) -> bool {
+        self.style.blink && self.exited.is_none() && self.has_focus(window)
+    }
+
+    /// True when this pane has keyboard focus in the active window. A pane
+    /// in a window behind another app draws as unfocused (hollow cursor).
+    #[must_use]
+    pub fn has_focus(&self, window: &Window) -> bool {
+        decide::pane_has_focus(self.focus.is_focused(window), window.is_window_active())
+    }
+
+    /// Select between two cells (debug scripts).
+    #[cfg(feature = "debug-script")]
+    pub fn select_cells(&self, c1: u16, r1: u16, c2: u16, r2: u16) {
+        self.session.selection_start(c1, r1);
+        self.session.selection_extend(c2, r2);
+    }
+
+    fn drain_events(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let mut redraw = false;
         while let Ok(event) = self.session.events().try_recv() {
             match event {
                 SessionEvent::FrameReady => redraw = true,
                 SessionEvent::TitleChanged(title) => {
-                    window.set_window_title(if title.is_empty() { "Halyard" } else { &title });
+                    self.title = title;
+                    cx.emit(PaneEvent::TitleChanged);
                 }
                 SessionEvent::Bell => {}
-                SessionEvent::Exited(Some(0)) => {
-                    // A clean exit closes the window, like most terminals.
-                    window.remove_window();
+                SessionEvent::Exited(code) if decide::exit_closes_pane(code) => {
+                    // A clean exit closes the pane, like most terminals.
+                    self.exited = Some(code);
+                    cx.emit(PaneEvent::Exited);
                     return;
                 }
                 SessionEvent::Exited(code) => {
@@ -360,19 +444,21 @@ impl TerminalView {
         }
     }
 
-    fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.handle_key(&ev.keystroke, window) {
+    fn key_down(&mut self, ev: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.handle_key(&ev.keystroke, cx) {
             cx.stop_propagation();
         }
     }
 
     /// Act on a key press. Returns true if it was consumed; false means the
     /// platform text input should deliver its text (or it is not ours).
-    fn handle_key(&mut self, keystroke: &gpui::Keystroke, window: &mut Window) -> bool {
+    fn handle_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) -> bool {
         if self.exited.is_some() {
-            window.remove_window();
+            cx.emit(PaneEvent::CloseRequested);
             return true;
         }
+        // Typing shows the cursor at once instead of mid-blink.
+        self.blink_on = true;
         match route_keystroke(keystroke, OPTION_AS_ALT) {
             KeyRoute::Terminal(key) => {
                 self.session.send_key(key);
@@ -415,6 +501,28 @@ impl TerminalView {
         window.focus(&self.focus);
         let frame = self.session.latest_frame();
         let Some(button) = Self::button(ev.button) else { return };
+        if button == MouseButton::Middle {
+            match selection::middle_click(
+                selection::LINUX,
+                frame.mouse_tracking,
+                ev.modifiers.shift,
+            ) {
+                MiddleClick::SendToApp => {
+                    let input = self.mouse_input(
+                        MouseAction::Press,
+                        Some(button),
+                        ev.position,
+                        ev.modifiers,
+                        true,
+                    );
+                    self.session.send_mouse(input);
+                }
+                MiddleClick::PastePrimary => self.paste_primary(window, cx),
+                MiddleClick::Ignore => {}
+            }
+            cx.stop_propagation();
+            return;
+        }
         if frame.mouse_tracking && !ev.modifiers.shift {
             let input =
                 self.mouse_input(MouseAction::Press, Some(button), ev.position, ev.modifiers, true);
@@ -424,6 +532,7 @@ impl TerminalView {
             if ev.click_count >= 2 {
                 self.session.select_word(col, row);
                 self.selecting = false;
+                self.selection_made(cx);
             } else {
                 self.session.selection_start(col, row);
                 self.selecting = true;
@@ -435,6 +544,7 @@ impl TerminalView {
     fn mouse_up(&mut self, ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.selecting && ev.button == GpuiButton::Left {
             self.selecting = false;
+            self.selection_made(cx);
             return;
         }
         let frame = self.session.latest_frame();
@@ -497,32 +607,59 @@ impl TerminalView {
         }
         // Bounded, so the conversion is exact.
         let n = whole.clamp(-1000.0, 1000.0) as i32;
-        let up = n > 0;
         let frame = self.session.latest_frame();
-        if frame.mouse_tracking {
-            let button = if up { MouseButton::WheelUp } else { MouseButton::WheelDown };
-            for _ in 0..n.unsigned_abs().min(10) {
-                let input = self.mouse_input(
-                    MouseAction::Press,
-                    Some(button),
-                    ev.position,
-                    ev.modifiers,
-                    false,
-                );
-                self.session.send_mouse(input);
+        match decide::wheel(n, frame.mouse_tracking, frame.alt_screen) {
+            Some(Wheel::Report(button, count)) => {
+                for _ in 0..count {
+                    let input = self.mouse_input(
+                        MouseAction::Press,
+                        Some(button),
+                        ev.position,
+                        ev.modifiers,
+                        false,
+                    );
+                    self.session.send_mouse(input);
+                }
             }
-        } else if frame.alt_screen {
             // Alternate scroll: full-screen programs without mouse support
             // (less, man) scroll with arrow keys.
-            let key = if up { KeyCode::Up } else { KeyCode::Down };
-            for _ in 0..n.unsigned_abs().min(10) {
-                self.session.send_key(KeyInput::new(key, Modifiers::NONE));
+            Some(Wheel::Arrows(key, count)) => {
+                for _ in 0..count {
+                    self.session.send_key(KeyInput::new(key, Modifiers::NONE));
+                }
             }
-        } else {
-            // Wheel up moves into history.
-            self.session.scroll(ScrollRequest::Lines(-(n as isize)));
+            Some(Wheel::Scroll(lines)) => self.session.scroll(ScrollRequest::Lines(lines)),
+            None => {}
         }
     }
+
+    /// A drag selection finished: copy it where the platform and config say.
+    fn selection_made(&mut self, cx: &mut Context<Self>) {
+        let targets = selection::on_selection(selection::LINUX, self.style.copy_on_select);
+        if !(targets.clipboard || targets.primary) {
+            return;
+        }
+        let Some(text) = self.session.selection_text() else { return };
+        if targets.clipboard {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        if targets.primary {
+            cx.write_to_primary(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Paste the Linux PRIMARY selection through the normal paste path.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn paste_primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = cx.read_from_primary().and_then(|item| item.text()) {
+            self.paste_text(text, window, cx);
+        }
+    }
+
+    /// PRIMARY does not exist here.
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    fn paste_primary(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.session.selection_text() {
@@ -530,10 +667,37 @@ impl TerminalView {
         }
     }
 
-    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.session.paste(text);
+            self.paste_text(text, window, cx);
         }
+    }
+
+    /// Paste through the session (which neutralizes control bytes and
+    /// brackets when the program asked), asking first when the text holds a
+    /// line break and the program has not enabled bracketed paste.
+    fn paste_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let bracketed = self.session.latest_frame().bracketed_paste;
+        if !decide::paste_needs_confirmation(self.style.confirm_multiline_paste, bracketed, &text) {
+            self.session.paste(text);
+            return;
+        }
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            "Paste text with line breaks?",
+            Some(
+                "The program has not turned on bracketed paste, so each line may run as a command.",
+            ),
+            &["Paste", "Cancel"],
+            cx,
+        );
+        let session = Arc::clone(&self.session);
+        cx.spawn(async move |_, _| {
+            if answer.await == Ok(0) {
+                session.paste(text);
+            }
+        })
+        .detach();
     }
 }
 
@@ -639,6 +803,93 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
+/// The pane's platform text input. It forwards everything to GPUI's
+/// [`ElementInputHandler`] but turns off macOS press-and-hold, so holding a
+/// key repeats it (vim's `j`) instead of opening the accent popup.
+struct TerminalInput(ElementInputHandler<TerminalView>);
+
+/// Whether macOS press-and-hold (the accent popup) is enabled in panes.
+/// A terminal wants key repeat instead.
+pub const PRESS_AND_HOLD: bool = false;
+
+impl gpui::InputHandler for TerminalInput {
+    fn selected_text_range(
+        &mut self,
+        ignore_disabled_input: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        self.0.selected_text_range(ignore_disabled_input, window, cx)
+    }
+
+    fn marked_text_range(&mut self, window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        self.0.marked_text_range(window, cx)
+    }
+
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<String> {
+        self.0.text_for_range(range_utf16, adjusted_range, window, cx)
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        replacement_range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.0.replace_text_in_range(replacement_range, text, window, cx);
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.0.replace_and_mark_text_in_range(
+            range_utf16,
+            new_text,
+            new_selected_range,
+            window,
+            cx,
+        );
+    }
+
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut App) {
+        self.0.unmark_text(window, cx);
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<Pixels>> {
+        self.0.bounds_for_range(range_utf16, window, cx)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<usize> {
+        self.0.character_index_for_point(point, window, cx)
+    }
+
+    fn apple_press_and_hold_enabled(&mut self) -> bool {
+        PRESS_AND_HOLD
+    }
+}
+
 /// Everything the paint pass needs, captured by value.
 struct PaintState {
     frame: Arc<Frame>,
@@ -646,6 +897,9 @@ struct PaintState {
     font: Font,
     font_size: Pixels,
     focused: bool,
+    cursor_shape: CursorShape,
+    cursor_text: Rgb,
+    cursor_on: bool,
     marked: Option<String>,
 }
 
@@ -678,7 +932,10 @@ fn paint_grid(origin: Point<Pixels>, state: &PaintState, window: &mut Window, cx
 
     // Cursor, under the text so a block cursor can show its glyph.
     let cursor = frame.cursor;
-    let show_cursor = cursor.visible && frame.scroll.at_bottom() && cursor.row < frame.rows;
+    let show_cursor = cursor.visible
+        && frame.scroll.at_bottom()
+        && cursor.row < frame.rows
+        && (state.cursor_on || !state.focused);
     let cursor_color = to_hsla(cursor.color.unwrap_or(frame.foreground));
     let mut cursor_text = None;
     if show_cursor {
@@ -686,12 +943,11 @@ fn paint_grid(origin: Point<Pixels>, state: &PaintState, window: &mut Window, cx
             .cell(cursor.col, cursor.row)
             .is_some_and(|c| c.flags.has(halyard_term::CellFlags::WIDE));
         let b = cell_bounds(cursor.col, cursor.row, if wide { 2 } else { 1 });
-        let shape = if state.focused { cursor.shape } else { CursorShape::HollowBlock };
+        let shape = decide::drawn_cursor(state.focused, state.cursor_shape);
         match shape {
             CursorShape::Block => {
                 window.paint_quad(fill(b, cursor_color));
-                let under = frame.cell(cursor.col, cursor.row).map_or(frame.background, |c| c.bg);
-                cursor_text = Some((cursor.col, under));
+                cursor_text = Some((cursor.col, state.cursor_text));
             }
             CursorShape::Bar => {
                 window.paint_quad(fill(
@@ -777,14 +1033,19 @@ impl Render for TerminalView {
         self.renders += 1;
         let frame = self.session.latest_frame();
         let background = to_hsla(frame.background);
+        let cursor_shape = settings::effective_cursor(frame.cursor.shape, self.style.cursor);
         let state = PaintState {
             frame,
             cell: self.cell,
             font: self.font.clone(),
             font_size: self.font_size,
-            focused: self.focus.is_focused(window),
+            focused: self.has_focus(window),
+            cursor_shape,
+            cursor_text: self.style.cursor_text,
+            cursor_on: self.blink_on || !self.style.blink,
             marked: self.marked.clone(),
         };
+        let (pad_x, pad_y) = (self.style.padding_x, self.style.padding_y);
         let layout = Rc::clone(&self.layout);
         let session = Arc::clone(&self.session);
         let cell = self.cell;
@@ -815,13 +1076,13 @@ impl Render for TerminalView {
                     move |bounds, _window, _cx| {
                         // Fit the grid to the element; tell the session when
                         // the size in cells changes.
-                        let pad = px(PADDING);
+                        let (pad_x, pad_y) = (px(pad_x), px(pad_y));
                         let (cols, rows) = grid::grid_dims(
-                            f32::from(bounds.size.width - pad * 2.0),
-                            f32::from(bounds.size.height - pad * 2.0),
+                            f32::from(bounds.size.width - pad_x * 2.0),
+                            f32::from(bounds.size.height - pad_y * 2.0),
                             cell,
                         );
-                        let origin = point(bounds.origin.x + pad, bounds.origin.y + pad);
+                        let origin = point(bounds.origin.x + pad_x, bounds.origin.y + pad_y);
                         let old = layout.get();
                         if (old.cols, old.rows) != (cols, rows) {
                             session.resize(cols, rows, px_u32(cell.width), px_u32(cell.height));
@@ -830,7 +1091,11 @@ impl Render for TerminalView {
                         origin
                     },
                     move |bounds, origin, window, cx| {
-                        window.handle_input(&focus, ElementInputHandler::new(bounds, entity), cx);
+                        window.handle_input(
+                            &focus,
+                            TerminalInput(ElementInputHandler::new(bounds, entity)),
+                            cx,
+                        );
                         paint_grid(origin, &state, window, cx);
                     },
                 )
@@ -870,6 +1135,20 @@ mod tests {
             "Noto Sans Mono"
         );
         assert_eq!(pick_font_family(&["Menlo", "Monaco"], &[]), "Menlo");
+    }
+
+    #[test]
+    fn configured_font_family_is_used_when_installed() {
+        let installed = vec!["Menlo".to_owned(), "JetBrains Mono".to_owned()];
+        assert_eq!(
+            resolve_font_family("jetbrains mono", &installed),
+            ("JetBrains Mono".into(), None)
+        );
+        let (f, notice) = resolve_font_family("Nope Sans", &installed);
+        assert_eq!(f, pick_font_family(FONT_CANDIDATES, &installed));
+        let notice = notice.expect("a notice");
+        assert!(notice.contains("font.family") && !notice.contains("Nope"), "{notice}");
+        assert_eq!(resolve_font_family("monospace", &installed).1, None);
     }
 
     #[test]

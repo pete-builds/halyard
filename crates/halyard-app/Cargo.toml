@@ -15,7 +15,15 @@ path = "src/main.rs"
 [dependencies]
 futures = "0.3"
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+halyard-config = { path = "../halyard-config" }
 halyard-term.workspace = true
+halyard-workspace = { path = "../halyard-workspace" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3.27.0"
 
 [features]
 # Debug-only scripted driving and window screenshots (HALYARD_DEBUG_SCRIPT),
