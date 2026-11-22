@@ -29,6 +29,9 @@ allow = [
   "OFL-1.1",
   "Ubuntu-font-1.0",
   "CDLA-Permissive-2.0",
+  # University of Illinois/NCSA: permissive, OSI approved (LLVM's former
+  # license). Reaches us as libfuzzer-sys < rav1e < ravif < image < gpui.
+  "NCSA",
 ]
 
 [bans]
