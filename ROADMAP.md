@@ -66,7 +66,14 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 
 ## Phase 2: modern UI
 
-- [ ] Tabs, draggable split panes, keyboard pane navigation and resizing
+- [ ] Tabs, draggable split panes, keyboard pane navigation and resizing. Model done in
+      `crates/halyard-workspace` (tests in `tests/model.rs`: `split_right_and_down_build_the_tree`,
+      `closing_a_pane_gives_its_space_to_the_sibling`, `focus_moves_by_geometry`,
+      `focus_prefers_the_larger_overlap`,
+      `keyboard_resize_moves_the_nearest_divider_and_respects_minimums`,
+      `dragging_a_divider_clamps_to_nested_minimums`, `zoom_shows_only_the_focused_pane`,
+      `tabs_move_rename_and_cycle`, `random_operations_keep_invariants`); the GPUI side is
+      pending.
 - [x] TOML config and token-based themes, bundled themes (library: `crates/halyard-config`, tests named in docs/themes.md)
 - [x] Settings wired into the app with live reload: font family, size and line height,
       padding, cursor style and blink, scrollback, shell and arguments, working directory,
@@ -81,11 +88,11 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       (PR body). Not verified: the bar cursor in a focused window (the scripted window is never
       the active window), the system appearance switching live.
 - [ ] Command palette
-- [ ] Persistent workspaces (layouts, cwd, names) restored on launch. Model and file format
-      done in `crates/halyard-workspace` (`serialization_round_trips`,
-      `corrupt_files_give_a_default_layout_and_a_warning`, `save_is_atomic_and_private`,
-      `osc7_is_used_only_when_local`, `random_operations_keep_invariants`); the app wiring
-      comes with the tabs and splits PR.
+- [ ] Persistent workspaces (layouts, cwd, names) restored on launch. Model and file format done
+      in `crates/halyard-workspace` (`tests/persist.rs`: `serialization_round_trips`,
+      `the_file_holds_layout_only`, `corrupt_files_give_a_default_layout_and_a_warning`,
+      `hostile_values_are_clamped_or_dropped`, `save_is_atomic_and_private`,
+      `state_dir_per_platform`, `osc7_is_used_only_when_local`); the app wiring is pending.
 - [ ] Home Manager module: themes, fonts, keybindings, settings
 
 ## Phase 3: modern shell experience
