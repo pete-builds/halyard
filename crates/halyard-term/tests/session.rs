@@ -472,7 +472,7 @@ impl halyard_term::OutputObserver for RowAtOsc {
     fn at_mark(&mut self, _index: usize, row: u64) {
         self.rows.lock().unwrap().push(row);
     }
-    fn chunk_done(&mut self) {
+    fn chunk_done(&mut self, _history: Option<halyard_term::History>) {
         *self.chunks.lock().unwrap() += 1;
     }
 }
@@ -510,5 +510,91 @@ fn an_invalid_session_id_is_replaced() {
             .expect("spawn");
         assert_ne!(s.id(), bad);
         assert_eq!(s.id().len(), 32, "a fresh id");
+    }
+}
+
+/// Finds the absolute row of the line reading `text`, from the viewport.
+fn absolute_row_of(f: &Frame, text: &str) -> Option<u64> {
+    row_equal(f, text).map(|r| f.scroll.offset + u64::from(r))
+}
+
+#[test]
+fn rows_text_and_scroll_to_row_use_screen_rows() {
+    let s = spawn(40, 6);
+    run(&s, "printf 'first\\nsecond\\n'; seq 1 30; echo rows-done");
+    let f = wait_for(&s, "the end", |f| row_equal(f, "rows-done").is_some());
+    let done = absolute_row_of(&f, "rows-done").unwrap();
+    // `seq 1 30` ends on the row above `rows-done`; `first` is 32 rows up.
+    assert_eq!(s.screen_rows_text(done - 1, done - 1).as_deref(), Some("30"));
+    let first = done - 32;
+    assert_eq!(s.screen_rows_text(first, first + 2).as_deref(), Some("first\nsecond\n1"));
+    assert_eq!(s.screen_rows_text(5, 4), None);
+    assert_eq!(s.screen_rows_text(1_000_000, 1_000_001), None);
+    // Scrolling to a row puts it at the top of the viewport.
+    s.scroll(ScrollRequest::Row(first));
+    let f = wait_for(&s, "scrolled to `first`", |f| f.row_text(0) == "first");
+    assert_eq!(f.scroll.offset, first);
+    s.scroll(ScrollRequest::Row(u64::MAX));
+    wait_for(&s, "clamped at the bottom", |f| f.scroll.at_bottom());
+}
+
+/// Records rows at OSC marks and the last history report, for
+/// `rows_stay_on_their_line_when_scrollback_drops_old_rows`.
+struct DropWatch {
+    rows: Arc<Mutex<Vec<u64>>>,
+    history: Arc<Mutex<Option<halyard_term::History>>>,
+    inner: RowAtOsc,
+}
+
+impl halyard_term::OutputObserver for DropWatch {
+    fn scan(&mut self, chunk: &[u8], marks: &mut Vec<usize>) {
+        self.inner.scan(chunk, marks);
+    }
+    fn at_mark(&mut self, _index: usize, row: u64) {
+        self.rows.lock().unwrap().push(row);
+    }
+    fn chunk_done(&mut self, history: Option<halyard_term::History>) {
+        if let Some(mut h) = history {
+            let mut last = self.history.lock().unwrap();
+            // Keep `lost` once any chunk reported it.
+            h.lost |= last.is_some_and(|l| l.lost);
+            *last = Some(h);
+        }
+    }
+}
+
+#[test]
+fn rows_stay_on_their_line_when_scrollback_drops_old_rows() {
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    let history = Arc::new(Mutex::new(None));
+    let inner =
+        RowAtOsc { rows: Arc::new(Mutex::new(Vec::new())), chunks: Arc::new(Mutex::new(0)) };
+    let observer = DropWatch { rows: Arc::clone(&rows), history: Arc::clone(&history), inner };
+    let s = Session::spawn(SessionConfig {
+        observer: Some(Box::new(observer)),
+        scrollback_lines: 200,
+        ..config(40, 6)
+    })
+    .expect("spawn");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    // Mark A, enough lines to make the scrollback drop old rows, mark B.
+    run(
+        &s,
+        "printf 'mA\\033]0;x\\007\\n'; seq 1 20000; printf 'mB\\033]0;y\\007\\n'; echo drop-done",
+    );
+    let f = wait_for(&s, "the end", |f| (0..f.rows).any(|r| f.row_text(r) == "drop-done"));
+    let h = history.lock().unwrap().expect("a history report");
+    let rows = rows.lock().unwrap().clone();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(h.dropped > 0, "the scrollback dropped rows: {h:?}");
+    // Mark B's row, minus the rows dropped, is the screen row of `mB`.
+    let mb = (0..f.rows).find(|&r| f.row_text(r) == "mB").expect("mB on screen");
+    assert_eq!(rows[1] - h.dropped, f.scroll.offset + u64::from(mb), "{rows:?} {h:?}");
+    // And unless a chunk dropped more than could be counted (then `lost` is set
+    // and the app forgets old blocks), the two marks stay 20001 lines apart
+    // though the rows between them were dropped. Which case happens depends on
+    // how the PTY splits the output (macOS: counted; Linux CI: lost).
+    if !h.lost {
+        assert_eq!(rows[1] - rows[0], 20_001, "{rows:?} {h:?}");
     }
 }

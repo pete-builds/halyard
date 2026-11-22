@@ -486,3 +486,18 @@ fn aidless_shell_nested_in_aid_shell() {
     assert_eq!(h.t.stats().aborted_prompts, 1);
     assert_eq!(h.hist().len(), 2);
 }
+
+#[test]
+fn forget_from_drops_blocks_reaching_the_erased_rows() {
+    let mut h = H::new();
+    h.a(0).b(0).c(1).d(Some(0), 3);
+    h.a(3).b(3).c(4).d(Some(1), 8);
+    h.a(8).b(8);
+    // The screen from row 4 down was erased: the second block reached it.
+    h.t.forget_from(4);
+    let starts: Vec<_> = h.hist().iter().map(|b| b.start_row()).collect();
+    assert_eq!(starts, vec![Some(0)]);
+    assert_eq!(h.t.pending_prompt_row(), Some(8), "the prompt being typed is kept");
+    h.t.forget_from(0);
+    assert!(h.hist().is_empty());
+}

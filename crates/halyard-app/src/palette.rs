@@ -51,6 +51,8 @@ pub enum Command {
     Run(Action),
     /// Open the theme picker.
     SwitchTheme,
+    /// Write the shell integration script and copy the line that loads it.
+    CopyShellIntegration,
 }
 
 /// The palette title for an action, or `None` for actions not offered
@@ -85,7 +87,11 @@ pub fn title(a: Action) -> Option<&'static str> {
         Action::RenameTab => "Rename Tab",
         Action::ReloadConfig => "Reload Config",
         Action::OpenConfig => "Open Config File",
-        Action::CommandPalette | Action::Find | Action::AgentDashboard => return None,
+        Action::AgentDashboard => "Agent Dashboard",
+        Action::PrevPrompt => "Jump to Previous Prompt",
+        Action::NextPrompt => "Jump to Next Prompt",
+        Action::CopyLastOutput => "Copy Last Command Output",
+        Action::CommandPalette | Action::Find => return None,
     })
 }
 
@@ -95,6 +101,7 @@ pub fn commands() -> Vec<(Command, &'static str)> {
     let mut v: Vec<(Command, &'static str)> =
         Action::ALL.iter().filter_map(|a| title(*a).map(|t| (Command::Run(*a), t))).collect();
     v.insert(0, (Command::SwitchTheme, "Switch Theme"));
+    v.insert(1, (Command::CopyShellIntegration, "Copy Shell Integration Line"));
     v
 }
 
@@ -127,6 +134,8 @@ pub enum Mode {
         /// Tab index.
         tab: usize,
     },
+    /// The agent dashboard: one entry per pane, in attention order.
+    Agents,
 }
 
 /// Palette state: mode, query, entries and selection.
@@ -284,6 +293,7 @@ mod tests {
     fn every_built_action_has_a_command_with_a_shortcut_name() {
         let cmds = commands();
         assert_eq!(cmds[0], (Command::SwitchTheme, "Switch Theme"));
+        assert_eq!(cmds[1], (Command::CopyShellIntegration, "Copy Shell Integration Line"));
         for a in Action::ALL {
             let listed = cmds.iter().any(|(c, _)| *c == Command::Run(*a));
             let built = crate::keybind::gpui_action(*a).is_some();

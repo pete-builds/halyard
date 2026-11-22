@@ -303,6 +303,9 @@ actions! {
     RenameTab => "rename_tab",
     ReloadConfig => "reload_config",
     OpenConfig => "open_config",
+    PrevPrompt => "prev_prompt",
+    NextPrompt => "next_prompt",
+    CopyLastOutput => "copy_last_output",
 }
 
 /// The value that removes a default binding when used as an action name.
@@ -344,6 +347,9 @@ pub fn default_bindings(platform: Platform) -> &'static [(&'static str, Action)]
             ("cmd+shift+i", RenameTab),
             ("cmd+shift+,", ReloadConfig),
             ("cmd+,", OpenConfig),
+            ("cmd+up", PrevPrompt),
+            ("cmd+down", NextPrompt),
+            ("cmd+alt+c", CopyLastOutput),
         ],
         Platform::Linux => &[
             ("primary+t", NewTab),
@@ -376,6 +382,9 @@ pub fn default_bindings(platform: Platform) -> &'static [(&'static str, Action)]
             ("primary+i", RenameTab),
             ("primary+,", ReloadConfig),
             ("ctrl+,", OpenConfig),
+            ("primary+up", PrevPrompt),
+            ("primary+down", NextPrompt),
+            ("primary+alt+c", CopyLastOutput),
         ],
     }
 }
@@ -497,7 +506,7 @@ mod tests {
             assert_eq!(Action::from_name(a.name()), Some(*a));
         }
         assert_eq!(Action::from_name("nope"), None);
-        assert_eq!(Action::ALL.len(), 30);
+        assert_eq!(Action::ALL.len(), 33);
     }
 
     #[test]

@@ -500,6 +500,17 @@ impl<C: Clock> BlockTracker<C> {
     pub fn prune_before(&mut self, row: u64) {
         self.history.retain(|b| b.output_end_row.or(b.start_row()).is_none_or(|end| end >= row));
     }
+
+    /// Forgets closed blocks that reach row `row` or below it, for when the
+    /// screen from `row` down was erased and written again (`clear`, a full
+    /// redraw): their rows now hold other text. Blocks entirely above `row` and
+    /// running blocks are kept.
+    pub fn forget_from(&mut self, row: u64) {
+        self.history.retain(|b| {
+            let last = b.output_end_row.max(b.start_row()).max(b.output_start_row);
+            last.is_none_or(|last| last < row)
+        });
+    }
 }
 
 #[cfg(test)]

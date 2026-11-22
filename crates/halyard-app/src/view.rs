@@ -25,6 +25,7 @@ use halyard_term::{
     Palette, Rgb, ScrollRequest, Session, SessionConfig, SessionError, SessionEvent,
 };
 
+use crate::blocks_ui::{self, Jump};
 use crate::decide::{self, Wheel};
 use crate::grid::{self, CellSize, TextRunSpec};
 use crate::keybind::{Copy, Paste};
@@ -100,6 +101,9 @@ pub struct PaneChrome {
     pub border: Option<Hsla>,
     /// Agent state badge in the top right corner.
     pub badge: Option<PaneBadge>,
+    /// Color of the margin mark beside commands that failed (shell integration
+    /// blocks with a non-zero status), or `None` for no marks.
+    pub failure: Option<Hsla>,
 }
 
 /// The small label a pane with an agent shows: what it is and its state.
@@ -375,6 +379,43 @@ impl TerminalView {
     /// event path, so it still notifies.
     pub fn set_seen(&mut self, seen: bool) -> bool {
         signals::lock(&self.monitor).set_focused(seen, SystemTime::now())
+    }
+
+    /// Scrolls so the previous or next command's prompt is the top row. Without
+    /// shell integration there are no blocks and nothing moves; past the last
+    /// prompt, [`Jump::Next`] returns to the live screen.
+    pub fn jump_prompt(&self, jump: Jump) {
+        let frame = self.session.latest_frame();
+        if frame.alt_screen {
+            return;
+        }
+        // Block rows count from the session's first row; screen rows start
+        // after the rows dropped from the top of scrollback (`row_base`).
+        let (target, base) = {
+            let m = signals::lock(&self.monitor);
+            let base = m.row_base();
+            (blocks_ui::prompt_target(m.blocks(), frame.scroll.offset + base, jump), base)
+        };
+        match (target, jump) {
+            (Some(row), _) => self.session.scroll(ScrollRequest::Row(row.saturating_sub(base))),
+            (None, Jump::Next) => self.session.scroll(ScrollRequest::Bottom),
+            (None, Jump::Previous) => {}
+        }
+    }
+
+    /// The output of the last finished command, from the screen, or `None`
+    /// without shell integration or once it scrolled out of the scrollback.
+    #[must_use]
+    pub fn last_output(&self) -> Option<String> {
+        let (first, last, base) = {
+            let m = signals::lock(&self.monitor);
+            let (first, last) = blocks_ui::last_output_rows(m.blocks())?;
+            (first, last, m.row_base())
+        };
+        // Rows already dropped from scrollback cannot be copied.
+        let first = first.checked_sub(base)?;
+        let last = last.checked_sub(base)?;
+        self.session.screen_rows_text(first, last).map(|t| blocks_ui::tidy_output(&t))
     }
 
     /// The user typed or pasted.
@@ -1003,6 +1044,8 @@ struct PaintState {
     cursor_on: bool,
     marked: Option<String>,
     chrome: PaneChrome,
+    /// Viewport row spans of failed commands, for the margin marks.
+    failures: Vec<(u16, u16)>,
 }
 
 fn run_font(base: &Font, spec: &TextRunSpec) -> Font {
@@ -1136,6 +1179,12 @@ impl Render for TerminalView {
         let frame = self.session.latest_frame();
         let background = to_hsla(frame.background);
         let cursor_shape = settings::effective_cursor(frame.cursor.shape, self.style.cursor);
+        let failures = if self.chrome.failure.is_some() && !frame.alt_screen {
+            let m = signals::lock(&self.monitor);
+            blocks_ui::failure_spans(m.blocks(), frame.scroll.offset + m.row_base(), frame.rows)
+        } else {
+            Vec::new()
+        };
         let state = PaintState {
             frame,
             cell: self.cell,
@@ -1146,6 +1195,7 @@ impl Render for TerminalView {
             cursor_text: self.style.cursor_text,
             cursor_on: self.blink_on || !self.style.blink,
             marked: self.marked.clone(),
+            failures,
             chrome: self.chrome.clone(),
         };
         let (pad_x, pad_y) = (self.style.padding_x, self.style.padding_y);
@@ -1201,6 +1251,17 @@ impl Render for TerminalView {
                             cx,
                         );
                         paint_grid(origin, &state, window, cx);
+                        if let Some(color) = state.chrome.failure {
+                            // A thin bar in the left margin beside each failed command.
+                            let ch = state.cell.height;
+                            for (first, last) in &state.failures {
+                                let top = origin.y + px(f32::from(*first) * ch);
+                                let h = px(f32::from(last - first + 1) * ch);
+                                let bar =
+                                    Bounds::new(point(bounds.origin.x, top), size(px(2.0), h));
+                                window.paint_quad(fill(bar, color));
+                            }
+                        }
                         if let Some(dim) = state.chrome.dim {
                             window.paint_quad(fill(bounds, dim));
                         }
