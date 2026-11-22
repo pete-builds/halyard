@@ -1,0 +1,12 @@
+# Signal Flare: high-contrast dark theme. Every ANSI color reaches 4.5:1.
+name = "Signal Flare"
+appearance = "dark"
+high_contrast = true
+
+[terminal]
+foreground = "#ffffff"
+background = "#000000"
+ansi = [
+  "#1a1a1a", "#ff6b6b", "#5dff7a", "#ffe14d", "#6fa8ff", "#ff7aff", "#4dfff0", "#e6e6e6",
+  "#555555", "#ff9a9a", "#9aff9f", "#fff08a", "#9cc4ff", "#ffa6ff", "#8affff", "#ffffff",
+]

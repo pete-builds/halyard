@@ -1,0 +1,11 @@
+# Kelp: deep green dark theme. The [ui] section is derived from the terminal colors.
+name = "Kelp"
+appearance = "dark"
+
+[terminal]
+foreground = "#d3e4d6"
+background = "#10201a"
+ansi = [
+  "#1c3128", "#f08a7e", "#8fd58a", "#e0c872", "#7fb5e0", "#d09ad0", "#68d4b8", "#b4cbb9",
+  "#3f5a4c", "#ffa89e", "#aeeaa8", "#f0dc92", "#a0cdf0", "#e4b6e4", "#8ae8d0", "#eaf5ec",
+]

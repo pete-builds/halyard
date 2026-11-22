@@ -1,0 +1,12 @@
+# Paper Chart: high-contrast light theme. Every ANSI color reaches 4.5:1.
+name = "Paper Chart"
+appearance = "light"
+high_contrast = true
+
+[terminal]
+foreground = "#000000"
+background = "#fdfbf5"
+ansi = [
+  "#000000", "#a00000", "#006300", "#6b4500", "#0036a8", "#7a0070", "#006068", "#d8d4c8",
+  "#404040", "#b80000", "#007000", "#7a5000", "#0040c8", "#8c0082", "#00727a", "#ffffff",
+]

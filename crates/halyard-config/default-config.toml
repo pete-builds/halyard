@@ -1,0 +1,92 @@
+# Halyard configuration.
+#
+# Location: $HALYARD_CONFIG, else $XDG_CONFIG_HOME/halyard/config.toml, else
+# ~/.config/halyard/config.toml (on macOS too, so dotfiles port between machines).
+# Print this file with `halyard config --print-default`.
+#
+# Every value below is the default. Uncomment and change only what you want.
+# Unknown keys are reported as warnings and ignored. Invalid values are errors
+# that name the key and line. Changes are picked up while Halyard runs.
+
+[font]
+# Font family, or "monospace" for the system monospace font.
+family = "monospace"
+# Size in points (4 to 128).
+size = 13.0
+# Line height as a multiple of the font size (0.8 to 3.0).
+line_height = 1.2
+# Draw bold text in the bright ANSI colors as well as in bold weight.
+bold_is_bright = false
+
+[window]
+# Space between the window edge and the grid, in points (0 to 200).
+padding_x = 8.0
+padding_y = 6.0
+# Background opacity: 0.0 is clear, 1.0 is solid.
+opacity = 1.0
+# Blur whatever is behind a translucent window.
+blur = false
+# "full", "none", or "transparent_titlebar" (macOS).
+decorations = "full"
+# Size of a new window in character cells.
+initial_cols = 110
+initial_rows = 32
+
+[terminal]
+# Lines of scrollback kept per pane (0 to 1000000).
+scrollback_lines = 10000
+# Where new shells start: "home", "inherit" (the focused pane's directory), or an
+# absolute path such as "/Users/you/code" or "~/code".
+working_directory = "home"
+# "block", "bar" or "underline".
+cursor_style = "block"
+cursor_blink = true
+# Copy the selection to the clipboard as soon as it is made.
+copy_on_select = false
+# Ask before closing a pane that is running a command.
+confirm_close_running = true
+# Shell to run. Unset means your login shell ($SHELL).
+# shell = { program = "/bin/zsh", args = ["-l"] }
+
+[theme]
+# Follow the system appearance with a light and a dark theme...
+light = "Halyard Day"
+dark = "Halyard Night"
+# ...or use one theme always (do not combine with light/dark):
+# name = "Signal Flare"
+# Bundled: Halyard Night, Halyard Day, Harbor Fog, Kelp, Signal Flare, Paper Chart.
+# Your own themes: put TOML files in a themes/ folder next to this file.
+
+[keybindings]
+# "chord" = "action". Your entries are added to the defaults for your platform.
+# Use "none" as the action to remove a default. `primary` means Cmd on macOS and
+# Ctrl+Shift elsewhere. Modifiers: ctrl, shift, alt, cmd, primary.
+# Actions: new_tab, close_pane, split_right, split_down, focus_left, focus_right,
+# focus_up, focus_down, next_tab, prev_tab, command_palette, copy, paste, find,
+# zoom_pane, increase_font_size, decrease_font_size, reset_font_size,
+# agent_dashboard, new_window, quit.
+# "primary+k" = "command_palette"
+# "cmd+q" = "none"
+
+[ai]
+# Master switch. With this off, no AI code runs and nothing is sent anywhere.
+enabled = false
+# Providers. Never put an API key here: name the environment variable that holds
+# it with api_key_env. A key written in this file is rejected.
+# [[ai.providers]]
+# name = "local"
+# kind = "ollama"                       # "openai-compatible", "anthropic" or "ollama"
+# base_url = "http://localhost:11434"   # required for openai-compatible and ollama
+# model = "llama3.1"
+#
+# [[ai.providers]]
+# name = "claude"
+# kind = "anthropic"
+# model = "claude-sonnet-4-5"
+# api_key_env = "ANTHROPIC_API_KEY"
+
+[agents]
+# Notify when an agent starts waiting for you.
+notify_on_waiting = true
+# Extra process names to treat as agents, besides the built-in list.
+detect = []

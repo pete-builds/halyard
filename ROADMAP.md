@@ -25,7 +25,8 @@ named; untested platforms are listed as such.
 ## Phase 2: workspace and theming
 
 - [ ] Tabs, split panes, keyboard pane navigation, resizing
-- [ ] TOML config and token-based themes, bundled themes
+- [x] TOML config and token-based themes, bundled themes: library done in `crates/halyard-config` (`default_config_file_parses_to_exactly_the_default_impl`, `every_bundled_theme_meets_the_contrast_rule`, `export_round_trips_every_bundled_theme`, `reloads_on_change_reports_errors_and_handles_delete`). Wiring into the app UI (applying settings, theme picker, `halyard config` subcommand) is pending
+  - [ ] Wire config and themes into the app, including live reload notices
 - [ ] Command palette
 
 ## Phase 3: modern shell experience
