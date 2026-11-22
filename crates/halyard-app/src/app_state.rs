@@ -1,4 +1,5 @@
-//! App-wide state: settings, key bindings and the config watcher.
+//! App-wide state: settings, the open windows, saving the workspace, and
+//! the config watcher.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -6,17 +7,25 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::channel::mpsc;
-use gpui::{App, BorrowAppContext, Global};
+use gpui::{App, BorrowAppContext, Global, WeakEntity};
 use halyard_config::{Config, ConfigWatcher};
-use halyard_workspace::persist;
+use halyard_workspace::persist::{self, SavedState, VERSION};
 
 use crate::keybind;
 use crate::settings::Settings;
+use crate::workspace_view::WorkspaceView;
 
 /// Shared by every window.
 pub struct AppState {
     /// The configuration and themes.
     pub settings: Settings,
+    /// Open windows, for saving the workspace.
+    pub windows: Vec<WeakEntity<WorkspaceView>>,
+    /// Where the workspace is saved, if a home directory is known.
+    pub state_file: Option<PathBuf>,
+    /// Problems found while restoring, shown once in the first window.
+    pub restore_warnings: Vec<String>,
+    save_pending: bool,
     /// Keeps the config watcher thread alive.
     _watcher: Option<std::thread::JoinHandle<()>>,
     /// Debug scripts run in the first window only.
@@ -28,7 +37,7 @@ impl Global for AppState {}
 
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AppState").field("settings", &self.settings).finish_non_exhaustive()
+        f.debug_struct("AppState").field("windows", &self.windows.len()).finish_non_exhaustive()
     }
 }
 
@@ -47,6 +56,10 @@ impl AppState {
         let watcher = path.as_ref().and_then(|p| start_watcher(p.clone(), cx));
         cx.set_global(AppState {
             settings,
+            windows: Vec::new(),
+            state_file: persist::state_file(),
+            restore_warnings: Vec::new(),
+            save_pending: false,
             _watcher: watcher,
             #[cfg(feature = "debug-script")]
             script_started: false,
@@ -143,4 +156,34 @@ fn start_watcher(path: PathBuf, cx: &mut App) -> Option<std::thread::JoinHandle<
     })
     .detach();
     Some(handle)
+}
+
+/// Save every open window's layout now.
+pub fn save_now(cx: &mut App) {
+    let Some(path) = cx.global::<AppState>().state_file.clone() else { return };
+    let windows: Vec<_> = cx.global::<AppState>().windows.clone();
+    let saved: Vec<_> =
+        windows.iter().filter_map(|w| w.upgrade()).map(|w| w.read(cx).saved(cx)).collect();
+    let state = SavedState { version: VERSION, windows: saved };
+    if let Err(e) = persist::save(&path, &state) {
+        eprintln!("halyard: could not save the workspace: {e}");
+    }
+}
+
+/// Save soon, coalescing bursts of changes into one write.
+pub fn request_save(cx: &mut App) {
+    let state = cx.global_mut::<AppState>();
+    if state.save_pending {
+        return;
+    }
+    state.save_pending = true;
+    cx.spawn(async move |cx| {
+        cx.background_executor().timer(Duration::from_millis(500)).await;
+        cx.update(|cx| {
+            cx.global_mut::<AppState>().save_pending = false;
+            save_now(cx);
+        })
+        .ok();
+    })
+    .detach();
 }

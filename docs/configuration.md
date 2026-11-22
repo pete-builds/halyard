@@ -212,6 +212,17 @@ at any point, revoke it.
 | `notify_on_waiting` | `true` | Notify when an agent starts waiting for you. |
 | `detect` | `[]` | Extra process names to treat as agents, besides the built-in list. |
 
+## Saved workspaces
+
+Halyard saves the layout of every window (tabs, their names, splits and their sizes, the
+focused pane, and each pane's working directory) and restores it on the next launch with
+fresh shells. It never saves scrollback, environment variables, command history or window
+titles. The file is `workspace.json` in `~/Library/Application Support/Halyard/` on macOS
+and `$XDG_STATE_HOME/halyard/` (default `~/.local/state/halyard/`) on Linux, written with
+mode 0600. `HALYARD_STATE_DIR` overrides the folder. A damaged file is ignored with a notice
+and Halyard opens one new window. A working directory is saved only when it is an absolute
+local path (an OSC 7 report naming another host is ignored).
+
 ## Status
 
 The library layer is `crates/halyard-config`: parsing, validation, keymaps, reload. The app

@@ -10,37 +10,73 @@ use halyard_config::{Action, Key, KeyChord, Keymap, NamedKey};
 actions!(
     halyard,
     [
+        NewTab,
         ClosePane,
+        SplitRight,
+        SplitDown,
+        FocusLeft,
+        FocusRight,
+        FocusUp,
+        FocusDown,
+        NextTab,
+        PrevTab,
+        CommandPalette,
         Copy,
         Paste,
+        ZoomPane,
         IncreaseFontSize,
         DecreaseFontSize,
         ResetFontSize,
         NewWindow,
         Quit,
+        ResizePaneLeft,
+        ResizePaneRight,
+        ResizePaneUp,
+        ResizePaneDown,
+        MoveTabLeft,
+        MoveTabRight,
+        RenameTab,
         ReloadConfig,
         OpenConfig,
+        SwitchTheme,
     ]
 );
 
 /// The GPUI action for a config action, or `None` for actions that are not
-/// built yet, whose chords then stay with the terminal.
+/// built yet (`find`, `agent_dashboard`), whose chords then stay with the
+/// terminal.
 #[must_use]
 pub fn gpui_action(a: Action) -> Option<Box<dyn gpui::Action>> {
     Some(match a {
+        Action::NewTab => Box::new(NewTab),
         Action::ClosePane => Box::new(ClosePane),
+        Action::SplitRight => Box::new(SplitRight),
+        Action::SplitDown => Box::new(SplitDown),
+        Action::FocusLeft => Box::new(FocusLeft),
+        Action::FocusRight => Box::new(FocusRight),
+        Action::FocusUp => Box::new(FocusUp),
+        Action::FocusDown => Box::new(FocusDown),
+        Action::NextTab => Box::new(NextTab),
+        Action::PrevTab => Box::new(PrevTab),
+        Action::CommandPalette => Box::new(CommandPalette),
         Action::Copy => Box::new(Copy),
         Action::Paste => Box::new(Paste),
+        Action::ZoomPane => Box::new(ZoomPane),
         Action::IncreaseFontSize => Box::new(IncreaseFontSize),
         Action::DecreaseFontSize => Box::new(DecreaseFontSize),
         Action::ResetFontSize => Box::new(ResetFontSize),
         Action::NewWindow => Box::new(NewWindow),
         Action::Quit => Box::new(Quit),
+        Action::ResizePaneLeft => Box::new(ResizePaneLeft),
+        Action::ResizePaneRight => Box::new(ResizePaneRight),
+        Action::ResizePaneUp => Box::new(ResizePaneUp),
+        Action::ResizePaneDown => Box::new(ResizePaneDown),
+        Action::MoveTabLeft => Box::new(MoveTabLeft),
+        Action::MoveTabRight => Box::new(MoveTabRight),
+        Action::RenameTab => Box::new(RenameTab),
         Action::ReloadConfig => Box::new(ReloadConfig),
         Action::OpenConfig => Box::new(OpenConfig),
-        // Tabs, splits, the palette, find and the agent dashboard are not
-        // built yet; their chords stay with the terminal.
-        _ => return None,
+        Action::Find | Action::AgentDashboard => return None,
     })
 }
 
@@ -125,6 +161,41 @@ pub fn keystrokes(chord: &KeyChord) -> Vec<String> {
     out
 }
 
+/// Short label for a chord, for the palette and banners (`⌘⇧P`, `Ctrl+Shift+P`).
+#[must_use]
+pub fn label(chord: &KeyChord) -> String {
+    let m = chord.mods;
+    let key: String = match chord.key {
+        Key::Char(c) => c.to_uppercase().collect(),
+        Key::Named(n) => {
+            let name = key_name(Key::Named(n));
+            let mut c = name.chars();
+            c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
+        }
+    };
+    if cfg!(target_os = "macos") {
+        let mut s = String::new();
+        for (on, sym) in [(m.ctrl, "⌃"), (m.alt, "⌥"), (m.shift, "⇧"), (m.cmd, "⌘")] {
+            if on {
+                s.push_str(sym);
+            }
+        }
+        s + &key
+    } else {
+        let mut parts: Vec<&str> = Vec::new();
+        for (on, name) in [(m.ctrl, "Ctrl"), (m.alt, "Alt"), (m.shift, "Shift"), (m.cmd, "Super")] {
+            if on {
+                parts.push(name);
+            }
+        }
+        let mut s = parts.join("+");
+        if !s.is_empty() {
+            s.push('+');
+        }
+        s + &key
+    }
+}
+
 /// GPUI bindings for a keymap. Chords GPUI cannot parse are skipped and
 /// returned as text, so the caller can report them.
 #[must_use]
@@ -192,6 +263,19 @@ mod tests {
         }
         assert!(gpui_action(Action::Find).is_none());
         assert!(gpui_action(Action::AgentDashboard).is_none());
-        assert!(gpui_action(Action::ReloadConfig).is_some());
+        assert!(gpui_action(Action::SplitRight).is_some());
+    }
+
+    #[test]
+    fn labels_are_readable() {
+        let c = chord("cmd+shift+p", Platform::Mac);
+        let l = label(&c);
+        if cfg!(target_os = "macos") {
+            assert_eq!(l, "⇧⌘P");
+        } else {
+            assert_eq!(l, "Shift+Super+P");
+        }
+        let c = chord("ctrl+pagedown", Platform::Linux);
+        assert!(label(&c).ends_with("Pagedown"));
     }
 }
