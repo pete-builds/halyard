@@ -693,6 +693,11 @@ const SMALL_READ: usize = 512;
 /// writes before the program blocks, never sits full for long.
 const SMALL_READ_PAUSE: Duration = Duration::from_micros(50);
 
+/// Whether the reader pauses after a [`SMALL_READ`]. Only measured on macOS,
+/// where a PTY read returns at most 1 KiB. On Linux it stays off until a real
+/// Linux before and after exists (`docs/PERFORMANCE.md`).
+const PAUSE_AFTER_SMALL_READ: bool = cfg!(target_os = "macos");
+
 /// Read PTY output until end-of-file, an error, or the session stops.
 ///
 /// Waits with poll on the PTY and the wake pipe, so a session that is
@@ -728,7 +733,7 @@ fn read_loop(pty: OwnedFd, wake: &OwnedFd, out: &Sender<Vec<u8>>) {
             // End of file, or EIO once the program closed the PTY: done.
             Ok(0) => return,
             Ok(n) => {
-                trickle = n < SMALL_READ;
+                trickle = PAUSE_AFTER_SMALL_READ && n < SMALL_READ;
                 if out.send(buf[..n].to_vec()).is_err() {
                     return;
                 }

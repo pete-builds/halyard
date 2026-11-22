@@ -40,15 +40,20 @@ use halyard_term::{Engine, Palette, Session, SessionConfig, SessionEvent};
 /// Grid size for every run: a large but ordinary window.
 const COLS: u16 = 200;
 const ROWS: u16 = 50;
-/// Lowest acceptable throughput in `--quick` mode, in MB/s.
+/// Lowest acceptable engine throughput in `--quick` mode, in MB/s.
 const QUICK_FLOOR_MBPS: f64 = 5.0;
+/// Lowest acceptable session throughput in `--quick` mode, in MB/s. Lower than
+/// the engine floor: a GitHub Ubuntu runner gave `yes` 12.4 MB/s in one run and
+/// 4.5 MB/s in the next.
+const QUICK_FLOOR_SESSION_MBPS: f64 = 1.0;
 /// `yes-head` is limited by the program's own 2-byte writes (about 6 MB/s on
 /// an M4 Pro, 1.3 MB/s on a GitHub macOS runner), so its floor is far lower.
 const QUICK_FLOOR_YES_HEAD_MBPS: f64 = 0.25;
 /// Smallest average chunk the reader may hand over for `yes-head` in `--quick`
 /// mode. Before the reader paused after small reads it was 8 to 12 bytes; after,
 /// 217 to 568 bytes (M4 Pro, GitHub macOS and Ubuntu runners). Unlike CPU time
-/// this does not depend on how fast the machine is.
+/// this does not depend on how fast the machine is. Checked on macOS only,
+/// where the reader pauses after small reads.
 const QUICK_FLOOR_YES_HEAD_CHUNK_BYTES: f64 = 64.0;
 /// Printed after every flood; must be on the last published frame.
 const DONE_MARKER: &str = "bench-done";
@@ -317,13 +322,16 @@ fn main() {
         );
         let floor = match w {
             Workload::YesHead => QUICK_FLOOR_YES_HEAD_MBPS,
-            _ => QUICK_FLOOR_MBPS,
+            _ => QUICK_FLOOR_SESSION_MBPS,
         };
         if m < floor {
             failures.push(format!("session/{} {m:.1} MB/s is below {floor} MB/s", w.name()));
         }
         let avg_chunk = bytes as f64 / pick(|s| s.chunks.max(1) as f64);
-        if matches!(w, Workload::YesHead) && avg_chunk < QUICK_FLOOR_YES_HEAD_CHUNK_BYTES {
+        if cfg!(target_os = "macos")
+            && matches!(w, Workload::YesHead)
+            && avg_chunk < QUICK_FLOOR_YES_HEAD_CHUNK_BYTES
+        {
             failures.push(format!(
                 "session/{} read {avg_chunk:.0} bytes per chunk, below {QUICK_FLOOR_YES_HEAD_CHUNK_BYTES}",
                 w.name()

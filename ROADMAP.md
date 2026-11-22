@@ -240,7 +240,8 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       `crates/halyard-term/examples/throughput.rs` (engine parse, frame build, real PTY sessions,
       headless key echo), results in `docs/PERFORMANCE.md`, and a `--quick` floor runs in CI. Line
       buffered output (`yes | head`) went from 4.6 to 6.1 MB/s and from 33 s to 3.4 s of CPU per
-      100 MB (`trickling_output_is_read_in_batches`). Not yet: startup, memory, end to end input
+      100 MB on macOS (`trickling_output_is_read_in_batches`). The reader pause is macOS only
+      until a Linux A/B on the NixOS box is run. Not yet: startup, memory, end to end input
       latency, GPU render time, multi-pane, Linux numbers
 - [ ] Scrollback is far shorter than configured: `scrollback_lines` reaches libghostty-vt's
       `max_scrollback`, which Ghostty treats as bytes (247 rows kept at 200 columns for 10,000;

@@ -53,12 +53,14 @@ runs at 26 MB/s (`head -c 100000000 /dev/zero | LC_ALL=C tr '\0' a > /dev/null` 
 so it measured `tr`. In the first baseline it gave 30 MB/s with Halyard's threads mostly idle.
 
 `--quick` runs 5 MB per session workload and 20 MB per engine workload once, and exits non-zero
-when any throughput is below 5 MB/s (0.25 MB/s for `yes-head`, which is limited by the
-program's own writes), when `yes-head` arrives in chunks averaging under 64 bytes, when an end
-marker is missing from the final frame, or when an echo never arrives. CI runs it on macOS and
-Ubuntu. The chunk size check is the one that guards this change, and it does not depend on how
-fast the machine is: a first version used a CPU-per-MB ceiling, and a GitHub macOS runner came
-within 5% of it with the fix in place (0.19 s/MB against 0.2).
+when an engine throughput is below 5 MB/s, a session throughput below 1 MB/s (0.25 MB/s for
+`yes-head`, which is limited by the program's own writes), on macOS when `yes-head` arrives in
+chunks averaging under 64 bytes, when an end marker is missing from the final frame, or when an
+echo never arrives. CI runs it on macOS and Ubuntu. The chunk size check is the one that guards
+the reader change, and it does not depend on how fast the machine is: a first version used a
+CPU-per-MB ceiling, and a GitHub macOS runner came within 5% of it with the fix in place (0.19
+s/MB against 0.2). The session floor was 5 MB/s until a GitHub Ubuntu runner gave `yes` 12.4
+MB/s in one run and 4.5 MB/s in the next on the same code.
 These are loose limits that catch a large regression, not a benchmark.
 
 ## Results
@@ -167,7 +169,7 @@ Same machine, same day.
 
 ## What changed
 
-`read_loop` (`crates/halyard-term/src/session.rs`): after a read shorter than 512 bytes, the
+`read_loop` (`crates/halyard-term/src/session.rs`), **macOS only**: after a read shorter than 512 bytes, the
 reader hands the bytes over as before, then sleeps 50 us before it polls again, so output that
 trickles in collects in the PTY. A burst's first bytes (a key echo) are never delayed; later
 bytes wait at most 50 us. Large reads never pause. Pause lengths tried on `yes-head`, 20 MB,
@@ -189,6 +191,14 @@ then waits for the reader, so 50 us it is. The 1024-byte threshold also paused a
 Proof: `trickling_output_is_read_in_batches` (`crates/halyard-term/tests/session.rs`) fails on
 `main` ("12 bytes per chunk (48596 chunks)") and passes with the change. `--quick` exits 1 on
 `main` ("session/yes-head read 8 bytes per chunk, below 64") and 0 with the change.
+
+**Linux: not measured, pause off.** The pause is compiled in only on macOS
+(`PAUSE_AFTER_SMALL_READ`). On the GitHub Ubuntu runner, with the pause on, `cat` of `yes`
+lines arrived in 275 to 784 byte chunks and measured 4.5 and 12.4 MB/s in two runs of the same
+code, and there is no Linux run without the pause to compare. So it is not known whether the
+pause helps, hurts or does nothing on Linux. A real Linux A/B on the NixOS box is pending; the
+pause stays off on Linux until that is measured. `trickling_output_is_read_in_batches` and the
+`--quick` chunk size check run on macOS only for the same reason.
 
 ## Suspects ruled out (measured)
 
@@ -218,8 +228,8 @@ Proof: `trickling_output_is_read_in_batches` (`crates/halyard-term/tests/session
 - Input latency end to end (key press to pixels). Only the headless echo above is measured.
 - GPU render time and frame pacing in a visible window.
 - Many panes at once.
-- Linux and NixOS, beyond one CI smoke run. On the `ubuntu-24.04` runner (5 MB, one run, with
-  this change) `--quick` gave long-line 245.6, yes 12.4, yes-head 8.3 and mixed 127.0 MB/s,
+- Linux and NixOS, beyond CI smoke runs (A/B on the NixOS box pending, see above). On the
+  `ubuntu-24.04` runner (5 MB, one run, with the pause still on there) `--quick` gave long-line 245.6, yes 12.4, yes-head 8.3 and mixed 127.0 MB/s,
   with Linux PTY reads averaging 3253 bytes on long-line, so the 1 KiB read limit is a macOS
   property. On the `macos-15` runner: 20.1, 7.9, 1.3 and 49.1 MB/s. Shared runners are slow
   and noisy; these show only that the floors hold there.

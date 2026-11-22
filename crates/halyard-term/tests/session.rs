@@ -6,7 +6,6 @@
 //! htop) print why they skipped when it is missing; CI installs all three.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -177,8 +176,13 @@ fn output_flood_keeps_up() {
     assert!(f.generation < 20_000, "published {} frames", f.generation);
 }
 
+// The reader pauses after small reads on macOS only (see `PAUSE_AFTER_SMALL_READ`
+// in session.rs); Linux is not measured yet.
+#[cfg(target_os = "macos")]
 #[test]
 fn trickling_output_is_read_in_batches() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     // `head` writing to a terminal is line buffered: one 2-byte `write` per
     // line. Read the moment it arrived, that reached the session as about 8
     // bytes per chunk on macOS, each with its own poll, read, channel send and
