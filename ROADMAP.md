@@ -66,16 +66,19 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       pinned as inputs), on x86_64-linux, aarch64-linux, aarch64-darwin (`nix` workflow:
       `nix flake check` incl. `checks.*.ghostty-pin`, plus the sandbox network control).
       x86_64-darwin is not offered: the pinned nixpkgs dropped it.
-- [ ] `nix run`: wired (`apps.default`, RUNPATH for GPUI's dlopened libraries) but pending the
-      app crate
+- [ ] `nix run`: `apps.default` runs the packaged `halyard`, whose RUNPATH resolves all 14
+      libraries GPUI dlopens (`checks.*.package-contents`). Package built and inspected on real
+      NixOS hardware; a window opening from `nix run` is not yet verified (NixOS VM test, #7)
 - [ ] NixOS VM test: launches under Wayland and X11, screenshots
 - [x] macOS app bundle: `packaging/macos/build-app.sh` builds a universal `Halyard.app` (ad-hoc
       signed, icon from `packaging/icon/`) and a zip. Verified by hand on macOS arm64: built from
       the app-window branch, launched with `open`, process ran, `lipo -info` shows x86_64 and arm64,
       `codesign --verify` passes on the app and on the unzipped copy. Not covered: no automated test,
       the Intel slice has not been run, and the app is NOT notarized (see `docs/INSTALL.md`)
-- [ ] Linux desktop entry and icon: `dist/linux/halyard.desktop` and `dist/icons/halyard.svg`,
-      installed by the Nix package
+- [x] Linux desktop entry and icon: `dist/linux/halyard.desktop` (`StartupWMClass=halyard`) and
+      `dist/icons/halyard.svg` plus PNG 16 to 512, installed by the Nix package and checked by
+      `checks.x86_64-linux.package-contents` (`desktop-file-validate`). Not yet seen in a desktop
+      launcher
 - [ ] Real-hardware runs: macOS arm64 (cypher), NixOS on a real GPU (pending)
 
 ## Phase 2: modern UI
@@ -134,7 +137,8 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       next launch opens one new window.
 - [x] Home Manager module: themes, fonts, keybindings, settings (`checks.*.hm-module`
       evaluates it with real Home Manager and compares the written TOML; NixOS module checked by
-      `checks.x86_64-linux.nixos-module`). Files are not yet validated by `halyard-config`.
+      `checks.x86_64-linux.nixos-module`). The written files are loaded by halyard-config's own
+      parser in the check, and a key named like a secret in `settings` is an evaluation error.
 
 ## Phase 3: modern shell experience
 
