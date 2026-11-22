@@ -63,7 +63,12 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 - [ ] `flake.nix`: `nix develop`, `nix build`, `nix run`, offline build (Ghostty source and
       Zig packages pinned as inputs)
 - [ ] NixOS VM test: launches under Wayland and X11, screenshots
-- [ ] Desktop entry, icon, macOS app bundle
+- [x] macOS app bundle: `packaging/macos/build-app.sh` builds a universal `Halyard.app` (ad-hoc
+      signed, icon from `packaging/icon/`) and a zip. Verified by hand on macOS arm64: built from
+      the app-window branch, launched with `open`, process ran, `lipo -info` shows x86_64 and arm64,
+      `codesign --verify` passes on the app and on the unzipped copy. Not covered: no automated test,
+      the Intel slice has not been run, and the app is NOT notarized (see `docs/INSTALL.md`)
+- [ ] Linux desktop entry and icon (in the Nix flake PR)
 - [ ] Real-hardware runs: macOS arm64 (cypher), NixOS on a real GPU (pending)
 
 ## Phase 2: modern UI
@@ -97,5 +102,9 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 ## Phase 6: production readiness
 
 - [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane
-- [ ] Threat model, security review
-- [ ] Release automation (macOS bundle, Nix package)
+- [x] Threat model written: `docs/THREAT_MODEL.md` (cites code in PRs that were still open when it was written)
+- [ ] Security review (no outside review yet)
+- [ ] Release automation: `.github/workflows/release.yml` (macOS zip, Linux tarballs, SHA256SUMS, provenance,
+      draft release; `dry_run` dispatch builds artifacts only) is written and actionlint-clean, but has
+      NOT run on a runner yet, because it needs the app crate on main. The macOS bundle script was run
+      locally. The Nix package is the flake PR. Notarization is not done
