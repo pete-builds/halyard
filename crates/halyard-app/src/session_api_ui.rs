@@ -28,6 +28,19 @@ pub fn start(cx: &mut App) -> Option<PaneApi> {
     if !cx.global::<AppState>().settings.config.session_api.enabled {
         return None;
     }
+    if halyard_term::flatpak::in_flatpak() {
+        // Shells run on the host through `flatpak-spawn --host`: the host's process
+        // tree is not visible from the sandbox, so no hook could ever pass the
+        // ancestry check, and host tools cannot reach a socket in the sandbox's
+        // runtime directory. Off, said once, rather than half working.
+        notice(
+            "session API is off in the Flatpak: panes run on the host, outside the sandbox's \
+             view, so hooks fall back to escape sequences (docs/flatpak.md)"
+                .into(),
+            cx,
+        );
+        return None;
+    }
     let socket = match default_socket_path(&std::process::id().to_string()) {
         Ok(p) => p,
         Err(e) => {

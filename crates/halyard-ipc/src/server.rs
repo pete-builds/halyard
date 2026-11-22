@@ -1055,15 +1055,34 @@ impl Conn {
                     "max_bytes": text::MAX_TYPED_SINCE_APPROVAL_BYTES,
                 })));
             }
+            let display_text = text::escape_for_display(&p.text);
+            let typed_display = text::escape_for_display(&prior.text);
+            // The pending line is bounded on its own (above, 4 KiB); this bounds the
+            // request. Both are shown in full, in a box the user scrolls through.
+            let shown = display_text.len();
+            if shown > text::MAX_APPROVAL_DISPLAY_BYTES {
+                // Too long for the user to review in a dialog. Approving what one
+                // cannot read is not consent, so ask for smaller pieces instead.
+                return Err(RpcError::new(
+                    code::DENIED,
+                    "the text is too long to show in an approval dialog; send it in smaller \
+                     pieces, or clear the line in the pane",
+                )
+                .with_data(json!({
+                    "reason": "too_long_to_review",
+                    "shown_bytes": shown,
+                    "max_bytes": text::MAX_APPROVAL_DISPLAY_BYTES,
+                })));
+            }
             let request = SendTextRequest {
                 grant_id: grant.id.clone(),
                 client_name: grant.client_name.clone(),
                 session,
-                display_text: text::escape_for_display(&p.text),
+                display_text,
                 text: p.text.clone(),
                 reason,
                 peer: self.peer.clone(),
-                typed_since_approval_display: text::escape_for_display(&prior.text),
+                typed_since_approval_display: typed_display,
                 typed_since_approval: prior.text,
                 typed_since_approval_truncated: prior.truncated,
             };

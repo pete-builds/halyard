@@ -105,6 +105,8 @@ struct PaletteUi {
     agents: Vec<crate::dashboard_ui::Row>,
     /// The grants listed in [`Mode::PairedTools`] and where to revoke them.
     paired: Option<(crate::session_api::PairedTools, halyard_ipc::GrantsHandle)>,
+    /// The grants are still being read.
+    paired_loading: bool,
 }
 
 /// One window.
@@ -168,6 +170,7 @@ impl WorkspaceView {
                 this.apply_settings(window, cx);
             }),
             cx.observe_window_activation(window, |this, window, cx| {
+                this.approval_window_activated(window, cx);
                 this.refresh_chrome(window, cx);
                 for p in this.panes.values() {
                     p.view.update(cx, |_, cx| cx.notify());
@@ -583,6 +586,11 @@ impl WorkspaceView {
 
     /// Run a keymap action.
     pub fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        // An approval dialog is modal: no window action (close, new tab, palette,
+        // zoom) runs under it. Quitting the app still works and denies it.
+        if self.approval_open() && action != Action::Quit {
+            return;
+        }
         let bounds = self.content_rect(window, cx);
         let dir = |d| Some(d);
         let focus_dir = match action {
@@ -750,7 +758,14 @@ impl WorkspaceView {
         let focus = cx.focus_handle();
         window.focus(&focus);
         self.end_preview_unless(Some(&model.mode), window, cx);
-        self.palette = Some(PaletteUi { model, commands, focus, agents: Vec::new(), paired: None });
+        self.palette = Some(PaletteUi {
+            model,
+            commands,
+            focus,
+            agents: Vec::new(),
+            paired: None,
+            paired_loading: false,
+        });
         cx.notify();
     }
 
@@ -874,7 +889,7 @@ impl WorkspaceView {
             }
             Mode::PairedTools => {
                 self.focus_active_pane(window, cx);
-                self.revoke_picked(picked, p.paired, cx);
+                self.revoke_picked(picked, p.paired, window, cx);
             }
         }
         cx.notify();
@@ -1124,6 +1139,7 @@ impl WorkspaceView {
             Mode::Themes { .. } => ("Pick a theme (Escape restores)", "Theme"),
             Mode::Rename { .. } => ("Tab name (empty clears)", "Name"),
             Mode::Agents => ("Agents: type to filter, Enter jumps to the pane", "Agents"),
+            Mode::PairedTools if p.paired_loading => ("Loading paired tools\u{2026}", "Revoke"),
             Mode::PairedTools => ("Paired tools: Enter revokes the selected one", "Revoke"),
         };
         let query: SharedString = if p.model.query.is_empty() {
@@ -1174,7 +1190,9 @@ impl WorkspaceView {
                     })),
             );
         }
-        let empty = p.model.rows().next().is_none() && !matches!(p.model.mode, Mode::Rename { .. });
+        let empty = p.model.rows().next().is_none()
+            && !p.paired_loading
+            && !matches!(p.model.mode, Mode::Rename { .. });
         Some(
             div()
                 .absolute()
@@ -1296,7 +1314,9 @@ impl Render for WorkspaceView {
             CopyLastOutput => CopyLastOutput,
         );
         let root = root.on_action(cx.listener(|this, _: &SwitchTheme, window, cx| {
-            this.open_themes(window, cx);
+            if !this.approval_open() {
+                this.open_themes(window, cx);
+            }
         }));
         if let Some(err) = &self.fatal {
             return root
@@ -1308,6 +1328,7 @@ impl Render for WorkspaceView {
         let panes = self.render_panes(&theme, window, cx);
         let banner = self.render_banner(&theme, cx);
         let palette = self.render_palette(&theme, window, cx);
+        self.approval_prepaint(cx);
         let approval = self.render_approval(&theme, cx);
         root.child(tab_bar)
             .child(panes)

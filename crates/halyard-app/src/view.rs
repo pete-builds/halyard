@@ -239,6 +239,23 @@ pub struct TerminalView {
 
 impl EventEmitter<PaneEvent> for TerminalView {}
 
+/// Sends a key the user pressed in the pane. The one path from real key events
+/// to `reset_typed_since_approval`: a key that ends or abandons the line (Enter,
+/// Ctrl-C) means the user has seen it, so a paired tool's standing text is
+/// forgotten. Nothing else (tool text, pastes, query replies) comes through here.
+pub fn send_user_key(
+    session: &Session,
+    api: Option<&crate::session_api::PaneApi>,
+    key: halyard_term::KeyInput,
+) {
+    if crate::keys::resets_typed_line(&key)
+        && let Some(api) = api
+    {
+        api.user_line_key(session.id());
+    }
+    session.send_key(key);
+}
+
 impl Drop for TerminalView {
     fn drop(&mut self) {
         self.leave_api();
@@ -668,14 +685,7 @@ impl TerminalView {
         self.blink_on = true;
         match route_keystroke(keystroke, OPTION_AS_ALT) {
             KeyRoute::Terminal(key) => {
-                // A real key in this pane that ends or clears the line: the user
-                // has seen it, so a paired tool's standing text is forgotten.
-                if crate::keys::resets_typed_line(&key)
-                    && let Some(api) = &self.api
-                {
-                    api.user_line_key(self.session.id());
-                }
-                self.session.send_key(key);
+                send_user_key(&self.session, self.api.as_ref(), key);
                 self.note_input();
                 true
             }

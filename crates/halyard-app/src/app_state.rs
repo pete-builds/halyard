@@ -76,6 +76,8 @@ pub fn rebind(cx: &mut App) {
     let (bindings, skipped) = keybind::bindings(&cx.global::<AppState>().settings.keymap);
     cx.clear_key_bindings();
     cx.bind_keys(bindings);
+    // After the keymap, so the dialog's chords win while a dialog is open.
+    cx.bind_keys(keybind::dialog_bindings(cfg!(target_os = "macos")));
     if !skipped.is_empty() {
         let state = cx.global_mut::<AppState>();
         for s in skipped {

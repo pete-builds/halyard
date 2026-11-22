@@ -266,24 +266,37 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
   - [x] Approval dialogs in the window, keyboard first and themed: pairing (scopes as
         checkboxes, a warning on `input:write` and `screen:read`, "always allow typing" only
         when `input:write` is ticked) and typing (exact escaped text, the text typed since
-        the last approval, the client and the pane). Plain Enter never approves; nothing
-        approves for the first 700 ms; approving takes Cmd+Enter (macOS) or
-        Ctrl+Shift+Enter, or a click; Escape denies; no answer in 90 s denies
-        (`approval::tests`, all five). Pairing prompts are limited to 3 a minute across
+        the last approval, the client and the pane, with its size, in one scrolling box that
+        must be scrolled to the end before Approve works; over 4 KiB escaped is refused
+        without a dialog). Plain, Shift and Ctrl+Enter never approve; nothing approves for
+        700 ms after opening, a stray key or refocus; approving is the dialog's own action
+        (Cmd+Enter, or Ctrl+Shift+Enter over Zoom Pane) or a click; "always allow" is
+        click-only; the window's actions are blocked while it is open; Escape denies; no
+        answer in 90 s denies (`approval::tests`,
+        `the_approve_chord_reaches_the_dialog_over_workspace_bindings`,
+        `a_dialog_nobody_answers_is_a_denial`,
+        `text_too_long_to_show_is_refused_without_a_dialog`). Pairing prompts are limited to 3 a minute across
         connections, with a 30 s cooldown after a denial
         (`pairing_prompts_are_limited_across_connections`).
-  - [x] `reset_typed_since_approval` only from real key events in the pane: Enter, Ctrl-C,
-        Ctrl-U (`keys::tests::only_enter_ctrl_c_and_ctrl_u_reset_the_typed_line`), never
+  - [x] `reset_typed_since_approval` only from real key events in the pane: Enter, Ctrl-C
+        (`keys::tests::only_enter_and_ctrl_c_reset_the_typed_line`,
+        `the_pane_key_path_resets_on_enter_but_not_on_ctrl_u`), never
         from `send_text` (`send_text_never_resets_typed_since_approval`), paste or query
         replies (those paths never call it)
-  - [x] "Paired Tools (Session API)" palette view: name, scopes, last use; Enter revokes
+  - [x] "Paired Tools (Session API)" palette view: name, scopes, last use; Enter revokes;
+        the grants file is read and written off the UI thread
         (`revoking_in_the_paired_tools_view_cuts_the_tool_off`)
+  - [x] Off in the Flatpak, with one banner notice (host shells cannot pass ancestry from
+        the sandbox; `docs/flatpak.md`). Not run inside a real Flatpak.
   - [x] Verified live on macOS arm64 with the debug-script build: `halyard-msg state
         waiting` in a pane puts the "waiting" badge and the unread tab mark up, `halyard-msg
         info --strict` answers over the socket, a Python client's pairing and `send_text`
         dialogs appear, a plain Enter leaves the dialog open, Cmd+Enter approves, the
         Paired Tools view revokes, `enabled = false` leaves `HALYARD_SOCKET` unset, and a
-        0755 socket directory gives the banner while the terminal works. Not verified:
+        0755 socket directory gives the banner while the terminal works; a 2036-character
+        padded send shows its size, keeps Approve disabled ("Scroll to the end of the text
+        first") through a Cmd+Enter, enables it after End, and a 5000-byte send is refused
+        with `too_long_to_review`. Not verified:
         Linux, a second window (the dialog opens in the active window, or the window that
         holds the pane), the 90 s timeout with a real window.
   - [ ] Peer uid rejection tested with a second real user (code path is a uid compare;

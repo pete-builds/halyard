@@ -660,6 +660,11 @@ impl Approver for DialogApprover {
     }
 
     fn approve_send_text(&self, request: &SendTextRequest) -> bool {
+        // The server refuses these before asking (`too_long_to_review`); this keeps
+        // the rule in the app too: never ask about text the dialog cannot show.
+        if request.display_text.len() > crate::approval::MAX_DIALOG_TEXT_BYTES {
+            return false;
+        }
         let (reply, answer) = sync_channel(1);
         if self
             .ui

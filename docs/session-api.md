@@ -107,7 +107,9 @@ identity for its lifetime: a **session** (via `session.attach`) or a **controlle
 `halyard.pair` or `halyard.authenticate`).
 
 With `[session_api] enabled = false` the app starts no server and sets none of the
-variables below. Either way a pane never inherits `HALYARD_SOCKET` or
+variables below. Inside the Flatpak the API is always off, with one banner notice: panes
+run on the host through `flatpak-spawn --host`, whose processes the sandbox cannot see, so
+no hook could pass the ancestry check (`docs/flatpak.md`). Either way a pane never inherits `HALYARD_SOCKET` or
 `HALYARD_SESSION_TOKEN` from the environment Halyard itself was started in, so a Halyard
 launched from another Halyard's pane never reports into the outer one.
 
@@ -257,8 +259,9 @@ So in that case the server **refuses the request without asking**: error `-32005
 `data.reason` `"typed_since_approval_truncated"` and the message "too much typed since the
 last approval; clear the line in the pane". What the user types by hand is not tracked,
 so the app calls `IpcServer::reset_typed_since_approval(session_id)` when the user presses
-Enter, Ctrl-C or Ctrl-U in that pane, the keys that end or clear a command line;
-approvals work again from there. Only real key events from the window count: text sent by
+Enter or Ctrl-C in that pane, the keys that end or abandon a command line; approvals work
+again from there. (Not Ctrl-U: in readline it deletes only what is left of the cursor, so
+text a tool typed to the right of it could survive.) Only real key events from the window count: text sent by
 `session.send_text`, a paste, and the terminal's own replies to queries never reset it,
 or approving Enter could hide what Enter runs.
 Dialogs therefore never receive `typed_since_approval_truncated: true`; the field stays
@@ -607,25 +610,44 @@ The approval dialogs open in the window that holds the pane (`session.send_text`
 active window (`halyard.pair`). A dialog takes keyboard focus, so whatever the user was
 typing lands on it instead of the pane, and it is built so that typing cannot approve:
 
-- Plain Enter never approves, at any time.
-- For the first 700 ms nothing approves, so keys already on their way land on nothing.
-- Approving takes Cmd+Enter on macOS or Ctrl+Shift+Enter elsewhere, or a click on
-  Approve. Escape denies at any time. Every other key is swallowed.
+- Plain Enter, Shift+Enter and Ctrl+Enter never approve, at any time.
+- Nothing approves for 700 ms after the dialog opens, after any stray key it ignores, and
+  after its window becomes active again, so keys already on their way, or typing that goes
+  on, land on nothing.
+- Approving takes a chord bound to the dialog's own action in its own key context
+  (`Approval`): Cmd+Enter on macOS, Ctrl+Shift+Enter elsewhere. The dialog's binding takes
+  precedence over the keymap's (Ctrl+Shift+Enter is also Zoom Pane on Linux). A click on
+  Approve works too. Escape denies at any time.
+- The dialog is modal: while it is open the window's own actions (new tab, close pane,
+  palette, zoom, theme) do nothing. Keys no binding takes go to the dialog, never to the
+  pane. App-wide actions still work: Quit (which denies by closing) and New Window; and the
+  operating system's own shortcuts (switching apps) are not Halyard's to block.
 - With no answer within 90 seconds the dialog closes and the request is denied.
 
-The pairing dialog lists the requested scopes as checkboxes (keys 1 to 5 toggle them), shows
-`input:write` and `screen:read` in the warning color, and offers "always allow typing from
-this tool" (key T) only while `input:write` is ticked. It shows the tool's name as a claim
-next to the kernel-reported pid and executable. The typing dialog shows the tool, the pane
-(its title, or its folder, and its id), the exact text escaped, and the text typed since the
-last approval when there is any.
+The typing dialog shows the tool, the pane (its title, or its folder, and its id), the size
+of the text ("2036 characters, 1 line"), the exact text escaped, and the text typed since
+the last approval when there is any, all in one box. When that box has to scroll, it is
+outlined, a line says there is more below, and Approve stays disabled, saying why, until the
+end of the box has been on screen at least once (wheel, Down, Page Down or End). A request
+whose escaped text is over 4 KiB is refused without a dialog: error `-32005` with
+`data.reason` `"too_long_to_review"` and the message "the text is too long to show in an
+approval dialog; send it in smaller pieces, or clear the line in the pane". Runs of spaces
+are not drawn as visible marks, so padding shows only as blank space and in the size.
+
+The pairing dialog lists the requested scopes as checkboxes (keys 1 to 5 untick and tick
+them), shows `input:write` and `screen:read` in the warning color, and offers "always allow
+typing from this tool" only while `input:write` is ticked. That box changes only by a
+click, never by a key. It shows the tool's name as a claim next to the kernel-reported pid
+and executable.
 
 On top of the server's limits, the app shows at most 3 pairing dialogs a minute across all
 connections, and none for 30 seconds after the user denies one; those requests are denied
 without a dialog.
 
 Paired tools are listed by the command palette's "Paired Tools (Session API)" command:
-name, scopes, whether it may type without asking, and last use. Enter revokes the selected
-tool; its connections lose access on their next request. Grants are kept in
+name, scopes, whether it may type without asking, last use and a short id. The grants file
+is read, and a revocation written, on a background thread (its lock may wait up to 5
+seconds for another instance), so the view says "Loading" meanwhile. Enter revokes the
+selected tool; its connections lose access on their next request. Grants are kept in
 `$XDG_STATE_HOME/halyard/grants.json` (else `~/.local/state/halyard/grants.json`); without
 a home directory they last until Halyard quits.

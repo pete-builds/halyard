@@ -447,3 +447,87 @@ fn panes_never_inherit_another_instances_socket_or_token() {
     // Removed first, then set (`SessionConfig::env` applies after `env_remove`).
     assert_eq!(remove.len(), 2);
 }
+
+fn request_for(text: &str) -> SendTextRequest {
+    SendTextRequest {
+        grant_id: "g".into(),
+        client_name: "tool".into(),
+        session: SessionInfo {
+            id: "p".into(),
+            title: String::new(),
+            cwd: None,
+            agent: None,
+            state: None,
+        },
+        text: text.into(),
+        display_text: halyard_ipc::text::escape_for_display(text),
+        reason: SendTextReason::ControlCharacters,
+        peer: halyard_ipc::PeerInfo { pid: 1, uid: 1, exe: None },
+        typed_since_approval: String::new(),
+        typed_since_approval_display: String::new(),
+        typed_since_approval_truncated: false,
+    }
+}
+
+/// A dialog that never gets an answer (the window is busy, or the user walked
+/// away) is a denial once the timeout passes, for typing and for pairing.
+#[test]
+fn a_dialog_nobody_answers_is_a_denial() {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    let approver = DialogApprover::new(tx, Duration::from_millis(150));
+    let started = Instant::now();
+    // The request (and its reply sender) sits unanswered in the channel.
+    assert!(!approver.approve_send_text(&request_for("ls\n")));
+    assert!(started.elapsed() >= Duration::from_millis(150));
+    let pairing = PairingRequest {
+        client_name: "tool".into(),
+        scopes: [Scope::SessionsRead].into_iter().collect(),
+        peer: halyard_ipc::PeerInfo { pid: 1, uid: 1, exe: None },
+    };
+    assert_eq!(approver.approve_pairing(&pairing), PairingDecision::Deny);
+    assert!(rx.try_recv().is_ok(), "the dialogs were asked for");
+}
+
+/// Text the dialog could not show whole is refused without asking.
+#[test]
+fn the_approver_never_asks_about_text_over_the_dialog_cap() {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    let approver = DialogApprover::new(tx, Duration::from_secs(5));
+    let long = "x".repeat(crate::approval::MAX_DIALOG_TEXT_BYTES + 1);
+    assert!(!approver.approve_send_text(&request_for(&long)));
+    assert!(rx.try_recv().is_err(), "no dialog was requested");
+}
+
+/// The real key path from the pane (`view::send_user_key`, what
+/// `TerminalView::handle_key` calls): Enter clears the record of a tool's standing
+/// text, Ctrl-U does not (readline deletes only left of the cursor).
+#[test]
+fn the_pane_key_path_resets_on_enter_but_not_on_ctrl_u() {
+    use halyard_term::{KeyAction, KeyCode, KeyInput, Modifiers};
+    let mut h = start();
+    let (id, session, _) = h.pane();
+    let api = h.api.clone();
+    let mut c = h.paired(&[Scope::InputWrite], true);
+    c.call("session.send_text", json!({ "session_id": id, "text": "abc" })).expect("standing");
+    let ctrl_u = KeyInput {
+        key: KeyCode::Char('u'),
+        text: None,
+        mods: Modifiers { ctrl: true, ..Modifiers::NONE },
+        action: KeyAction::Press,
+    };
+    crate::view::send_user_key(&session, Some(&api), ctrl_u);
+    lock(&h.ui.send).push_back(false);
+    let r = c.call("session.send_text", json!({ "session_id": id, "text": "\r" }));
+    assert_eq!(rpc_code(r), code::DENIED);
+    assert_eq!(lock(&h.ui.send_seen)[0].typed_since_approval, "abc", "Ctrl-U kept it");
+    c.call("session.send_text", json!({ "session_id": id, "text": "def" })).expect("standing");
+    crate::view::send_user_key(
+        &session,
+        Some(&api),
+        KeyInput::new(KeyCode::Enter, Modifiers::NONE),
+    );
+    lock(&h.ui.send).push_back(false);
+    let r = c.call("session.send_text", json!({ "session_id": id, "text": "\r" }));
+    assert_eq!(rpc_code(r), code::DENIED);
+    assert_eq!(lock(&h.ui.send_seen)[1].typed_since_approval, "", "Enter cleared it");
+}

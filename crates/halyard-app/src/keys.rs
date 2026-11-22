@@ -48,10 +48,12 @@ fn named_key(key: &str) -> Option<KeyCode> {
     })
 }
 
-/// Whether a key the user pressed in a pane ends or clears the command line:
-/// Enter, Ctrl-C or Ctrl-U (without Alt). After one of these the user has seen
-/// the line, so the session API forgets what a paired tool typed there under
-/// standing permission (`IpcServer::reset_typed_since_approval`).
+/// Whether a key the user pressed in a pane ends or abandons the command line:
+/// Enter or Ctrl-C (without Alt). After one of these the user has seen the line,
+/// so the session API forgets what a paired tool typed there under standing
+/// permission (`IpcServer::reset_typed_since_approval`). Ctrl-U is not one: in
+/// readline it deletes only what is left of the cursor, so text a tool typed to
+/// the right could survive it.
 ///
 /// Only real key events from the window may call this. Text a tool sends, pastes
 /// and the terminal's own query replies go through other paths and never reset
@@ -64,7 +66,7 @@ pub fn resets_typed_line(key: &KeyInput) -> bool {
     }
     match key.key {
         KeyCode::Enter => !m.ctrl,
-        KeyCode::Char('c' | 'u') => m.ctrl && !m.shift,
+        KeyCode::Char('c') => m.ctrl && !m.shift,
         _ => false,
     }
 }
@@ -324,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn only_enter_ctrl_c_and_ctrl_u_reset_the_typed_line() {
+    fn only_enter_and_ctrl_c_reset_the_typed_line() {
         let route =
             |key: &str, f: fn(&mut gpui::Modifiers), text: Option<&str>| match route_keystroke(
                 &ks(key, f, text),
@@ -336,10 +338,10 @@ mod tests {
         let enter = route("enter", |_| {}, None).unwrap();
         assert!(resets_typed_line(&enter));
         assert!(resets_typed_line(&route("c", |m| m.control = true, None).unwrap()));
-        assert!(resets_typed_line(&route("u", |m| m.control = true, None).unwrap()));
         for (key, f) in [
             ("a", (|m: &mut gpui::Modifiers| m.control = true) as fn(&mut gpui::Modifiers)),
             ("d", |m| m.control = true),
+            ("u", |m| m.control = true),
             ("j", |m| m.control = true),
             ("c", |m| m.alt = true),
             ("u", |m| {
