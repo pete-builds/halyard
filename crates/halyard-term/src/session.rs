@@ -332,7 +332,28 @@ fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
     for (k, v) in &config.env {
         cmd.env(OsString::from(k), OsString::from(v));
     }
+    if let Some(lang) =
+        default_locale(|k| cmd.get_env(k).map(OsString::from), cfg!(target_os = "macos"))
+    {
+        cmd.env("LANG", lang);
+    }
     cmd
+}
+
+/// The `LANG` to add when the child's environment names no locale at all.
+///
+/// Apps started from the macOS Dock or Finder, and many service and container
+/// environments, have no `LANG`, `LC_CTYPE` or `LC_ALL`. Shells then run in the C
+/// locale and mishandle UTF-8 (zsh line editing, paths with non-ASCII names).
+/// Terminal.app and iTerm2 fill in a UTF-8 locale the same way. A locale the user
+/// set anywhere (even an empty-valued one is treated as unset) is never replaced.
+fn default_locale(env: impl Fn(&str) -> Option<OsString>, macos: bool) -> Option<&'static str> {
+    let set = |k: &str| env(k).is_some_and(|v| !v.is_empty());
+    if set("LC_ALL") || set("LC_CTYPE") || set("LANG") {
+        return None;
+    }
+    // macOS has no C.UTF-8; glibc 2.35+ and musl have it built in.
+    Some(if macos { "en_US.UTF-8" } else { "C.UTF-8" })
 }
 
 fn pty_size(cols: u16, rows: u16, cell_width: u32, cell_height: u32) -> PtySize {
@@ -940,6 +961,37 @@ mod tests {
         assert_eq!((s.cols, s.rows), (1000, 1000));
         assert_eq!(s.pixel_width, u16::MAX);
         assert_eq!(pty_size(0, 0, 8, 16).cols, 1);
+    }
+
+    #[test]
+    fn a_utf8_locale_is_added_only_when_none_is_set() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| OsString::from(v))
+        };
+        assert_eq!(default_locale(env(&[]), true), Some("en_US.UTF-8"));
+        assert_eq!(default_locale(env(&[]), false), Some("C.UTF-8"));
+        assert_eq!(default_locale(env(&[("LANG", "")]), false), Some("C.UTF-8"));
+        assert_eq!(default_locale(env(&[("LANG", "de_DE.UTF-8")]), true), None);
+        assert_eq!(default_locale(env(&[("LC_CTYPE", "UTF-8")]), true), None);
+        assert_eq!(default_locale(env(&[("LC_ALL", "C")]), false), None);
+    }
+
+    #[test]
+    fn the_child_gets_a_locale_even_when_halyard_has_none() {
+        let config = SessionConfig {
+            env_remove: vec!["LANG".into(), "LC_ALL".into(), "LC_CTYPE".into()],
+            ..SessionConfig::default()
+        };
+        let cmd = build_command(&config, "abc123");
+        let lang = cmd.get_env("LANG").and_then(|v| v.to_str()).map(str::to_owned);
+        assert!(lang.as_deref().is_some_and(|l| l.ends_with("UTF-8")), "{lang:?}");
+
+        let config = SessionConfig {
+            env: vec![("LANG".into(), "de_DE.UTF-8".into())],
+            ..SessionConfig::default()
+        };
+        let cmd = build_command(&config, "abc123");
+        assert_eq!(cmd.get_env("LANG").and_then(|v| v.to_str()), Some("de_DE.UTF-8"));
     }
 
     #[test]
