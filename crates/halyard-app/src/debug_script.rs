@@ -20,6 +20,7 @@
 //!   focused pane (through the session, not the mouse path).
 //! - `resize <width> <height>`: resize the window's content (logical px).
 //! - `activate`: bring the app and this window to the front.
+//! - `closebutton`: press the window's close button (`-[NSWindow performClose:]`).
 //! - `dump`: print the focused pane's frame text and render count to stderr.
 //! - `quit`: quit the app.
 //!
@@ -59,6 +60,8 @@ pub enum Step {
     Copy(PathBuf, PathBuf),
     /// Bring the window to the front.
     Activate,
+    /// Press the close button.
+    CloseButton,
     /// Quit.
     Quit,
 }
@@ -128,6 +131,7 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
             }
             "dump" => Step::Dump,
             "activate" => Step::Activate,
+            "closebutton" => Step::CloseButton,
             "quit" => Step::Quit,
             other => return Err(format!("line {}: unknown command `{other}`", n + 1)),
         });
@@ -267,6 +271,11 @@ pub fn start<H: Host + 'static>(window: &mut Window, cx: &mut Context<H>) {
                 Step::Dump => this
                     .update(cx, |host, cx| eprintln!("halyard: {}", host.script_dump(cx)))
                     .map_err(|e| e.to_string()),
+                Step::CloseButton => cx
+                    .update(|window, _| native_view(window))
+                    .map_err(|e| e.to_string())
+                    .and_then(|v| v)
+                    .and_then(press_close),
                 Step::Activate => cx
                     .update(|window, cx| {
                         cx.activate(true);
@@ -348,6 +357,34 @@ pub fn post_mouse(view: usize, kind: MouseKind, x: f32, y: f32) -> Result<(), St
         let () = msg_send![ns_window, sendEvent: event];
     }
     Ok(())
+}
+
+/// Press the close button of the window owning `view`, outside any GPUI
+/// update (the window's should-close handler runs synchronously).
+#[cfg(target_os = "macos")]
+// objc's msg_send! checks a `cargo-clippy` cfg that this crate does not declare.
+#[allow(unexpected_cfgs)]
+pub fn press_close(view: usize) -> Result<(), String> {
+    use objc::runtime::Object;
+    use objc::{msg_send, sel, sel_impl};
+    let view = view as *mut Object;
+    // SAFETY: `view` is the live NSView of an open window, fetched just
+    // before this call on this thread; `performClose:` takes a sender.
+    unsafe {
+        let ns_window: *mut Object = msg_send![view, window];
+        if ns_window.is_null() {
+            return Err("the view has no window".into());
+        }
+        let nil: *mut Object = std::ptr::null_mut();
+        let () = msg_send![ns_window, performClose: nil];
+    }
+    Ok(())
+}
+
+/// Pressing the close button is only implemented on macOS.
+#[cfg(not(target_os = "macos"))]
+pub fn press_close(_view: usize) -> Result<(), String> {
+    Err("pressing the close button is only implemented on macOS".into())
 }
 
 /// Posting mouse events is only implemented on macOS.

@@ -119,6 +119,11 @@ impl Root {
             _subscriptions: subs,
         };
         root.start_pane(window, cx);
+        // The window's close button asks first, like `close_pane`.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |root, cx| root.should_close(window, cx)).unwrap_or(true)
+        });
         #[cfg(feature = "debug-script")]
         if !cx.global::<AppState>().script_started {
             cx.global_mut::<AppState>().script_started = true;
@@ -256,16 +261,33 @@ impl Root {
                 }
             }
             Action::NewWindow => open_window(cx),
-            Action::Quit => cx.quit(),
+            // Deferred: this window is mid-update here, so its busy check
+            // could not read it.
+            Action::Quit => cx.defer(request_quit),
             _ => {}
         }
     }
 
+    /// Whether closing this window would end a running command (and the
+    /// config asks to confirm that).
+    fn busy(&self, cx: &App) -> bool {
+        let setting = cx.global::<AppState>().settings.config.terminal.confirm_close_running;
+        self.pane.as_ref().is_some_and(|p| p.read(cx).needs_close_confirmation(setting))
+    }
+
+    /// The close button: close at once when idle, else ask (and close from
+    /// the answer).
+    fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.busy(cx) {
+            return true;
+        }
+        self.close(window, cx);
+        false
+    }
+
     /// Close the window, asking first if a command is running in it.
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let setting = cx.global::<AppState>().settings.config.terminal.confirm_close_running;
-        let busy = self.pane.as_ref().is_some_and(|p| p.read(cx).needs_close_confirmation(setting));
-        if !busy {
+        if !self.busy(cx) {
             window.remove_window();
             return;
         }
@@ -421,6 +443,42 @@ impl debug_script::Host for Root {
     }
 }
 
+/// Quit, asking first when any window is running a command.
+fn request_quit(cx: &mut App) {
+    let busy: Vec<_> = cx
+        .windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<Root>())
+        .filter(|h| h.read(cx).is_ok_and(|root| root.busy(cx)))
+        .collect();
+    let Some(first) = busy.first().copied() else {
+        cx.quit();
+        return;
+    };
+    let detail = if busy.len() == 1 {
+        "A command is still running in one window, and quitting will end it.".to_owned()
+    } else {
+        format!("Commands are still running in {} windows, and quitting will end them.", busy.len())
+    };
+    first
+        .update(cx, |_, window, cx| {
+            let answer = window.prompt(
+                gpui::PromptLevel::Warning,
+                "Quit Halyard?",
+                Some(&detail),
+                &["Quit", "Cancel"],
+                cx,
+            );
+            cx.spawn(async move |_, cx| {
+                if answer.await == Ok(0) {
+                    cx.update(|cx| cx.quit()).ok();
+                }
+            })
+            .detach();
+        })
+        .ok();
+}
+
 fn open_window(cx: &mut App) {
     let bounds = Bounds::centered(None, initial_size(cx), cx);
     let options = WindowOptions {
@@ -438,7 +496,7 @@ fn open_window(cx: &mut App) {
 fn main() {
     Application::new().run(|cx: &mut App| {
         AppState::init(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Quit, cx| request_quit(cx));
         cx.on_action(|_: &NewWindow, cx| open_window(cx));
         cx.set_menus(vec![
             Menu {
