@@ -285,6 +285,7 @@ fn main() {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("cannot prepare {}: {e}", w.name());
+                std::fs::remove_dir_all(&dir).ok();
                 std::process::exit(1);
             }
         };
@@ -294,6 +295,7 @@ fn main() {
                 Ok(s) => samples.push(s),
                 Err(e) => {
                     eprintln!("session/{} FAILED: {e}", w.name());
+                    std::fs::remove_dir_all(&dir).ok();
                     std::process::exit(1);
                 }
             }
