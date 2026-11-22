@@ -35,6 +35,6 @@ vendor-neutral AI development experience built on top.
 |----------|-------------------|
 | macOS arm64 | Real window on a Mac, driven and screenshotted; CI on `macos-15` |
 | Linux (Ubuntu) | CI build and headless PTY tests on `ubuntu-24.04` (runner image) and in an `ubuntu:24.04` container |
-| Linux (Fedora, Debian, Arch) | Official targets: CI build and headless PTY tests in each distro's own container (`.github/workflows/distros.yml`). No desktop session is run. Debian stable currently fails two fish shell-integration tests (fish 4.0.2) and is allowed to fail until fixed |
+| Linux (Fedora, Debian, Arch) | Official targets: CI build and headless PTY tests in each distro's own container (`.github/workflows/distros.yml`). No desktop session is run |
 | NixOS | NixOS VM test in CI: boots NixOS, launches Halyard under Wayland and X11, screenshots as artifacts. Software rendering (Mesa) in the VM; real-GPU runs are listed separately in `ROADMAP.md` |
 | macOS Intel | Unverified until a machine or runner is available |
