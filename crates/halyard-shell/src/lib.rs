@@ -21,5 +21,6 @@ pub mod scanner;
 pub use blocks::{Block, BlockId, BlockState, BlockTracker, Clock, SystemClock};
 pub use integration::{Shell, install_line, integration_script};
 pub use scanner::{
-    AgentReport, NotificationSource, ProgressState, ReportedState, Scanner, ShellEvent, TitleKind,
+    AgentReport, NotificationSource, ProgressState, ReportedCwd, ReportedState, Scanner,
+    ShellEvent, TitleKind,
 };

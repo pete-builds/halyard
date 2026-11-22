@@ -4,7 +4,7 @@
 //! directly. A `.git` file (linked worktrees, submodules) holds `gitdir: <path>`,
 //! relative to the file's directory or absolute, and `HEAD` lives there.
 //!
-//! Only `HEAD` is read, at most 4 KiB of it. Repositories using the reftable
+//! Only `HEAD` is read, at most 4 KiB of it, and only if it is a regular file. Repositories using the reftable
 //! backend keep a placeholder `HEAD` (`ref: refs/heads/.invalid`), reported as
 //! [`GitHead::Unknown`].
 
@@ -66,9 +66,28 @@ pub fn find_git_dir(start: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Reads at most [`MAX_READ`] bytes of a regular file. The directory comes from
+/// untrusted terminal output, so anything else (a FIFO, a device, a socket) is
+/// refused rather than opened: opening or reading a FIFO would block forever. The
+/// file is opened non-blocking and checked again on the open descriptor, so swapping
+/// it after the first check does not help.
 fn read_small(path: &Path) -> Option<String> {
+    if !fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut buf = Vec::new();
-    fs::File::open(path).ok()?.take(MAX_READ).read_to_end(&mut buf).ok()?;
+    file.take(MAX_READ).read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -188,6 +207,54 @@ mod tests {
     fn outside_any_repository() {
         // The filesystem root is not a repository on CI machines or here.
         assert_eq!(git_head(Path::new("/")), None);
+    }
+
+    #[test]
+    fn read_is_capped_at_4_kib() {
+        let t = TempDir::new("cap");
+        let p = t.0.join("big");
+        fs::write(&p, vec![b'x'; 1 << 20]).unwrap();
+        assert_eq!(read_small(&p).unwrap().len(), MAX_READ as usize);
+    }
+
+    #[cfg(unix)]
+    fn mkfifo(p: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path and a mode.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+    }
+
+    /// Runs `git_head` on another thread and fails instead of hanging.
+    #[cfg(unix)]
+    fn git_head_within(dir: PathBuf, limit: std::time::Duration) -> Option<GitHead> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(git_head(&dir));
+        });
+        rx.recv_timeout(limit).expect("git_head blocked on a FIFO")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_head_does_not_block() {
+        let t = TempDir::new("fifo");
+        // .git/HEAD is a FIFO with no writer.
+        fs::create_dir_all(t.0.join("a/.git")).unwrap();
+        mkfifo(&t.0.join("a/.git/HEAD"));
+        let limit = std::time::Duration::from_secs(5);
+        assert_eq!(git_head_within(t.0.join("a"), limit), Some(GitHead::Unknown));
+        // A .git that is itself a FIFO is not a repository marker.
+        fs::create_dir_all(t.0.join("b")).unwrap();
+        mkfifo(&t.0.join("b/.git"));
+        assert_eq!(git_head_within(t.0.join("b"), limit), None);
+        // A worktree whose gitdir points at a directory with a FIFO HEAD.
+        fs::create_dir_all(t.0.join("gd")).unwrap();
+        mkfifo(&t.0.join("gd/HEAD"));
+        write(&t.0.join("c/.git"), &format!("gitdir: {}\n", t.0.join("gd").display()));
+        assert_eq!(git_head_within(t.0.join("c"), limit), Some(GitHead::Unknown));
+        // Reading a FIFO directly is refused.
+        assert_eq!(read_small(&t.0.join("gd/HEAD")), None);
     }
 
     #[test]

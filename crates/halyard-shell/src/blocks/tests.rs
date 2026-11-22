@@ -55,7 +55,7 @@ impl H {
         self.ev(ShellEvent::CommandLine(cmd.into()), 0)
     }
     fn cwd(&mut self, p: &str) -> &mut Self {
-        self.ev(ShellEvent::Cwd { host: None, path: p.into() }, 0)
+        self.ev(ShellEvent::Cwd(crate::scanner::ReportedCwd::local(p)), 0)
     }
     fn alt(&mut self, on: bool) -> &mut Self {
         self.ev(ShellEvent::AltScreen { active: on }, 0)
@@ -368,4 +368,42 @@ fn default_tracker_uses_system_clock() {
     let before = SystemTime::now();
     t.on_event(&ShellEvent::CommandExecuted, 0);
     assert!(t.running().unwrap().started_at.unwrap() >= before);
+}
+
+#[test]
+fn hostile_nesting_is_bounded_and_linear() {
+    // `cat` of untrusted output: every mark claims a new nested shell.
+    let mut h = H::with_capacity(DEFAULT_HISTORY);
+    let start = std::time::Instant::now();
+    for i in 0..100_000u64 {
+        let aid = i.to_string();
+        h.a_aid(&aid, i).c(i);
+        assert!(h.t.running_depth() <= MAX_NESTING);
+    }
+    let elapsed = start.elapsed();
+    assert_eq!(h.t.running_depth(), MAX_NESTING);
+    assert_eq!(h.t.stats().nesting_overflows, 100_000 - MAX_NESTING as u64);
+    assert_eq!(h.t.history().len(), DEFAULT_HISTORY);
+    // Same aids closing in reverse still work near the top of the stack.
+    let top = h.t.running().unwrap().aid.clone().unwrap();
+    h.d_aid(Some(0), &top, 200_000);
+    assert_eq!(h.t.running_depth(), MAX_NESTING - 1);
+    assert!(elapsed < Duration::from_secs(1), "100k hostile marks took {elapsed:?}");
+}
+
+#[test]
+fn hostile_marks_through_the_scanner() {
+    let mut data = Vec::new();
+    for i in 0..20_000u32 {
+        data.extend_from_slice(format!("\x1b]133;A;aid={i}\x07\x1b]133;C\x07").as_bytes());
+    }
+    let mut scanner = crate::scanner::Scanner::new();
+    let mut t = BlockTracker::new(SystemClock, 100);
+    let mut row = 0;
+    scanner.feed(&data, |_, ev| {
+        row += 1;
+        t.on_event(&ev, row);
+    });
+    assert_eq!(t.running_depth(), MAX_NESTING);
+    assert_eq!(t.history().len(), 100);
 }

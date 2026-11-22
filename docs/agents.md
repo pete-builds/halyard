@@ -33,9 +33,11 @@ searched, so `vim claude.md` is not an agent.
 
 Process information: macOS reads the executable with `proc_pidpath` and argv with
 `sysctl(KERN_PROCARGS2)`; Linux reads `/proc/<pid>/exe` and `/proc/<pid>/cmdline`.
-Right after a fork the foreground process can still be a copy of the shell, so the
-app should poll (for example every 500 ms) and treat the answer as eventually
-consistent.
+The executable is read before and after argv and the read is retried if they
+differ, so an exec between the two reads never pairs one program's argv with
+another's executable. Right after a fork the foreground process can still be a copy
+of the shell, so the app should poll (for example every 500 ms) and treat the answer
+as eventually consistent.
 
 ## Attention states
 
@@ -51,6 +53,7 @@ not exited since.
 |---|--------|-----------|--------|---------|
 | 1 | Protocol report with `state=` (OSC 7717 or OSC 777;halyard) | `session=` absent or equal to the pane's id | `working` Working, `waiting` WaitingForInput, `idle` Idle, `done` Finished (with `exit=` if given), `error` Error. The agent becomes active and the protocol latch is set. | `ProtocolReport` |
 | 2 | OSC 9 or OSC 777;notify notification, or BEL | agent active, no protocol latch | WaitingForInput, waiting latch set | `Notification` / `Bell` |
+| 2b | The same | agent active, protocol latch set | state unchanged; the pane becomes unread if not focused | (unchanged) |
 | 3 | User input (keys, paste) | a latch is set | latch cleared; Working if output arrived within the idle period, else Idle | `UserInput` |
 | 4 | Output | agent active, no latch | Working | `OutputActivity` |
 | 5 | `tick`: no output for `idle_after` (default 8 s, configurable) | agent active, no latch, Working | Idle | `Quiet` |
@@ -65,6 +68,11 @@ Consequences, each covered by `crates/halyard-agents/src/attention/tests.rs`:
 * **The protocol always wins.** While the protocol latch is set, output, silence,
   notifications and bells do not change the state. It holds until the next report,
   user input (rule 3), the agent exiting (7), or the shell's D mark (8).
+* **But a report cannot hide a request.** Reports are spoofable (anything the pane
+  prints can contain one). A spoofed `state=working` would otherwise swallow a real
+  permission prompt's notification or bell until the user typed. Rule 2b keeps the
+  state but marks the pane unread, and the dashboard ranks unread panes above
+  working ones.
 * **Waiting needs a signal.** Only a notification, a bell or a report produces
   WaitingForInput. Silence produces Idle, never "waiting". Output while waiting does
   not clear it (agents redraw their prompt); user input does.
@@ -80,8 +88,8 @@ Consequences, each covered by `crates/halyard-agents/src/attention/tests.rs`:
 ### Unread
 
 Unread is set when the state becomes WaitingForInput or Finished while the pane is
-not focused, and cleared when the pane gains focus. Working, Idle and Error never set
-it.
+not focused, or by a notification or bell that a protocol state held back (rule 2b),
+and cleared when the pane gains focus. Becoming Working, Idle or Error never sets it.
 
 ### Dashboard
 
@@ -89,8 +97,23 @@ it.
 `HEAD` (read from `.git/HEAD`, following the `gitdir:` file of worktrees and
 submodules, without running git), state, cause, since, last output, unread, and the
 last notification text (sanitized, at most 256 characters). Order: waiting, then
-error, then finished and unread, then working, then idle, then finished and read,
-then unknown. Within a group, the longest in its state comes first.
+error, then anything else that is unread, then working, then idle, then finished and
+read, then unknown. Within a group, the longest in its state comes first.
+
+The working directory comes from OSC 7, which is untrusted output. It is always
+shown, but it is used as a directory on this machine (reading git, and later opening
+a new pane there) only when both hold:
+
+* the host in the URI is empty, `localhost`, or this machine's host name (compared
+  without case, or by its first label), so a cwd reported from inside `ssh` is not
+  looked up locally;
+* the path was reported verbatim: sanitizing for display did not change it. A path
+  with a control character in it (`new\nline` is a legal directory name) would be
+  shown as a different path, so it is display only.
+
+Git reads only regular files: `HEAD` and `.git` files are type-checked before and
+after a non-blocking open, so a FIFO planted at `.git/HEAD` cannot hang the reader,
+and at most 4 KiB is read.
 
 ## Setting up agents
 

@@ -36,6 +36,11 @@
 //!   scrollback. The running block is flagged [`Block::used_alt_screen`].
 //! * **A twice** (prompt redraw): the prompt row moves to the newest A.
 //!
+//! * **Nesting is bounded** at [`MAX_NESTING`] running blocks. Output is untrusted
+//!   (`cat` of a file can carry any marks), so a stream of `A;aid=<new>` and `C`
+//!   pairs must not grow memory or time without bound: when a new block would exceed
+//!   the limit, the outermost running block is closed as Unknown.
+//!
 //! History is bounded: the oldest closed blocks are evicted first.
 
 use std::collections::VecDeque;
@@ -46,6 +51,9 @@ use crate::scanner::ShellEvent;
 
 /// Default number of closed blocks kept.
 pub const DEFAULT_HISTORY: usize = 1000;
+
+/// Most running blocks kept at once (nested shells). Real nesting is a handful deep.
+pub const MAX_NESTING: usize = 32;
 
 /// A source of wall clock time. Injected so tests can control it.
 pub trait Clock {
@@ -140,6 +148,8 @@ pub struct TrackerStats {
     pub lost_finish_marks: u64,
     /// Closed blocks evicted from the bounded history.
     pub evicted: u64,
+    /// Outermost running blocks closed because nesting reached [`MAX_NESTING`].
+    pub nesting_overflows: u64,
 }
 
 #[derive(Debug, Default)]
@@ -213,10 +223,11 @@ impl<C: Clock> BlockTracker<C> {
                     top.used_alt_screen = true;
                 }
             }
-            ShellEvent::Cwd { path, .. } => {
-                self.cwd = Some(path.clone());
+            ShellEvent::Cwd(cwd) => {
+                // Blocks keep the display form; see `ReportedCwd` for local use.
+                self.cwd = Some(cwd.path.clone());
                 if let Some(p) = self.pending.as_mut() {
-                    p.cwd = Some(path.clone());
+                    p.cwd = Some(cwd.path.clone());
                 }
             }
             ShellEvent::CommandLine(line) => self.set_command(line.clone()),
@@ -309,6 +320,14 @@ impl<C: Clock> BlockTracker<C> {
             used_alt_screen: false,
         };
         self.next_command = None;
+        if self.running.len() >= MAX_NESTING {
+            let mut outer = self.running.remove(0);
+            outer.state = BlockState::Unknown;
+            outer.finished_at = Some(self.clock.now());
+            outer.output_end_row = Some(row);
+            self.stats.nesting_overflows += 1;
+            self.push_history(outer);
+        }
         self.running.push(block);
     }
 
@@ -394,6 +413,12 @@ impl<C: Clock> BlockTracker<C> {
     /// Closed blocks, oldest first.
     pub fn history(&self) -> impl ExactSizeIterator<Item = &Block> {
         self.history.iter()
+    }
+
+    /// Number of running blocks (more than one only with nested shells), at most
+    /// [`MAX_NESTING`].
+    pub fn running_depth(&self) -> usize {
+        self.running.len()
     }
 
     /// The innermost running block.

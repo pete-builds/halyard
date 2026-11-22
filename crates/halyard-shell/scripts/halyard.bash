@@ -19,6 +19,7 @@ __halyard_running=0
 __halyard_at_prompt=0
 __halyard_status=0
 __halyard_hist=
+__halyard_line=
 
 __halyard_cwd() {
   local LC_ALL=C s=$PWD out='' c i
@@ -37,6 +38,8 @@ __halyard_cwd() {
   printf '\033]7;file://%s%s\007' "${HOSTNAME-}" "$out"
 }
 
+# bash saves and restores `$_` around PROMPT_COMMAND itself, so only the DEBUG trap
+# below has to take care of it.
 __halyard_prompt_start() {
   __halyard_status=$?
   __halyard_at_prompt=0
@@ -60,21 +63,46 @@ __halyard_prompt_end() {
   return "$ret"
 }
 
+# True when $1 is exactly one of the commands in PROMPT_COMMAND (split on newlines
+# and semicolons, surrounding blanks ignored). The same test bash-preexec uses.
+__halyard_in_prompt_command() {
+  local IFS=$'\n;' piece
+  local -a pieces
+  read -r -d '' -a pieces <<< "${PROMPT_COMMAND[*]}" || :
+  for piece in "${pieces[@]}"; do
+    piece=${piece#"${piece%%[![:space:]]*}"}
+    piece=${piece%"${piece##*[![:space:]]}"}
+    [[ $piece == "$1" ]] && return 0
+  done
+  return 1
+}
+
+# Strips the `  123* ` prefix that `history 1` puts before a command line.
+__halyard_strip_history_number() {
+  local l=$1
+  l=${l#"${l%%[![:space:]]*}"}
+  l=${l#"${l%%[!0-9]*}"}
+  l=${l#\*}
+  l=${l#"${l%%[![:space:]]*}"}
+  __halyard_line=$l
+}
+
+# The DEBUG trap calls this as `__halyard_preexec "$_"`: ending the trap with `$_`
+# as the last argument keeps `$_` intact for the user's command.
 __halyard_preexec() {
   [[ $__halyard_at_prompt == 1 ]] || return 0
   [[ -n ${COMP_LINE-} ]] && return 0
   local line
   line=$(HISTTIMEFORMAT='' builtin history 1)
   if [[ $line == "$__halyard_hist" ]]; then
-    # History did not move: either this is PROMPT_COMMAND running after an empty
-    # line, or a command history did not record. Only the first gets skipped.
-    case "${PROMPT_COMMAND[*]}" in
-      *"$BASH_COMMAND"*) return 0 ;;
-    esac
+    # History did not move: either PROMPT_COMMAND is running after an empty line,
+    # or history did not record this command (ignorespace, ignoredups, set +o
+    # history). Only a command that is literally part of PROMPT_COMMAND is skipped.
+    __halyard_in_prompt_command "$BASH_COMMAND" && return 0
     line=
   else
-    line=${line#*[0-9]}
-    line=${line#"${line%%[! ]*}"}
+    __halyard_strip_history_number "$line"
+    line=$__halyard_line
   fi
   __halyard_at_prompt=0
   if [[ -n $line ]]; then
@@ -93,11 +121,12 @@ __halyard_preexec() {
 __halyard_trap_arg() { __halyard_old_debug=${3-}; }
 
 # Builds the DEBUG trap: ours first, then whatever trap was already set.
+# shellcheck disable=SC2016 # `$_` is expanded when the trap runs
 __halyard_make_trap() {
   if [[ -n ${__halyard_old_debug-} ]]; then
-    __halyard_trap="__halyard_preexec"$'\n'"$__halyard_old_debug"
+    __halyard_trap='__halyard_preexec "$_"'$'\n'"$__halyard_old_debug"
   else
-    __halyard_trap=__halyard_preexec
+    __halyard_trap='__halyard_preexec "$_"'
   fi
 }
 
@@ -106,10 +135,12 @@ __halyard_make_trap() {
 __halyard_setup=1
 # shellcheck disable=SC2016 # expanded later, when PROMPT_COMMAND runs
 __halyard_setup_cmd='if [[ -n ${__halyard_setup-} ]]; then eval "__halyard_trap_arg $(trap -p DEBUG)"; __halyard_make_trap; trap -- "$__halyard_trap" DEBUG; __halyard_setup=; fi'
+__halyard_start_cmd=__halyard_prompt_start
+__halyard_end_cmd=__halyard_prompt_end
 
 if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" == "declare -a"* ]]; then
-  PROMPT_COMMAND=(__halyard_prompt_start "${PROMPT_COMMAND[@]}" "$__halyard_setup_cmd" __halyard_prompt_end)
+  PROMPT_COMMAND=("$__halyard_start_cmd" "${PROMPT_COMMAND[@]}" "$__halyard_setup_cmd" "$__halyard_end_cmd")
 else
   # shellcheck disable=SC2178 # a scalar PROMPT_COMMAND stays a scalar
-  PROMPT_COMMAND="__halyard_prompt_start"$'\n'"${PROMPT_COMMAND-}"$'\n'"$__halyard_setup_cmd"$'\n'"__halyard_prompt_end"
+  PROMPT_COMMAND="$__halyard_start_cmd"$'\n'"${PROMPT_COMMAND-}"$'\n'"$__halyard_setup_cmd"$'\n'"$__halyard_end_cmd"
 fi

@@ -18,7 +18,8 @@
 //! 7. Error only ever comes from a protocol report.
 //!
 //! Unread is set when the state becomes WaitingForInput or Finished while the pane is
-//! not focused, and cleared when it gains focus. Nothing unobservable (token counts,
+//! not focused, and also by a notification or bell that a protocol state held back
+//! (so a spoofed report cannot hide a real request); it is cleared on focus. Nothing unobservable (token counts,
 //! cost, model) is tracked.
 
 use std::time::{Duration, SystemTime};
@@ -337,10 +338,20 @@ impl AttentionMachine {
     }
 
     fn attention_request(&mut self, cause: Cause, at: SystemTime) {
-        if self.agent_active && self.latch != Latch::Protocol {
-            self.latch = Latch::Waiting;
-            self.set(AttentionState::WaitingForInput, cause, at);
+        if !self.agent_active {
+            return;
         }
+        if self.latch == Latch::Protocol {
+            // The protocol state stands, but a report is spoofable by anything the
+            // pane prints, so it must not be able to hide a real request: the pane
+            // still becomes unread.
+            if !self.focused {
+                self.unread = true;
+            }
+            return;
+        }
+        self.latch = Latch::Waiting;
+        self.set(AttentionState::WaitingForInput, cause, at);
     }
 
     fn report(&mut self, report: AgentReport, at: SystemTime) {

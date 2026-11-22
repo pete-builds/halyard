@@ -69,12 +69,7 @@ pub enum ShellEvent {
     /// OSC 633;E, or the `cmdline_url=` option of OSC 133;C: the command line text.
     CommandLine(String),
     /// OSC 7 (`file://host/path`), or OSC 633;P;Cwd=path.
-    Cwd {
-        /// Host name, if the URI had one.
-        host: Option<String>,
-        /// Decoded absolute path.
-        path: String,
-    },
+    Cwd(ReportedCwd),
     /// OSC 9 (iTerm2 style) or OSC 777;notify desktop notification.
     Notification {
         /// Which sequence carried it.
@@ -109,6 +104,49 @@ pub enum ShellEvent {
     },
     /// A Halyard session protocol report (OSC 7717, or OSC 777;halyard).
     Agent(AgentReport),
+}
+
+/// A working directory reported by the shell (OSC 7 or OSC 633;P).
+///
+/// The path is sanitized for display. A path that sanitizing changed (control
+/// characters, bidi overrides, invalid UTF-8, or more than the length cap) is a
+/// different path, so it is kept for display only: [`ReportedCwd::verbatim`] is false
+/// and [`ReportedCwd::local_path`] returns `None`. The same goes for a host that is
+/// not this machine, which is the normal case inside `ssh`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportedCwd {
+    /// Host name, if the URI had one.
+    pub host: Option<String>,
+    /// Decoded absolute path, sanitized for display.
+    pub path: String,
+    /// True when `path` and `host` are exactly what the sequence encoded.
+    pub verbatim: bool,
+}
+
+impl ReportedCwd {
+    /// A local cwd with no host, as the tests and OSC 633;P produce.
+    pub fn local(path: impl Into<String>) -> Self {
+        Self { host: None, path: path.into(), verbatim: true }
+    }
+
+    /// True when the host is absent, `localhost`, or names this machine
+    /// (`local_hostname`, compared without case, or by its first label).
+    pub fn is_local_host(&self, local_hostname: &str) -> bool {
+        let Some(host) = self.host.as_deref() else {
+            return true;
+        };
+        let short = |h: &str| h.split('.').next().unwrap_or(h).to_ascii_lowercase();
+        host.eq_ignore_ascii_case("localhost")
+            || host.eq_ignore_ascii_case(local_hostname)
+            || (!local_hostname.is_empty() && short(host) == short(local_hostname))
+    }
+
+    /// The path, when it can be used as a directory on this machine (reading git
+    /// state, opening a new pane there): it must be verbatim and on a local host.
+    pub fn local_path(&self, local_hostname: &str) -> Option<&std::path::Path> {
+        (self.verbatim && self.is_local_host(local_hostname))
+            .then(|| std::path::Path::new(&self.path))
+    }
 }
 
 /// Which escape sequence delivered a notification.
@@ -437,8 +475,8 @@ fn parse_osc(payload: &[u8], emit: &mut dyn FnMut(ShellEvent)) {
         (1, Some(t)) => emit(title(TitleKind::Icon, t)),
         (2, Some(t)) => emit(title(TitleKind::Window, t)),
         (7, Some(uri)) => {
-            if let Some((host, path)) = parse_file_uri(uri) {
-                emit(ShellEvent::Cwd { host, path });
+            if let Some(cwd) = parse_file_uri(uri) {
+                emit(ShellEvent::Cwd(cwd));
             }
         }
         (9, Some(body)) => parse_osc9(body, emit),
@@ -459,7 +497,7 @@ fn title(kind: TitleKind, text: &[u8]) -> ShellEvent {
 }
 
 /// Parses `file://host/path` (or kitty's `kitty-shell-cwd://host/path`).
-fn parse_file_uri(uri: &[u8]) -> Option<(Option<String>, String)> {
+fn parse_file_uri(uri: &[u8]) -> Option<ReportedCwd> {
     let lower_starts = |prefix: &[u8]| {
         uri.len() >= prefix.len() && uri[..prefix.len()].eq_ignore_ascii_case(prefix)
     };
@@ -471,12 +509,23 @@ fn parse_file_uri(uri: &[u8]) -> Option<(Option<String>, String)> {
         return None;
     };
     let slash = rest.iter().position(|&b| b == b'/')?;
-    let host = sanitize_bytes(&percent_decode(&rest[..slash]), limits::HOST);
-    let path = sanitize_bytes(&percent_decode(&rest[slash..]), limits::PATH);
+    let (host, host_exact) = decode_exact(&percent_decode(&rest[..slash]), limits::HOST);
+    let (path, path_exact) = decode_exact(&percent_decode(&rest[slash..]), limits::PATH);
     if !path.starts_with('/') {
         return None;
     }
-    Some(((!host.is_empty()).then_some(host), path))
+    Some(ReportedCwd {
+        host: (!host.is_empty()).then_some(host),
+        path,
+        verbatim: host_exact && path_exact,
+    })
+}
+
+/// Sanitizes decoded bytes and reports whether the result is byte for byte the input.
+fn decode_exact(bytes: &[u8], cap: usize) -> (String, bool) {
+    let clean = sanitize_bytes(bytes, cap);
+    let exact = clean.as_bytes() == bytes;
+    (clean, exact)
 }
 
 fn parse_osc9(body: &[u8], emit: &mut dyn FnMut(ShellEvent)) {
@@ -618,9 +667,9 @@ fn parse_mark(mark: &[u8], vscode: bool, emit: &mut dyn FnMut(ShellEvent)) {
         }
         b"P" if vscode => {
             if let Some(cwd) = raw_option(args, b"Cwd") {
-                let path = sanitize_bytes(&vscode_unescape(cwd), limits::PATH);
+                let (path, verbatim) = decode_exact(&vscode_unescape(cwd), limits::PATH);
                 if path.starts_with('/') {
-                    emit(ShellEvent::Cwd { host: None, path });
+                    emit(ShellEvent::Cwd(ReportedCwd { host: None, path, verbatim }));
                 }
             }
         }

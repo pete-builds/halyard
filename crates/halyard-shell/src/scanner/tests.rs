@@ -26,6 +26,14 @@ fn pa(aid: Option<&str>) -> ShellEvent {
     ShellEvent::PromptStart { aid: aid.map(str::to_string) }
 }
 
+fn cwd(host: Option<&str>, path: &str) -> ShellEvent {
+    ShellEvent::Cwd(ReportedCwd {
+        host: host.map(str::to_string),
+        path: path.into(),
+        verbatim: true,
+    })
+}
+
 fn fin(code: Option<i32>) -> ShellEvent {
     ShellEvent::CommandFinished { exit_code: code, aid: None }
 }
@@ -53,7 +61,7 @@ fn corpus() -> Vec<u8> {
 fn corpus_events() -> Vec<ShellEvent> {
     vec![
         ShellEvent::Bell,
-        ShellEvent::Cwd { host: Some("box".into()), path: "/home/p q".into() },
+        cwd(Some("box"), "/home/p q"),
         pa(Some("42")),
         ShellEvent::CommandInputStart,
         ShellEvent::CommandLine("ls; echo \\x".into()),
@@ -196,10 +204,7 @@ fn osc_633_marks_and_escaping() {
         ShellEvent::CommandLine("printf é".into())
     );
     assert_eq!(one(b"\x1b]633;E\x07"), ShellEvent::CommandLine(String::new()));
-    assert_eq!(
-        one(b"\x1b]633;P;Cwd=/srv/a\\x3bb\x07"),
-        ShellEvent::Cwd { host: None, path: "/srv/a;b".into() }
-    );
+    assert_eq!(one(b"\x1b]633;P;Cwd=/srv/a\\x3bb\x07"), cwd(None, "/srv/a;b"));
     assert!(scan(b"\x1b]633;P;Cwd=relative\x07\x1b]633;P;Other=1\x07").is_empty());
 }
 
@@ -207,22 +212,73 @@ fn osc_633_marks_and_escaping() {
 fn osc_7_cwd() {
     assert_eq!(
         one(b"\x1b]7;file://host.local/Users/me/My%20Dir/%C3%A9\x07"),
-        ShellEvent::Cwd { host: Some("host.local".into()), path: "/Users/me/My Dir/é".into() }
+        cwd(Some("host.local"), "/Users/me/My Dir/é")
     );
-    assert_eq!(
-        one(b"\x1b]7;FILE:///tmp\x1b\\"),
-        ShellEvent::Cwd { host: None, path: "/tmp".into() }
-    );
-    assert_eq!(
-        one(b"\x1b]7;kitty-shell-cwd://h/a b\x07"),
-        ShellEvent::Cwd { host: Some("h".into()), path: "/a b".into() }
-    );
-    // Encoded control characters are stripped after decoding.
+    assert_eq!(one(b"\x1b]7;FILE:///tmp\x1b\\"), cwd(None, "/tmp"));
+    assert_eq!(one(b"\x1b]7;kitty-shell-cwd://h/a b\x07"), cwd(Some("h"), "/a b"));
+    // Encoded control characters are stripped after decoding, and the path is then
+    // marked as not verbatim: it is a different path, fit for display only.
     assert_eq!(
         one(b"\x1b]7;file://h/a%1b%5D0;x%07b\x07"),
-        ShellEvent::Cwd { host: Some("h".into()), path: "/a]0;xb".into() }
+        ShellEvent::Cwd(ReportedCwd {
+            host: Some("h".into()),
+            path: "/a]0;xb".into(),
+            verbatim: false
+        })
     );
     assert!(scan(b"\x1b]7;http://h/x\x07\x1b]7;file://hostonly\x07\x1b]7;/plain\x07").is_empty());
+}
+
+fn reported(seq: &[u8]) -> ReportedCwd {
+    match one(seq) {
+        ShellEvent::Cwd(c) => c,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn cwd_verbatim_only_when_unchanged() {
+    // A newline in a directory name is legal; sanitizing removes it, so the shown
+    // path is not the real one.
+    let c = reported(b"\x1b]7;file:///tmp/new%0Aline\x07");
+    assert_eq!(c.path, "/tmp/newline");
+    assert!(!c.verbatim);
+    assert_eq!(c.local_path(""), None);
+    // Invalid UTF-8.
+    assert!(!reported(b"\x1b]7;file:///tmp/%FF\x07").verbatim);
+    // Bidi override.
+    assert!(!reported(b"\x1b]7;file:///tmp/%E2%80%AEx\x07").verbatim);
+    // Longer than the cap.
+    let long = format!("\x1b]7;file:///{}\x07", "a".repeat(limits::PATH + 10));
+    assert!(!reported(long.as_bytes()).verbatim);
+    // A control character in the host.
+    assert!(!reported(b"\x1b]7;file://h%07x/tmp\x07").verbatim);
+    // Ordinary non-ASCII paths stay verbatim.
+    let ok = reported(b"\x1b]7;file:///tmp/dir%20with%20space%20%C3%A9\x07");
+    assert!(ok.verbatim);
+    assert_eq!(ok.local_path(""), Some(std::path::Path::new("/tmp/dir with space é")));
+    // OSC 633;P follows the same rule.
+    assert!(!reported(b"\x1b]633;P;Cwd=/tmp/a\\x0ab\x07").verbatim);
+    assert!(reported(b"\x1b]633;P;Cwd=/tmp/ab\x07").verbatim);
+}
+
+#[test]
+fn cwd_host_must_be_local_for_local_use() {
+    let at = |host: &str| reported(format!("\x1b]7;file://{host}/srv\x07").as_bytes());
+    let me = "cypher.lan";
+    assert_eq!(
+        reported(b"\x1b]7;file:///srv\x07").local_path(me),
+        Some(std::path::Path::new("/srv"))
+    );
+    assert!(at("localhost").local_path(me).is_some());
+    assert!(at("LOCALHOST").is_local_host(me));
+    assert!(at("cypher.lan").local_path(me).is_some());
+    assert!(at("CYPHER").local_path(me).is_some(), "short name of this host");
+    assert!(at("cypher.other").is_local_host(me), "same first label");
+    assert_eq!(at("buildbox").local_path(me), None, "remote host: display only");
+    assert_eq!(at("buildbox.lan").local_path(me), None);
+    assert!(!at("cypher").is_local_host(""), "unknown local name: only empty or localhost");
+    assert!(ReportedCwd::local("/x").is_local_host(""));
 }
 
 #[test]

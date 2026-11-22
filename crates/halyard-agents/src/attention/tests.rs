@@ -431,3 +431,43 @@ fn from_shell_events() {
         assert_eq!(AttentionEvent::from_shell_event(&ev), None, "{ev:?}");
     }
 }
+
+#[test]
+fn protocol_state_cannot_hide_a_real_notification() {
+    for (name, ev) in [
+        ("notification", AttentionEvent::Notification("Claude needs your permission".into())),
+        ("bell", AttentionEvent::Bell),
+    ] {
+        // Something in the pane printed a fake `state=working` report.
+        let mut m = AttentionMachine::new(AttentionConfig::default(), None);
+        m.handle(AttentionEvent::AgentStarted(AgentKind::ClaudeCode), t(0));
+        m.handle(
+            AttentionEvent::Report(AgentReport {
+                state: Some(ReportedState::Working),
+                ..Default::default()
+            }),
+            t(1),
+        );
+        assert!(!m.unread());
+        m.handle(ev.clone(), t(2));
+        assert_eq!(m.state(), Working, "{name}: the protocol state stands");
+        assert!(m.unread(), "{name}: but the pane is unread");
+        // Focused panes are not marked.
+        let mut f = AttentionMachine::new(AttentionConfig::default(), None);
+        f.handle(AttentionEvent::Focus(true), t(0));
+        f.handle(AttentionEvent::AgentStarted(AgentKind::ClaudeCode), t(0));
+        f.handle(
+            AttentionEvent::Report(AgentReport {
+                state: Some(ReportedState::Idle),
+                ..Default::default()
+            }),
+            t(1),
+        );
+        f.handle(ev, t(2));
+        assert!(!f.unread(), "{name}");
+    }
+    // Without an active agent nothing changes.
+    let mut n = AttentionMachine::new(AttentionConfig::default(), None);
+    n.handle(AttentionEvent::Bell, t(0));
+    assert!(!n.unread());
+}

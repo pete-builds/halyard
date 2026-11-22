@@ -86,6 +86,19 @@ pane, or a file that is `cat`ed, can print them. Halyard therefore:
   report never runs anything, never focuses a pane, and never reaches a model;
 * does not treat `session=` as authentication. It only filters crossed wires.
 
+A spoofed report can do two things, and both are bounded:
+
+* **Fake a state**, for example show a pane as waiting. It goes away at the next
+  user input, report, agent exit, or end-of-command mark.
+* **Hide a real request.** While a report's state holds, notifications and bells do
+  not change the state ("the protocol wins"), so a spoofed `state=working` printed
+  just before a real permission prompt would keep the pane looking busy. To limit
+  this, a notification or bell that arrives while a report's state holds still marks
+  the pane unread (when it is not focused), and unread panes sort above working ones
+  in the dashboard. Tested in
+  `crates/halyard-agents/src/attention/tests.rs`
+  (`protocol_state_cannot_hide_a_real_notification`).
+
 ## Shell integration sequences
 
 For reference, the other sequences Halyard reads (all parsed by
@@ -100,7 +113,7 @@ For reference, the other sequences Halyard reads (all parsed by
 | `OSC 633 ; A`, `B`, `C`, `D` | VS Code's equivalents. |
 | `OSC 633 ; E ; cmdline [; nonce]` | Command line, with `\\` and `\xHH` escaping. The nonce is ignored. |
 | `OSC 633 ; P ; Cwd=path` | Working directory. |
-| `OSC 7 ; file://host/path` | Working directory, percent-encoded. |
+| `OSC 7 ; file://host/path` | Working directory, percent-encoded. Used locally only when the host is this machine and the path survived sanitizing unchanged (see `docs/agents.md`). |
 | `OSC 9 ; message` | Notification, unless the message is a ConEmu subcommand (`1` to `12` followed by `;` or the end). |
 | `OSC 9 ; 4 ; state ; percent` | Progress. |
 | `OSC 777 ; notify ; title ; body` | Notification. |

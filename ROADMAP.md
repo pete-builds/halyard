@@ -61,19 +61,21 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 
 ## Phase 3: modern shell experience
 
-- [x] Shell integration scripts (OSC 133 A/B/C/D, OSC 633;E, OSC 7) for zsh and bash,
-  as a library (`halyard-shell`): run in real shells under a PTY by
+- [x] Shell integration scripts (OSC 133 A/B/C/D, OSC 633;E, OSC 7) for zsh, bash and
+  fish, as a library (`halyard-shell`): run in real shells under a PTY by
   `crates/halyard-shell/tests/shell_scripts.rs` (`zsh_integration`, `bash_integration`,
+  `fish_integration`, `bash_command_lines_with_long_history`,
+  `bash_keeps_dollar_underscore`, `bash_ignoreboth_repeats_are_marked`,
   `scripts_are_inert_outside_halyard`, `scripts_are_inert_in_non_interactive_shells`).
-  Tested on macOS (zsh 5.9, bash 3.2). Ubuntu CI runs the same tests if zsh is installed
-  on the runner, otherwise they print SKIPPED.
-- [ ] fish integration script: written (`crates/halyard-shell/scripts/halyard.fish`) but
-  NOT tested; fish is not installed on the build machine and the test skips.
+  Tested on macOS (zsh 5.9, bash 3.2, fish 4.9.3, whose own OSC 133 marks the script
+  leaves alone) and in CI on macOS and Ubuntu, where a missing shell fails the run
+  instead of skipping. The fish 3 code path runs only where CI's fish is 3.x.
 - [x] Escape sequence scanner (OSC 133, 633, 7, 9, 9;4, 777, 0/1/2, BEL, alternate
   screen, Halyard protocol) over chunks split anywhere:
   `scanner::tests::corpus_every_pair_of_split_points`, `overflow_drops_and_resyncs`
 - [x] Command block model as a library (missing marks, nested shells, alternate
-  screen, navigation, last failed, bounded history): `halyard-shell` `blocks::tests`
+  screen, navigation, last failed, bounded history, nesting capped at 32 against
+  hostile output): `halyard-shell` `blocks::tests`, `hostile_nesting_is_bounded_and_linear`
 - [ ] Command blocks in the UI: wiring the scanner tap and engine rows into panes,
   navigate, copy output, rerun (pending; needs `halyard-term` and `halyard-app`)
 - [ ] SQLite history and search

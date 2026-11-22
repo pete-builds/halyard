@@ -7,7 +7,7 @@
 //! |------|----------|
 //! | 0 | WaitingForInput |
 //! | 1 | Error |
-//! | 2 | Finished and unread |
+//! | 2 | anything else unread (finished, or a notification that a protocol state held back) |
 //! | 3 | Working |
 //! | 4 | Idle |
 //! | 5 | Finished and read |
@@ -19,6 +19,7 @@
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use halyard_shell::ReportedCwd;
 use halyard_shell::sanitize::sanitize;
 
 use crate::attention::{AttentionMachine, AttentionState, Cause, MAX_NOTIFICATION_LEN};
@@ -32,9 +33,13 @@ pub struct SessionSummary {
     pub session_id: String,
     /// Detected or reported agent.
     pub agent: Option<AgentKind>,
-    /// Working directory from OSC 7.
-    pub cwd: Option<PathBuf>,
-    /// Git `HEAD` of the working directory.
+    /// Working directory from OSC 7, for display.
+    pub cwd: Option<String>,
+    /// The working directory as a local path, when it is usable on this machine:
+    /// reported verbatim and by this host (see [`ReportedCwd::local_path`]). Only
+    /// this may be used for git or for opening a new pane in the same directory.
+    pub local_cwd: Option<PathBuf>,
+    /// Git `HEAD` of [`SessionSummary::local_cwd`].
     pub git: Option<GitHead>,
     /// Attention state.
     pub state: AttentionState,
@@ -51,18 +56,24 @@ pub struct SessionSummary {
 }
 
 impl SessionSummary {
-    /// Builds a summary from a pane's machine, reading the git branch of `cwd`.
+    /// Builds a summary from a pane's machine and its last reported cwd. The git
+    /// branch is read only for a cwd that is local to `local_hostname` (see
+    /// [`crate::platform::local_hostname`]) and was reported verbatim; a cwd from
+    /// another host (inside `ssh`) or one sanitizing changed is shown, not used.
     pub fn from_machine(
         session_id: impl Into<String>,
         machine: &AttentionMachine,
-        cwd: Option<PathBuf>,
+        cwd: Option<&ReportedCwd>,
+        local_hostname: &str,
     ) -> Self {
-        let git = cwd.as_deref().and_then(git_head);
+        let local_cwd = cwd.and_then(|c| c.local_path(local_hostname)).map(PathBuf::from);
+        let git = local_cwd.as_deref().and_then(git_head);
         Self {
             session_id: session_id.into(),
             agent: machine.agent().cloned(),
             git,
-            cwd,
+            cwd: cwd.map(|c| c.path.clone()),
+            local_cwd,
             state: machine.state(),
             cause: machine.cause(),
             since: machine.since(),
@@ -79,7 +90,7 @@ impl SessionSummary {
         match self.state {
             AttentionState::WaitingForInput => 0,
             AttentionState::Error => 1,
-            AttentionState::Finished { .. } if self.unread => 2,
+            _ if self.unread => 2,
             AttentionState::Working => 3,
             AttentionState::Idle => 4,
             AttentionState::Finished { .. } => 5,
@@ -175,6 +186,7 @@ mod tests {
             session_id: id.into(),
             agent: Some(AgentKind::ClaudeCode),
             cwd: None,
+            local_cwd: None,
             git: None,
             state,
             cause: Cause::Initial,
@@ -223,6 +235,17 @@ mod tests {
     }
 
     #[test]
+    fn unread_ranks_above_working_whatever_the_state() {
+        // A notification held back by a protocol state still makes the pane unread.
+        let mut d = Dashboard::new();
+        d.upsert(summary("working", AttentionState::Working, false, Some(1)));
+        d.upsert(summary("held", AttentionState::Working, true, Some(5)));
+        d.upsert(summary("idle-held", AttentionState::Idle, true, Some(6)));
+        assert_eq!(order(&d), vec!["held", "idle-held", "working"]);
+        assert_eq!(d.next_needing_attention().unwrap().session_id, "held");
+    }
+
+    #[test]
     fn ties_break_by_since_then_id() {
         let mut d = Dashboard::new();
         d.upsert(summary("b", AttentionState::Working, false, Some(5)));
@@ -258,8 +281,23 @@ mod tests {
         m.handle(AttentionEvent::AgentStarted(AgentKind::Codex), t(0));
         m.handle(AttentionEvent::Output, t(1));
         m.handle(AttentionEvent::Notification(format!("approve?\x1b[2J{}", "y".repeat(400))), t(2));
-        let s = SessionSummary::from_machine("s", &m, Some(dir.clone()));
+        let here = ReportedCwd::local(dir.to_str().unwrap());
+        let s = SessionSummary::from_machine("s", &m, Some(&here), "thishost");
+        // The same path reported by another host, or not verbatim: shown, not used.
+        let remote = ReportedCwd { host: Some("buildbox".into()), ..here.clone() };
+        let r = SessionSummary::from_machine("r", &m, Some(&remote), "thishost");
+        let altered = ReportedCwd { verbatim: false, ..here.clone() };
+        let a = SessionSummary::from_machine("a", &m, Some(&altered), "thishost");
+        let named = ReportedCwd { host: Some("ThisHost".into()), ..here.clone() };
+        let n = SessionSummary::from_machine("n", &m, Some(&named), "thishost");
         std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(s.cwd.as_deref(), dir.to_str());
+        assert_eq!(s.local_cwd.as_deref(), Some(dir.as_path()));
+        assert_eq!(r.cwd.as_deref(), dir.to_str(), "remote cwd still displayed");
+        assert_eq!((r.local_cwd.as_deref(), r.git.as_ref()), (None, None));
+        assert_eq!((a.local_cwd.as_deref(), a.git.as_ref()), (None, None));
+        assert_eq!(n.branch(), Some("agent-work"), "own host name counts as local");
 
         assert_eq!(s.agent, Some(AgentKind::Codex));
         assert_eq!(s.branch(), Some("agent-work"));
@@ -273,7 +311,7 @@ mod tests {
         assert!(note.starts_with("approve?[2J"));
         assert_eq!(note.chars().count(), MAX_NOTIFICATION_LEN);
 
-        let none = SessionSummary::from_machine("x", &m, None);
+        let none = SessionSummary::from_machine("x", &m, None, "thishost");
         assert_eq!(none.git, None);
         assert_eq!(none.branch(), None);
     }
