@@ -200,11 +200,15 @@ let
     }
   );
 
-  # Programs the PTY integration tests drive when they are present.
+  # Programs the PTY and shell-integration tests drive. halyard-shell's tests
+  # fail rather than skip when CI is set and a shell is missing.
   ptyTestPrograms = [
     pkgs.vim
     pkgs.less
     pkgs.htop
+    pkgs.bashInteractive
+    pkgs.zsh
+    pkgs.fish
   ]
   # halyard-config's watcher_threads test counts threads with `ps -M` on
   # macOS, and a Nix build's PATH has no /bin.
