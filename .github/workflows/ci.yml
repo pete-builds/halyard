@@ -49,6 +49,12 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked
       - name: Test
         run: cargo test --workspace --locked
+      - name: Vendored patches build against current dependencies
+        # Upstream code: lints are capped for dependencies in the real build, so do not
+        # promote its deprecation warnings to errors here.
+        env:
+          RUSTFLAGS: ""
+        run: cargo check --manifest-path vendor/xattr/Cargo.toml
 
   deny:
     runs-on: ubuntu-24.04

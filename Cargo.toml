@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0-dev"
@@ -12,6 +13,10 @@ publish = false
 
 [workspace.dependencies]
 halyard-term = { path = "crates/halyard-term" }
+
+# Linux build fix for a gpui transitive dependency; see vendor/README.md.
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
