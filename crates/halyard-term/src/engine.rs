@@ -274,6 +274,12 @@ impl Engine {
                 self.terminal.point_from_grid_ref(&g, PointSpace::Screen).ok().flatten()
             });
             match now {
+                // When the page holding the pin is dropped, the engine moves the
+                // pin to the new first row (row 0) without marking it invalid,
+                // so a pin on row 0 cannot tell how many rows went: count it as
+                // lost. (A pin that moved up to row 0 by itself is counted as
+                // lost too; that only makes the caller forget closed blocks.)
+                Some(p) if p.y == 0 && *then > 0 => known = false,
                 Some(p) => {
                     self.dropped += then.saturating_sub(u64::from(p.y));
                 }
@@ -1257,6 +1263,32 @@ mod tests {
         assert!(!evil[6..evil.len() - 6].windows(6).any(|w| w == b"\x1b[201~"));
         assert!(!paste_is_safe("ls\n"));
         assert!(paste_is_safe("ls"));
+    }
+
+    #[test]
+    fn dropped_rows_are_counted_or_reported_lost() {
+        let mut e = Engine::new(40, 5, 200, &Palette::default()).unwrap();
+        assert_eq!(e.dropped_rows(), Some(0));
+        // A few lines at a time: the pin is re-placed often enough to count.
+        let mut last = 0;
+        for i in 0..5000 {
+            e.write(format!("line {i}\r\n").as_bytes());
+            if let Some(d) = e.dropped_rows() {
+                assert!(d >= last);
+                last = d;
+            } else {
+                panic!("lost while counting line by line at line {i}");
+            }
+        }
+        // Rows dropped so far plus rows kept is everything written.
+        let kept = e.primary_history_rows().unwrap() + u64::from(e.terminal.cursor_y().unwrap());
+        assert!(last > 0, "the scrollback dropped rows");
+        assert_eq!(last + kept, 5000, "dropped {last}, kept {kept}");
+        // Far more lines than the scrollback holds in one write: the pin's page
+        // is dropped and the count is reported lost, never undercounted.
+        let flood: String = (0..20_000).map(|i| format!("f{i}\r\n")).collect();
+        e.write(flood.as_bytes());
+        assert_eq!(e.dropped_rows(), None);
     }
 
     #[test]
