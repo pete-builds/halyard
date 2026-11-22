@@ -101,7 +101,11 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       in `crates/halyard-workspace` (`tests/persist.rs`: `serialization_round_trips`,
       `the_file_holds_layout_only`, `corrupt_files_give_a_default_layout_and_a_warning`,
       `hostile_values_are_clamped_or_dropped`, `save_is_atomic_and_private`,
-      `state_dir_per_platform`, `osc7_is_used_only_when_local`); the app wiring is pending.
+      `state_dir_per_platform`, `osc7_is_used_only_when_local`,
+      `restore_caps_the_total_number_of_panes`, `restore_drops_a_tab_nested_deeper_than_the_limit`,
+      `restored_directories_must_exist`, `load_does_not_block_on_a_fifo`,
+      `save_refuses_symlinks_and_tightens_the_folder`; live splits stop at the same limits,
+      `splits_stop_at_the_restore_limits`); the app wiring is pending.
 - [ ] Home Manager module: themes, fonts, keybindings, settings
 
 ## Phase 3: modern shell experience
