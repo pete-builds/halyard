@@ -93,6 +93,7 @@ dotted keys (`"ai".enabled = ...`) and multi-line strings cannot hide a section.
 | `cursor_blink` | `true` | Whether the cursor blinks. |
 | `copy_on_select` | `false` | Copy the selection to the clipboard when it is made. |
 | `confirm_close_running` | `true` | Ask before closing a pane that is running a command. |
+| `confirm_multiline_paste` | `true` | Ask before pasting text with a line break while the program has not turned on bracketed paste (each line would run as a command). |
 
 ## `[theme]`
 
@@ -156,6 +157,11 @@ the same chord on a platform are an error.
 | `agent_dashboard` | `cmd+shift+a` | `ctrl+shift+a` |
 | `new_window` | `cmd+n` | `ctrl+shift+n` |
 | `quit` | `cmd+q` | `ctrl+shift+q` |
+| `resize_pane_left`, `resize_pane_right`, `resize_pane_up`, `resize_pane_down` | `cmd+ctrl+<arrow>` | `ctrl+shift+alt+<arrow>` |
+| `move_tab_left`, `move_tab_right` | `cmd+shift+alt+left`, `cmd+shift+alt+right` | `ctrl+shift+pageup`, `ctrl+shift+pagedown` |
+| `rename_tab` | `cmd+shift+i` | `ctrl+shift+i` |
+| `reload_config` | `cmd+shift+,` | `ctrl+shift+,` |
+| `open_config` | `cmd+,` | `ctrl+,` |
 
 ## `[ai]`
 
@@ -208,6 +214,12 @@ at any point, revoke it.
 
 ## Status
 
-This is the library layer (`crates/halyard-config`): parsing, validation, keymaps, reload.
-Wiring into the app (applying settings, a reload notice, the `config` subcommand) is pending
-on the app crate.
+The library layer is `crates/halyard-config`: parsing, validation, keymaps, reload. The app
+applies every key above except `window.opacity`, `window.blur`, `window.decorations`,
+`font.bold_is_bright`, `[ai]` and `[agents]` (not built yet). Edits apply to open windows
+within about a second; a broken edit shows in a banner at the bottom of the window and the
+previous settings stay. `cursor_style` is used whenever the program has not asked for a
+shape of its own (a program asking for a steady block is drawn with the configured style,
+because the engine reports both the same way). `scrollback_lines`, `shell` and
+`working_directory` apply to shells started after the change. The `config` subcommand is
+still pending.

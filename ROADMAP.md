@@ -29,8 +29,9 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       Unit tests in `grid.rs` (`runs_split_on_style_and_blanks`,
       `wide_glyphs_and_clusters_are_their_own_runs`, `backgrounds_merge_equal_neighbors_and_skip_default`,
       `cursor_recolors_one_cell`). Verified on macOS arm64 with screenshots of a prompt, colored
-      `ls`, vim, htop, a title change, a selection and the exit notice. Linux: builds and
-      unit-tests in CI only; never run in a Linux window.
+      `ls`, vim, htop, a title change, a selection and the exit notice. Linux: real NixOS RTX
+      4070 Ti run, sway Vulkan + XWayland, 2026-11-22 (PR #8). The window sets app id and
+      WM_CLASS `halyard` (`APP_ID`, Linux only, not checked on Linux by this PR).
 - [ ] Keyboard input (including Kitty protocol via the engine's encoder), Ctrl+C.
       Session side done: `keys_encode_with_terminal_modes`,
       `kitty_keyboard_flags_change_encoding`, `ctrl_c_byte_interrupts_sleep`,
@@ -67,9 +68,24 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 
 - [ ] Tabs, draggable split panes, keyboard pane navigation and resizing
 - [x] TOML config and token-based themes, bundled themes (library: `crates/halyard-config`, tests named in docs/themes.md)
-- [ ] Settings wired into the app with live reload
+- [x] Settings wired into the app with live reload: font family, size and line height,
+      padding, cursor style and blink, scrollback, shell and arguments, working directory,
+      theme (following the system appearance with `light`/`dark`), palette into the engine,
+      chrome from `ui` tokens; changes apply to open panes; config errors and warnings show in
+      a dismissible banner and the last good settings stay. Keybindings come from
+      `Config::keymap`. Tests in `settings.rs` (`load_applies_the_file`,
+      `a_broken_reload_keeps_the_previous_settings`, `watcher_reload_reaches_settings`,
+      `theme_palette_reaches_the_engine_palette`, `unknown_theme_falls_back_with_a_notice`,
+      `light_and_dark_follow_the_appearance`), `keybind.rs`
+      (`every_default_binding_is_loaded_except_unbuilt_actions`). Screenshots on macOS arm64
+      (PR body). Not verified: the bar cursor in a focused window (the scripted window is never
+      the active window), the system appearance switching live.
 - [ ] Command palette
-- [ ] Persistent workspaces (layouts, cwd, names) restored on launch
+- [ ] Persistent workspaces (layouts, cwd, names) restored on launch. Model and file format
+      done in `crates/halyard-workspace` (`serialization_round_trips`,
+      `corrupt_files_give_a_default_layout_and_a_warning`, `save_is_atomic_and_private`,
+      `osc7_is_used_only_when_local`, `random_operations_keep_invariants`); the app wiring
+      comes with the tabs and splits PR.
 - [ ] Home Manager module: themes, fonts, keybindings, settings
 
 ## Phase 3: modern shell experience

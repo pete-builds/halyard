@@ -2385,10 +2385,14 @@ dependencies = [
  "core-graphics 0.24.0",
  "futures",
  "gpui",
+ "halyard-config",
  "halyard-term",
+ "halyard-workspace",
+ "libc",
  "objc",
  "png 0.18.1",
  "raw-window-handle",
+ "tempfile",
 ]
 
 [[package]]
@@ -2413,6 +2417,16 @@ dependencies = [
  "portable-pty",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "halyard-workspace"
+version = "0.1.0-dev"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -2,7 +2,8 @@
 
 A theme is plain data: terminal colors for the grid, UI tokens for the chrome around it, and
 an appearance. The library is `crates/halyard-config` (`theme.rs`). Wiring themes into the
-app UI is pending on the app crate.
+app is in `crates/halyard-app` (`settings.rs`): the terminal colors go to each pane's engine
+and the `ui` tokens color the window chrome.
 
 ## Bundled themes
 

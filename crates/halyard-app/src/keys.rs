@@ -250,6 +250,41 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_alt_with_a_control_character_stays_a_combo() {
+        // Some layouts report Ctrl+Alt+Q with the control character as its
+        // text; that is not AltGr typing a character.
+        let ks = ks(
+            "q",
+            |m| {
+                m.control = true;
+                m.alt = true;
+            },
+            Some("\u{11}"),
+        );
+        let k = terminal(route_keystroke(&ks, false));
+        assert!(k.mods.ctrl && k.mods.alt, "{k:?}");
+        assert_eq!(k.key, KeyCode::Char('q'));
+        assert_eq!(k.text, None);
+    }
+
+    #[test]
+    fn ctrl_alt_reporting_the_key_itself_stays_a_combo() {
+        for text in ["q", "Q"] {
+            let ks = ks(
+                "q",
+                |m| {
+                    m.control = true;
+                    m.alt = true;
+                },
+                Some(text),
+            );
+            let k = terminal(route_keystroke(&ks, false));
+            assert!(k.mods.ctrl && k.mods.alt, "{text}: {k:?}");
+            assert_eq!(k.text, None, "{text}");
+        }
+    }
+
+    #[test]
     fn alt_is_meta_when_option_as_alt() {
         let k = terminal(route_keystroke(&ks("b", |m| m.alt = true, Some("∫")), true));
         assert_eq!(k.key, KeyCode::Char('b'));
