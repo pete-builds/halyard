@@ -1,0 +1,32 @@
+# Halyard Night: the default dark theme. Deep navy ground, cool text.
+name = "Halyard Night"
+appearance = "dark"
+
+[terminal]
+foreground = "#d4dde6"
+background = "#0f1a24"
+cursor = "#6ea8f0"
+cursor_text = "#0f1a24"
+selection_bg = "#27415a"
+selection_fg = "#eef3f8"
+ansi = [
+  "#1b2833", "#f0707a", "#7ccf8a", "#e6c06a", "#6ea8f0", "#c490e8", "#5fd0d0", "#b8c4d0",
+  "#3d4f5f", "#ff8f98", "#96e5a2", "#f5d78a", "#92c1ff", "#dcb0f5", "#86e6e3", "#eef3f8",
+]
+
+[ui]
+surface = "#0f1a24"
+surface_raised = "#17242f"
+surface_sunken = "#0a131b"
+border = "#2a3b49"
+border_focused = "#6ea8f0"
+text = "#d4dde6"
+text_muted = "#8a9bab"
+accent = "#6ea8f0"
+accent_text = "#0f1a24"
+tab_active_bg = "#1d2d3b"
+tab_inactive_bg = "#0a131b"
+warning = "#e6c06a"
+danger = "#f0707a"
+success = "#7ccf8a"
+attention = "#c490e8"

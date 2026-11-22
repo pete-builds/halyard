@@ -29,6 +29,10 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.15.2
+          # A run cancelled mid-build (cancel-in-progress) still saved a half-written Zig
+          # cache, and every later run restored it ("not an ELF file" on libc++.a). The
+          # Ghostty build takes about 25s uncached, so do not cache it.
+          use-cache: false
       - name: Linux system libraries
         if: runner.os == 'Linux'
         run: |

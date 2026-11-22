@@ -32,3 +32,13 @@ print_stdout = "warn"
 lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
+
+# libghostty-vt-sys builds Ghostty with Zig in Debug mode whenever cargo
+# reports debug info for the package (DEBUG=true), which makes the VT parser
+# far slower. Build it optimized and without debug info in every profile.
+[profile.dev.package.libghostty-vt-sys]
+opt-level = 3
+debug = false
+
+[profile.release.package.libghostty-vt-sys]
+debug = false
