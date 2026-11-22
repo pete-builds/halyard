@@ -101,6 +101,12 @@ fn a_burst_of_writes_is_debounced_into_few_events() {
         }
     }
     assert!(final_seen, "the last write (size 29) never arrived; {count} reloads seen");
+    // The last write must stay the winner: drain one debounce window after it, and any
+    // further reload must still carry size 29 (a stale, out-of-order reload is a bug).
+    while let Some(ev) = w.recv_timeout(Duration::from_millis(600)) {
+        count += 1;
+        assert!(size_is(29.0)(&ev), "a reload after the last write was stale: {ev:?}");
+    }
     // 20 writes 5 ms apart collapse into a few reloads; one reload per write would be 20.
     assert!(count <= 10, "expected far fewer reloads than writes, got {count}");
 }
