@@ -166,13 +166,11 @@ jobs:
           if-no-files-found: error
 
   checksums:
-    name: checksums and provenance
+    name: checksums
     needs: [macos, linux]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      id-token: write # sign the provenance with the workflow's OIDC identity
-      attestations: write # store the attestation
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -193,23 +191,38 @@ jobs:
           mv ../SHA256SUMS SHA256SUMS
           cat SHA256SUMS
           test "$(wc -l < SHA256SUMS)" -eq 3 || { echo "expected 3 files to sum" >&2; exit 1; }
-      - name: Build provenance
-        # Skipped on a dry run: an attestation is a permanent public record.
-        if: github.event_name == 'push'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: dist/*
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-files
           path: dist/*
           if-no-files-found: error
 
+  provenance:
+    name: provenance
+    # Only a tag push signs anything: an attestation is a permanent public record. Keeping it in
+    # its own job means pull request dry runs never hold an OIDC signing token.
+    if: github.event_name == 'push'
+    needs: checksums
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # sign the provenance with the workflow's OIDC identity
+      attestations: write # store the attestation
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-files
+          path: dist
+      - name: Build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
   publish:
     name: draft release
     # Only a tag push creates a release, and only as a draft.
     if: github.event_name == 'push'
-    needs: checksums
+    needs: [checksums, provenance]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
