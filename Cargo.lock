@@ -2394,7 +2394,9 @@ dependencies = [
  "core-graphics 0.24.0",
  "futures",
  "gpui",
+ "halyard-agents",
  "halyard-config",
+ "halyard-shell",
  "halyard-term",
  "halyard-workspace",
  "libc",
@@ -2402,6 +2404,7 @@ dependencies = [
  "png 0.18.1",
  "raw-window-handle",
  "tempfile",
+ "zbus",
 ]
 
 [[package]]

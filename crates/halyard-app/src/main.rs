@@ -12,16 +12,19 @@
 //! last window closes.
 
 mod app_state;
+mod attention_ui;
 #[cfg(feature = "debug-script")]
 mod debug_script;
 mod decide;
 mod grid;
 mod keybind;
 mod keys;
+mod notify;
 mod palette;
 mod procinfo;
 mod selection;
 mod settings;
+mod signals;
 mod view;
 mod workspace_view;
 

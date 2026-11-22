@@ -209,8 +209,16 @@ at any point, revoke it.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `notify_on_waiting` | `true` | Notify when an agent starts waiting for you. |
-| `detect` | `[]` | Extra process names to treat as agents, besides the built-in list. |
+| `notify_on_waiting` | `true` | Send a desktop notification when an agent in a pane starts waiting for you or finishes while its window is not the active one. One per change, at most one per pane every 10 s and three per 30 s. |
+| `detect` | `[]` | Extra process names to treat as agents, besides the built-in list. Compared without case against the foreground program's name. |
+
+Desktop notifications use `NSUserNotificationCenter` on macOS, which needs the app bundle
+(`Halyard.app`); a bare `cargo run` binary has no bundle identifier and says so once on
+stderr. On Linux they go to the freedesktop notification service over the session D-Bus.
+The text comes from the program in the pane, so control characters, bidi overrides,
+direction marks and zero-width characters are removed and it is capped (80 characters
+for the title, 200 for the body); on Linux `&`, `<` and `>` are also escaped. macOS shows
+nothing while Halyard is the frontmost app; the unread pill on the tab covers that case.
 
 ## Saved workspaces
 
@@ -227,7 +235,7 @@ local path (an OSC 7 report naming another host is ignored).
 
 The library layer is `crates/halyard-config`: parsing, validation, keymaps, reload. The app
 applies every key above except `window.opacity`, `window.blur`, `window.decorations`,
-`font.bold_is_bright`, `[ai]` and `[agents]` (not built yet). Edits apply to open windows
+`font.bold_is_bright` and `[ai]` (not built yet). Edits apply to open windows
 within about a second; a broken edit shows in a banner at the bottom of the window and the
 previous settings stay. `cursor_style` is used whenever the program has not asked for a
 shape of its own (a program asking for a steady block is drawn with the configured style,
