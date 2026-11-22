@@ -121,6 +121,14 @@ impl std::fmt::Debug for WorkspaceView {
     }
 }
 
+/// Split the focused pane, or say why the layout limits refuse it.
+fn split_or_notice(model: &mut Workspace, axis: Axis) -> Result<PaneId, String> {
+    if let Some(reason) = model.split_refusal() {
+        return Err(format!("split not made: {reason}"));
+    }
+    model.split(axis).ok_or_else(|| "split not made".to_owned())
+}
+
 fn is_dark(a: WindowAppearance) -> bool {
     matches!(a, WindowAppearance::Dark | WindowAppearance::VibrantDark)
 }
@@ -568,10 +576,19 @@ impl WorkspaceView {
                 let axis =
                     if action == Action::SplitRight { Axis::Horizontal } else { Axis::Vertical };
                 let inherited = self.inherited_cwd(cx);
-                if let Some(id) = self.model.split(axis) {
-                    self.spawn_pane(id, inherited, None, window, cx);
+                match split_or_notice(&mut self.model, axis) {
+                    Ok(id) => {
+                        self.spawn_pane(id, inherited, None, window, cx);
+                        self.after_change(window, cx);
+                    }
+                    Err(notice) => {
+                        if !self.local_notices.contains(&notice) {
+                            self.local_notices.push(notice);
+                        }
+                        self.banner_hidden = false;
+                        cx.notify();
+                    }
                 }
-                self.after_change(window, cx);
             }
             Action::ClosePane => self.close_focused(window, cx),
             Action::NextTab => {
@@ -1283,6 +1300,19 @@ mod tests {
         assert!(is_dark(WindowAppearance::VibrantDark));
         assert!(!is_dark(WindowAppearance::Light));
         assert!(!is_dark(WindowAppearance::VibrantLight));
+    }
+
+    #[test]
+    fn a_refused_split_becomes_a_notice() {
+        let (mut ws, _) = Workspace::new();
+        for _ in 0..halyard_workspace::persist::MAX_DEPTH {
+            assert!(split_or_notice(&mut ws, Axis::Horizontal).is_ok());
+        }
+        let panes = ws.active().root.len();
+        let notice = split_or_notice(&mut ws, Axis::Vertical).unwrap_err();
+        assert!(notice.starts_with("split not made: "), "{notice}");
+        assert!(notice.contains("deeply"), "{notice}");
+        assert_eq!(ws.active().root.len(), panes, "nothing was split");
     }
 
     #[test]
