@@ -518,10 +518,15 @@ fn htop_starts_and_quits() {
 struct RowAtOsc {
     rows: Arc<Mutex<Vec<u64>>>,
     chunks: Arc<Mutex<usize>>,
+    /// Every byte the program wrote, when set, for failure messages.
+    raw: Option<Arc<Mutex<Vec<u8>>>>,
 }
 
 impl halyard_term::OutputObserver for RowAtOsc {
     fn scan(&mut self, chunk: &[u8], marks: &mut Vec<usize>) {
+        if let Some(raw) = &self.raw {
+            raw.lock().unwrap().extend_from_slice(chunk);
+        }
         // Mark just past each `ESC ]` introducer's terminator (BEL).
         let mut in_osc = false;
         for (i, w) in chunk.windows(2).enumerate() {
@@ -542,11 +547,31 @@ impl halyard_term::OutputObserver for RowAtOsc {
     }
 }
 
-#[test]
-fn observer_sees_the_cursor_row_at_each_mark() {
+/// Every row from the top of scrollback through the bottom of the screen,
+/// numbered as marks number them, plus the raw output, for failure messages.
+fn screen_dump(s: &Session, f: &Frame, raw: &Mutex<Vec<u8>>) -> String {
+    let last = f.scroll.offset + u64::from(f.rows) - 1;
+    let mut out = String::from("rows from the top of scrollback:\n");
+    for r in 0..=last {
+        let text = s.screen_rows_text(r, r).unwrap_or_else(|| "<out of range>".into());
+        out.push_str(&format!("{r:>4} |{text}|\n"));
+    }
+    let raw = raw.lock().unwrap();
+    out.push_str(&format!("raw output: \"{}\"", String::from_utf8_lossy(&raw).escape_debug()));
+    out
+}
+
+/// Runs the two-mark scenario once. `Err` holds what went wrong and a full
+/// screen dump.
+fn mark_rows_scenario() -> Result<(), String> {
     let rows = Arc::new(Mutex::new(Vec::new()));
     let chunks = Arc::new(Mutex::new(0));
-    let observer = RowAtOsc { rows: Arc::clone(&rows), chunks: Arc::clone(&chunks) };
+    let raw = Arc::new(Mutex::new(Vec::new()));
+    let observer = RowAtOsc {
+        rows: Arc::clone(&rows),
+        chunks: Arc::clone(&chunks),
+        raw: Some(Arc::clone(&raw)),
+    };
     let s = Session::spawn(SessionConfig {
         observer: Some(Box::new(observer)),
         session_id: Some("chosen-id_1.0".into()),
@@ -560,12 +585,44 @@ fn observer_sees_the_cursor_row_at_each_mark() {
     run(&s, "printf 'm1\\033]0;x\\007\\n'; seq 1 12; printf 'm2\\033]0;y\\007\\n'; echo obs-done");
     let f = wait_for(&s, "the end", |f| (0..f.rows).any(|r| f.row_text(r) == "obs-done"));
     let rows = rows.lock().unwrap().clone();
+    let fail =
+        |what: &str| Err(format!("{what}: marks at {rows:?}\n{}", screen_dump(&s, &f, &raw)));
+    if rows.len() != 2 {
+        return fail("one row per mark");
+    }
     // The row itself, not only the distance: the second mark was on the `m2` line.
-    let m2 = (0..f.rows).find(|&r| f.row_text(r) == "m2").expect("m2 on screen");
-    assert_eq!(rows.get(1).copied(), Some(f.scroll.offset + u64::from(m2)), "{rows:?}");
-    assert_eq!(rows.len(), 2, "one row per mark: {rows:?}");
-    assert_eq!(rows[1] - rows[0], 13, "12 lines of seq plus the m1 line: {rows:?}");
+    let Some(m2) = (0..f.rows).find(|&r| f.row_text(r) == "m2") else {
+        return fail("m2 on screen");
+    };
+    if rows[1] != f.scroll.offset + u64::from(m2) {
+        return fail("the second mark is the m2 row on screen");
+    }
+    if rows[1] - rows[0] != 13 {
+        return fail("12 lines of seq plus the m1 line");
+    }
     assert!(*chunks.lock().unwrap() >= 1);
+    Ok(())
+}
+
+#[test]
+fn observer_sees_the_cursor_row_at_each_mark() {
+    if let Err(e) = mark_rows_scenario() {
+        panic!("{e}");
+    }
+}
+
+/// TEMPORARY: repeats the scenario to catch the macOS Nix flake in CI.
+#[test]
+fn tmp_mark_rows_stress() {
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(|| {
+                (0..40).filter_map(|_| mark_rows_scenario().err()).collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let errors: Vec<String> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+    assert!(errors.is_empty(), "{} of 160 runs failed; first:\n{}", errors.len(), errors[0]);
 }
 
 /// Newlines earlier in the same chunk move the cursor before the mark: the row
@@ -575,7 +632,7 @@ fn observer_sees_the_cursor_row_at_each_mark() {
 fn the_mark_row_counts_newlines_earlier_in_the_same_chunk() {
     let rows = Arc::new(Mutex::new(Vec::new()));
     let chunks = Arc::new(Mutex::new(0));
-    let observer = RowAtOsc { rows: Arc::clone(&rows), chunks: Arc::clone(&chunks) };
+    let observer = RowAtOsc { rows: Arc::clone(&rows), chunks: Arc::clone(&chunks), raw: None };
     let s = Session::spawn(SessionConfig { observer: Some(Box::new(observer)), ..config(40, 10) })
         .expect("spawn");
     wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
@@ -654,8 +711,11 @@ impl halyard_term::OutputObserver for DropWatch {
 fn rows_stay_on_their_line_when_scrollback_drops_old_rows() {
     let rows = Arc::new(Mutex::new(Vec::new()));
     let history = Arc::new(Mutex::new(None));
-    let inner =
-        RowAtOsc { rows: Arc::new(Mutex::new(Vec::new())), chunks: Arc::new(Mutex::new(0)) };
+    let inner = RowAtOsc {
+        rows: Arc::new(Mutex::new(Vec::new())),
+        chunks: Arc::new(Mutex::new(0)),
+        raw: None,
+    };
     let observer = DropWatch { rows: Arc::clone(&rows), history: Arc::clone(&history), inner };
     let s = Session::spawn(SessionConfig {
         observer: Some(Box::new(observer)),
