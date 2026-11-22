@@ -166,6 +166,40 @@ pub fn to_hsla(c: Rgb) -> Hsla {
         .into()
 }
 
+// Block rows count from the session's first row; screen rows (what the engine
+// scrolls to and reads) start after the rows dropped from the top of scrollback,
+// the monitor's `row_base`. These three convert at the view's call sites.
+
+/// The screen row a prompt jump scrolls to, from the viewport's scroll offset.
+fn prompt_scroll_row<C: halyard_shell::Clock>(
+    blocks: &halyard_shell::BlockTracker<C>,
+    scroll_offset: u64,
+    base: u64,
+    jump: Jump,
+) -> Option<u64> {
+    blocks_ui::prompt_target(blocks, scroll_offset + base, jump).map(|row| row.saturating_sub(base))
+}
+
+/// The screen rows of the last command's output, or `None` once any of them
+/// was dropped from scrollback (it cannot be copied whole).
+fn last_output_screen_rows<C: halyard_shell::Clock>(
+    blocks: &halyard_shell::BlockTracker<C>,
+    base: u64,
+) -> Option<(u64, u64)> {
+    let (first, last) = blocks_ui::last_output_rows(blocks)?;
+    Some((first.checked_sub(base)?, last.checked_sub(base)?))
+}
+
+/// Failure marks in viewport rows, from the viewport's scroll offset.
+fn viewport_failures<C: halyard_shell::Clock>(
+    blocks: &halyard_shell::BlockTracker<C>,
+    scroll_offset: u64,
+    base: u64,
+    rows: u16,
+) -> Vec<(u16, u16)> {
+    blocks_ui::failure_spans(blocks, scroll_offset + base, rows)
+}
+
 /// Where the grid sits in the window, and its size in cells.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Layout {
@@ -389,15 +423,12 @@ impl TerminalView {
         if frame.alt_screen {
             return;
         }
-        // Block rows count from the session's first row; screen rows start
-        // after the rows dropped from the top of scrollback (`row_base`).
-        let (target, base) = {
+        let target = {
             let m = signals::lock(&self.monitor);
-            let base = m.row_base();
-            (blocks_ui::prompt_target(m.blocks(), frame.scroll.offset + base, jump), base)
+            prompt_scroll_row(m.blocks(), frame.scroll.offset, m.row_base(), jump)
         };
         match (target, jump) {
-            (Some(row), _) => self.session.scroll(ScrollRequest::Row(row.saturating_sub(base))),
+            (Some(row), _) => self.session.scroll(ScrollRequest::Row(row)),
             (None, Jump::Next) => self.session.scroll(ScrollRequest::Bottom),
             (None, Jump::Previous) => {}
         }
@@ -407,14 +438,10 @@ impl TerminalView {
     /// without shell integration or once it scrolled out of the scrollback.
     #[must_use]
     pub fn last_output(&self) -> Option<String> {
-        let (first, last, base) = {
+        let (first, last) = {
             let m = signals::lock(&self.monitor);
-            let (first, last) = blocks_ui::last_output_rows(m.blocks())?;
-            (first, last, m.row_base())
+            last_output_screen_rows(m.blocks(), m.row_base())?
         };
-        // Rows already dropped from scrollback cannot be copied.
-        let first = first.checked_sub(base)?;
-        let last = last.checked_sub(base)?;
         self.session.screen_rows_text(first, last).map(|t| blocks_ui::tidy_output(&t))
     }
 
@@ -1181,7 +1208,7 @@ impl Render for TerminalView {
         let cursor_shape = settings::effective_cursor(frame.cursor.shape, self.style.cursor);
         let failures = if self.chrome.failure.is_some() && !frame.alt_screen {
             let m = signals::lock(&self.monitor);
-            blocks_ui::failure_spans(m.blocks(), frame.scroll.offset + m.row_base(), frame.rows)
+            viewport_failures(m.blocks(), frame.scroll.offset, m.row_base(), frame.rows)
         } else {
             Vec::new()
         };
@@ -1352,5 +1379,34 @@ mod tests {
         assert_eq!(px_u32(8.5), 9);
         assert_eq!(px_u32(0.0), 1);
         assert_eq!(px_u32(f32::NAN), 1);
+    }
+
+    /// Blocks at absolute rows 110, 120, 130 (prompt, output on the next row, D
+    /// two below); 100 rows have been dropped from scrollback, so screen row 0
+    /// is block row 100.
+    #[test]
+    fn row_base_converts_between_block_and_screen_rows() {
+        use halyard_shell::{BlockTracker, ShellEvent, SystemClock};
+        let mut t = BlockTracker::new(SystemClock, 100);
+        for (row, code) in [(110, 0), (120, 1), (130, 0)] {
+            t.on_event(&ShellEvent::PromptStart { aid: None }, row);
+            t.on_event(&ShellEvent::CommandInputStart, row);
+            t.on_event(&ShellEvent::CommandExecuted, row + 1);
+            t.on_event(&ShellEvent::CommandFinished { exit_code: Some(code), aid: None }, row + 2);
+        }
+        let base = 100;
+        // Viewport at screen row 25 is block row 125: the previous prompt is
+        // block row 120, screen row 20.
+        assert_eq!(prompt_scroll_row(&t, 25, base, Jump::Previous), Some(20));
+        assert_eq!(prompt_scroll_row(&t, 25, base, Jump::Next), Some(30));
+        assert_eq!(prompt_scroll_row(&t, 10, base, Jump::Previous), None);
+        // Last output: block row 131 is screen row 31.
+        assert_eq!(last_output_screen_rows(&t, base), Some((31, 31)));
+        // Dropped from scrollback: nothing to copy rather than other text.
+        assert_eq!(last_output_screen_rows(&t, 132), None);
+        // The failed block (rows 120..=121) in a viewport at screen row 15,
+        // block row 115: viewport rows 5 and 6.
+        assert_eq!(viewport_failures(&t, 15, base, 10), vec![(5, 6)]);
+        assert_eq!(viewport_failures(&t, 22, base, 10), Vec::<(u16, u16)>::new());
     }
 }
