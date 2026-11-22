@@ -106,6 +106,6 @@
       homeManagerModules.default = import ./nix/hm-module.nix self;
       homeModules.default = self.homeManagerModules.default;
       nixosModules.default = import ./nix/nixos-module.nix self;
-      legacyPackages.x86_64-linux.vmTests.nixos-vm = import ./nix/vm-test.nix { pkgs = nixpkgs.legacyPackages.x86_64-linux; };
+      legacyPackages.x86_64-linux.vmTests.nixos-vm = import ./nix/vm-test.nix { pkgs = nixpkgs.legacyPackages.x86_64-linux; halyard = self.packages.x86_64-linux.halyard; };
     };
 }

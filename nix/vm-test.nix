@@ -1,72 +1,71 @@
-# NixOS VM test: a GPUI window must render inside a VM, under Wayland (cage)
-# and under X11 (IceWM), with software Vulkan (Mesa lavapipe). Checked by OCR
-# on a screenshot, so a window that opens but draws nothing fails.
+# NixOS VM test: the real Halyard app, driven through QEMU's virtual keyboard
+# under Wayland (cage) and X11 (IceWM), on Mesa software rendering.
 #
-# Until the app crate lands, the window is a stand-in (vm-test/probe) that
-# draws a fixed marker string. Kept out of `checks` so `nix flake check`
-# stays fast and needs no KVM. Run on an x86_64 Linux host with KVM:
+# Every step is proven two ways: the shell inside Halyard writes a file the
+# test reads back (so keystrokes really reached the PTY), and OCR on a
+# screenshot shows the result was drawn (so the window renders).
+#
+# Kept out of `checks` so `nix flake check` stays fast and needs no KVM.
+# Run on an x86_64 Linux host with KVM:
 #   nix build -L .#vmTests.nixos-vm
 # Screenshots land in ./result. See docs/testing.md.
-{ pkgs }:
+{ pkgs, halyard }:
 let
   inherit (pkgs) lib;
-
-  marker = "HALYARD-VM-OK";
-
-  # Libraries GPUI dlopens at runtime (same list as nix/default.nix).
-  runtimeLibs = with pkgs; [
-    vulkan-loader
-    wayland
-    libxkbcommon
-    fontconfig
-    freetype
-    (pkgs.libx11 or pkgs.xorg.libX11)
-    (pkgs.libxcb or pkgs.xorg.libxcb)
-    (pkgs.libxcursor or pkgs.xorg.libXcursor)
-    (pkgs.libxi or pkgs.xorg.libXi)
-    (pkgs.libxrandr or pkgs.xorg.libXrandr)
-  ];
-
-  probe = pkgs.rustPlatform.buildRustPackage {
-    pname = "halyard-vm-probe";
-    version = "0.0.0";
-    src = lib.fileset.toSource {
-      root = ../.;
-      fileset = lib.fileset.unions [
-        ./vm-test/probe/Cargo.toml
-        ./vm-test/probe/Cargo.lock
-        ./vm-test/probe/src
-        ../vendor
-      ];
-    };
-    cargoRoot = "nix/vm-test/probe";
-    buildAndTestSubdir = "nix/vm-test/probe";
-    cargoLock.lockFile = ./vm-test/probe/Cargo.lock;
-    nativeBuildInputs = [
-      pkgs.pkg-config
-      pkgs.patchelf
-    ];
-    buildInputs = runtimeLibs;
-    doCheck = false;
-    postFixup = ''
-      patchelf --add-rpath "${lib.makeLibraryPath runtimeLibs}" "$out/bin/halyard-vm-probe"
-    '';
-    meta.mainProgram = "halyard-vm-probe";
-  };
-
-  probeExe = lib.getExe probe;
+  exe = lib.getExe halyard;
 
   common = {
     # Mesa, which carries lavapipe (software Vulkan) for a VM with no GPU.
     hardware.graphics.enable = true;
     environment.systemPackages = [
-      probe
-      pkgs.vulkan-tools
+      halyard
+      pkgs.vim
     ];
     fonts.enableDefaultPackages = true;
     virtualisation.memorySize = 2048;
     virtualisation.cores = 2;
   };
+
+  # One shared script for both sessions. `m` is the machine, `tag` names the
+  # files and screenshots, `copy_cmd` puts text on that session's clipboard.
+  steps = ''
+    def drive(m, tag, copy_cmd):
+        home = "/home/alice"
+
+        def run(line):
+            m.send_chars(line + "\n")
+
+        with subtest(f"{tag}: typing reaches the shell and is drawn"):
+            run(f"echo halyard-ok-{tag} > {home}/typed")
+            m.wait_until_succeeds(f"grep -qx halyard-ok-{tag} {home}/typed", timeout=timedelta(seconds=60))
+            run("echo HALYARD-RENDER-CHECK")
+            m.wait_for_text("HALYARD-RENDER-CHECK", timeout=timedelta(seconds=120))
+            m.screenshot(f"{tag}-1-typed")
+
+        with subtest(f"{tag}: vim edits and saves a file"):
+            run(f"vim {home}/fromvim.txt")
+            m.sleep(2)
+            m.screenshot(f"{tag}-2-vim")
+            m.send_chars("ihello-from-vim")
+            m.send_key("esc")
+            m.send_chars(":wq\n")
+            m.wait_until_succeeds(f"grep -qx hello-from-vim {home}/fromvim.txt", timeout=timedelta(seconds=60))
+
+        with subtest(f"{tag}: Ctrl+C interrupts the foreground job"):
+            run(f"sleep 60; touch {home}/not-interrupted")
+            m.sleep(2)
+            m.send_key("ctrl-c")
+            run(f"echo $? > {home}/rc")
+            m.wait_until_succeeds(f"grep -qx 130 {home}/rc", timeout=timedelta(seconds=60))
+            m.fail(f"test -e {home}/not-interrupted")
+
+        with subtest(f"{tag}: paste from the session clipboard with Ctrl+Shift+V"):
+            m.succeed(copy_cmd(f"echo pasted-ok-{tag} > {home}/pasted"))
+            m.send_key("ctrl-shift-v")
+            m.send_key("ret")
+            m.wait_until_succeeds(f"grep -qx pasted-ok-{tag} {home}/pasted", timeout=timedelta(seconds=60))
+            m.screenshot(f"{tag}-3-after-paste")
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "halyard-vm";
@@ -81,11 +80,12 @@ pkgs.testers.runNixOSTest {
           isNormalUser = true;
           uid = 1000;
         };
+        environment.systemPackages = [ pkgs.wl-clipboard ];
         services.cage = {
           enable = true;
           user = "alice";
-          program = "${pkgs.writeShellScript "probe-logged" ''
-            exec ${probeExe} 2>/tmp/probe.log
+          program = "${pkgs.writeShellScript "halyard-logged" ''
+            exec ${exe} 2>/tmp/halyard.log
           ''}";
         };
         # cage needs a KMS device; the default -vga std has none.
@@ -101,32 +101,59 @@ pkgs.testers.runNixOSTest {
           "${pkgs.path}/nixos/tests/common/user-account.nix"
         ];
         test-support.displayManager.auto.user = "alice";
+        environment.systemPackages = [
+          pkgs.xclip
+          pkgs.xdotool
+        ];
       };
   };
 
   testScript = ''
     from datetime import timedelta
+    import shlex
 
     start_all()
+    ${steps}
 
-    with subtest("Wayland: GPUI window renders under cage"):
+    def as_alice(env, cmd):
+        return f"su - alice -c {shlex.quote(env + ' ' + cmd)}"
+
+    try:
         wayland.wait_for_unit("graphical.target")
-        wayland.wait_until_succeeds("pgrep -f halyard-vm-probe", timeout=timedelta(seconds=120))
-        try:
-            wayland.wait_for_text("${marker}", timeout=timedelta(seconds=180))
-        finally:
-            wayland.screenshot("wayland")
-            print(wayland.execute("cat /tmp/probe.log")[1])
+        wayland.wait_until_succeeds("pgrep -x halyard", timeout=timedelta(seconds=120))
+        wayland.wait_for_text("alice", timeout=timedelta(seconds=180))
+        drive(
+            wayland,
+            "wayland",
+            lambda text: as_alice(
+                "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0",
+                f"wl-copy {shlex.quote(text)}",
+            ),
+        )
+    finally:
+        wayland.screenshot("wayland-final")
+        print(wayland.execute("cat /tmp/halyard.log")[1])
 
-    with subtest("X11: GPUI window renders under IceWM"):
+    try:
         x11.wait_for_x()
         x11.wait_for_file("/home/alice/.Xauthority")
-        x11.succeed("su - alice -c 'DISPLAY=:0 ${probeExe} >/tmp/probe.log 2>&1 &'")
-        x11.wait_until_succeeds("pgrep -f halyard-vm-probe", timeout=timedelta(seconds=120))
-        try:
-            x11.wait_for_text("${marker}", timeout=timedelta(seconds=180))
-        finally:
-            x11.screenshot("x11")
-            print(x11.execute("cat /tmp/probe.log")[1])
+        x11.succeed(as_alice("DISPLAY=:0", "${exe} >/tmp/halyard.log 2>&1 &"))
+        x11.wait_until_succeeds("pgrep -x halyard", timeout=timedelta(seconds=120))
+        x11.wait_until_succeeds(
+            as_alice("DISPLAY=:0", "xdotool search --name alice windowactivate --sync"),
+            timeout=timedelta(seconds=120),
+        )
+        x11.wait_for_text("alice", timeout=timedelta(seconds=180))
+        drive(
+            x11,
+            "x11",
+            lambda text: as_alice(
+                "DISPLAY=:0",
+                f"printf %s {shlex.quote(text)} | xclip -selection clipboard -loops 1 >/dev/null 2>&1 &",
+            ),
+        )
+    finally:
+        x11.screenshot("x11-final")
+        print(x11.execute("cat /tmp/halyard.log")[1])
   '';
 }
