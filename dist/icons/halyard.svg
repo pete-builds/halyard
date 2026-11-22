@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Halyard</title>
+  <!-- Original artwork for Halyard, MIT OR Apache-2.0. A mast with its halyard
+       line and a pennant run up to the masthead, over a prompt cursor. -->
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="#13233f"/>
+  <path d="M84 50 Q58 128 80 206" fill="none" stroke="#7f95b8" stroke-width="5" stroke-linecap="round"/>
+  <line x1="96" y1="42" x2="96" y2="210" stroke="#eef2f8" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="96" cy="42" r="9" fill="#eef2f8"/>
+  <path d="M104 54 L198 80 L104 106 Z" fill="#f2a33a"/>
+  <rect x="128" y="182" width="58" height="13" rx="6.5" fill="#f2a33a"/>
+</svg>
