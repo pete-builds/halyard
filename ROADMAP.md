@@ -80,12 +80,15 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       `workspace_view.rs`: tab bar (new, close, rename by double click, reorder by drag or
       `move_tab_*`, title from the focused pane), dividers dragged with the mouse (minimum pane
       size), inactive panes dimmed and the focused one outlined from theme tokens, hollow
-      cursor when unfocused, every keymap action wired, close confirmation for running
-      commands (`foreground_job_is_detected_through_a_pty`). Verified on macOS arm64 by
+      cursor when unfocused, every keymap action wired. With `confirm_close_running`, these
+      ask before ending a command that is not the shell (`foreground_job_is_detected_through_a_pty`):
+      `close_pane`, a tab's ×, the window's close button, and Quit (menu or chord); verified by
+      debug script (an idle tab or window closes, a busy one stays with the prompt). A shell
+      that exits closes its pane without asking. Verified on macOS arm64 by
       debug script with real mouse events: screenshots of tabs, a 3-pane split, a dragged
       divider, a dragged tab, 9 panes. Not verified: vertical tabs (not built, follow-up),
       Linux windows, the outline on the focused pane in an active window (scripted windows
-      are never active), the close prompt (a native dialog a script cannot answer).
+      are never active), answering the close prompt (a native dialog a script cannot click).
 - [x] TOML config and token-based themes, bundled themes (library: `crates/halyard-config`, tests named in docs/themes.md)
 - [x] Settings wired into the app with live reload: font family, size and line height,
       padding, cursor style and blink, scrollback, shell and arguments, working directory,

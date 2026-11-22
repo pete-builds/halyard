@@ -53,6 +53,42 @@ fn initial_size(cx: &App) -> gpui::Size<gpui::Pixels> {
     size(px(width.clamp(320.0, 3000.0)), px(height.clamp(200.0, 2000.0)))
 }
 
+/// Quit, asking first when any window is running a command.
+pub fn request_quit(cx: &mut App) {
+    let busy: Vec<_> = cx
+        .windows()
+        .into_iter()
+        .filter_map(|w| w.downcast::<WorkspaceView>())
+        .filter(|h| h.read(cx).is_ok_and(|view| view.busy(cx)))
+        .collect();
+    let Some(first) = busy.first().copied() else {
+        cx.quit();
+        return;
+    };
+    let detail = if busy.len() == 1 {
+        "A command is still running in one window, and quitting will end it.".to_owned()
+    } else {
+        format!("Commands are still running in {} windows, and quitting will end them.", busy.len())
+    };
+    first
+        .update(cx, |_, window, cx| {
+            let answer = window.prompt(
+                gpui::PromptLevel::Warning,
+                "Quit Halyard?",
+                Some(&detail),
+                &["Quit", "Cancel"],
+                cx,
+            );
+            cx.spawn(async move |_, cx| {
+                if answer.await == Ok(0) {
+                    cx.update(|cx| cx.quit()).ok();
+                }
+            })
+            .detach();
+        })
+        .ok();
+}
+
 /// Open a window with a restored layout, or a fresh one with `None`.
 pub fn open_window(restored: Option<Restored>, cx: &mut App) {
     let restored = restored.unwrap_or_else(|| {
@@ -89,7 +125,7 @@ pub fn open_window(restored: Option<Restored>, cx: &mut App) {
 fn main() {
     Application::new().run(|cx: &mut App| {
         AppState::init(cx);
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Quit, cx| request_quit(cx));
         cx.on_action(|_: &NewWindow, cx| open_window(None, cx));
         cx.set_menus(vec![
             Menu {

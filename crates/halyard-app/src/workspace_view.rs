@@ -183,6 +183,12 @@ impl WorkspaceView {
         view.refresh_chrome(window, cx);
         view.focus_active_pane(window, cx);
         view.update_title(window, cx);
+        // The close button asks first when a command is running anywhere in
+        // the window, like `close_pane` does for one pane.
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |view, cx| view.should_close(window, cx)).unwrap_or(true)
+        });
         #[cfg(feature = "debug-script")]
         if !cx.global::<AppState>().script_started {
             cx.global_mut::<AppState>().script_started = true;
@@ -430,29 +436,79 @@ impl WorkspaceView {
         }
     }
 
-    /// Close the focused pane, asking first if a command is running in it.
-    fn close_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.model.focused() else { return };
+    /// Whether closing these panes would end a running command (and the
+    /// config asks to confirm that).
+    fn any_busy(&self, ids: &[PaneId], cx: &App) -> bool {
         let setting = self.settings(cx).config.terminal.confirm_close_running;
-        let busy =
-            self.panes.get(&id).is_some_and(|p| p.view.read(cx).needs_close_confirmation(setting));
-        if !busy {
-            self.close_pane(id, window, cx);
+        ids.iter().any(|id| {
+            self.panes.get(id).is_some_and(|p| p.view.read(cx).needs_close_confirmation(setting))
+        })
+    }
+
+    /// Whether any pane of this window is running a command.
+    pub fn busy(&self, cx: &App) -> bool {
+        self.any_busy(&self.model.all_panes(), cx)
+    }
+
+    /// Close `ids`, asking first if a command is running in any of them.
+    fn close_panes_confirmed(
+        &mut self,
+        ids: Vec<PaneId>,
+        what: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.any_busy(&ids, cx) {
+            for id in ids {
+                self.close_pane(id, window, cx);
+            }
             return;
         }
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            "Close this pane?",
-            Some("A command is still running in it, and closing the pane will end it."),
+            &format!("Close this {what}?"),
+            Some("A command is still running in it, and closing will end it."),
             &["Close", "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
             if answer.await == Ok(0) {
-                this.update_in(cx, |this, window, cx| this.close_pane(id, window, cx)).ok();
+                this.update_in(cx, |this, window, cx| {
+                    for id in ids {
+                        this.close_pane(id, window, cx);
+                    }
+                })
+                .ok();
             }
         })
         .detach();
+    }
+
+    /// Close the focused pane, asking first if a command is running in it.
+    fn close_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = self.model.focused() else { return };
+        self.close_panes_confirmed(vec![id], "pane", window, cx);
+    }
+
+    /// The close button: close at once when idle, else ask.
+    fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.busy(cx) {
+            return true;
+        }
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            "Close this window?",
+            Some("A command is still running in it, and closing will end it."),
+            &["Close", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |_, cx| {
+            if answer.await == Ok(0) {
+                cx.update(|window, _| window.remove_window()).ok();
+            }
+        })
+        .detach();
+        false
     }
 
     fn inherited_cwd(&self, cx: &App) -> Option<PathBuf> {
@@ -565,7 +621,9 @@ impl WorkspaceView {
                 }
             }
             Action::NewWindow => crate::open_window(None, cx),
-            Action::Quit => cx.quit(),
+            // Deferred: this window is mid-update here, so the busy check
+            // could not read it.
+            Action::Quit => cx.defer(crate::request_quit),
             // Copy and paste belong to the focused pane; these arrive here
             // only when no pane has focus (the palette is open).
             Action::Paste => {
@@ -624,14 +682,29 @@ impl WorkspaceView {
     ) {
         let focus = cx.focus_handle();
         window.focus(&focus);
+        self.end_preview_unless(Some(&model.mode), window, cx);
         self.palette = Some(PaletteUi { model, commands, focus });
         cx.notify();
     }
 
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
+        self.end_preview_unless(None, window, cx);
         self.focus_active_pane(window, cx);
         cx.notify();
+    }
+
+    /// Drop a theme preview unless the palette now showing is the theme
+    /// picker, whatever path replaced or closed it.
+    fn end_preview_unless(
+        &mut self,
+        next: Option<&Mode>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !palette::preview_survives(next) && self.preview_theme.take().is_some() {
+            self.apply_settings(window, cx);
+        }
     }
 
     /// Live theme preview while moving through the theme picker.
@@ -695,6 +768,13 @@ impl WorkspaceView {
                 self.focus_active_pane(window, cx);
                 match picked.and_then(|i| p.commands.get(i).copied()) {
                     Some(Command::SwitchTheme) => self.open_themes(window, cx),
+                    Some(Command::Run(a)) if palette::runs_in_pane(a) => {
+                        // Copy and paste belong to the pane, which has focus
+                        // again; dispatch once this update is over.
+                        if let Some(action) = keybind::gpui_action(a) {
+                            window.defer(cx, move |window, cx| window.dispatch_action(action, cx));
+                        }
+                    }
                     Some(Command::Run(a)) => self.run(a, window, cx),
                     None => {}
                 }
@@ -834,9 +914,8 @@ impl WorkspaceView {
     /// Close every pane of a tab (the tab's × button).
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.model.tabs().get(index) else { return };
-        for id in tab.root.panes() {
-            self.close_pane(id, window, cx);
-        }
+        let ids = tab.root.panes();
+        self.close_panes_confirmed(ids, "tab", window, cx);
     }
 
     fn render_panes(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {

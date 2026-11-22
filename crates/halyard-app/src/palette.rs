@@ -98,6 +98,20 @@ pub fn commands() -> Vec<(Command, &'static str)> {
     v
 }
 
+/// Whether an action from the palette goes to the focused pane (it is
+/// handled there, not by the window) once the palette closes.
+#[must_use]
+pub fn runs_in_pane(a: Action) -> bool {
+    matches!(a, Action::Copy | Action::Paste)
+}
+
+/// Whether a theme preview may stay on screen when `next` is the palette
+/// now showing (`None`: no palette). Only the theme picker keeps it.
+#[must_use]
+pub fn preview_survives(next: Option<&Mode>) -> bool {
+    matches!(next, Some(Mode::Themes { .. }))
+}
+
 /// What the palette is doing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -230,6 +244,34 @@ mod tests {
         assert_eq!(filter("pd", &items)[0], 1);
         let items = labels(&["Paste", "Previous Tab", "Close Pane"]);
         assert_eq!(filter("pa", &items)[0], 0, "consecutive prefix beats scattered");
+    }
+
+    #[test]
+    fn consecutive_matches_rank_higher() {
+        // Same word-start status and the same total gap; only the run differs.
+        let items = labels(&["xaxby", "xxaby"]);
+        assert_eq!(filter("ab", &items), vec![1, 0]);
+    }
+
+    #[test]
+    fn previews_end_with_the_theme_picker() {
+        assert!(preview_survives(Some(&Mode::Themes { previous: None })));
+        assert!(!preview_survives(Some(&Mode::Commands)), "replaced by the command list");
+        assert!(!preview_survives(Some(&Mode::Rename { tab: 0 })));
+        assert!(!preview_survives(None), "closed");
+    }
+
+    #[test]
+    fn copy_and_paste_run_in_the_pane() {
+        assert!(runs_in_pane(Action::Copy));
+        assert!(runs_in_pane(Action::Paste));
+        assert!(!runs_in_pane(Action::SplitRight));
+        // Every other palette command is handled by the window's `run`.
+        for (c, _) in commands() {
+            if let Command::Run(a) = c {
+                assert_eq!(runs_in_pane(a), matches!(a, Action::Copy | Action::Paste));
+            }
+        }
     }
 
     #[test]
