@@ -1,7 +1,7 @@
 # Roadmap
 
 Living status. Every feature PR updates this file. "Done" means tested, and the test is
-named; untested platforms are listed as such.
+named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs/PRODUCT.md).
 
 ## Phase 0: architecture and feasibility
 
@@ -10,9 +10,8 @@ named; untested platforms are listed as such.
 - [x] Spike: `libghostty-vt` 0.2.2 builds on macOS arm64 with Zig 0.15.2 (fails on 0.17.1)
 - [x] Spike: GPUI 0.2.2 builds on macOS arm64 with Command Line Tools only (`runtime_shaders`)
 - [x] CI: fmt, clippy, test on macOS and Ubuntu; cargo-deny
-- [ ] Nix flake with dev shell and `nix build`
 
-## Phase 1: an excellent basic terminal
+## Phase 1: a fully functional terminal on macOS and NixOS
 
 - [x] PTY sessions running the user's login shell (`halyard-term::Session`; tests
       `default_program_is_a_login_shell`, `shell_echo_reaches_the_screen`,
@@ -45,12 +44,20 @@ named; untested platforms are listed as such.
 - Known gaps in the session layer: underline style (double, curly) and underline color are
   reduced to a single underline flag; Kitty graphics are not rendered; Option-as-Alt on
   macOS is off by default and only configurable through `SessionConfig::option_as_alt`.
+- [ ] `flake.nix`: `nix develop`, `nix build`, `nix run`, offline build (Ghostty source and
+      Zig packages pinned as inputs)
+- [ ] NixOS VM test: launches under Wayland and X11, screenshots
+- [ ] Desktop entry, icon, macOS app bundle
+- [ ] Real-hardware runs: macOS arm64 (cypher), NixOS on a real GPU (pending)
 
-## Phase 2: workspace and theming
+## Phase 2: modern UI
 
-- [ ] Tabs, split panes, keyboard pane navigation, resizing
+- [ ] Tabs, draggable split panes, keyboard pane navigation and resizing
 - [ ] TOML config and token-based themes, bundled themes
+- [ ] Settings wired into the app with live reload
 - [ ] Command palette
+- [ ] Persistent workspaces (layouts, cwd, names) restored on launch
+- [ ] Home Manager module: themes, fonts, keybindings, settings
 
 ## Phase 3: modern shell experience
 
@@ -58,11 +65,13 @@ named; untested platforms are listed as such.
 - [ ] Command blocks: navigate, copy output, rerun
 - [ ] SQLite history and search
 
-## Phase 4: agent workspace
+## Phase 4: agent awareness and the open protocol
 
-- [ ] Agent detection and attention states from observable signals
-- [ ] `HALYARD_SESSION_ID` and the session notification protocol
-- [ ] Agent dashboard with jump-to-pane
+- [ ] Agent detection (Claude Code, Codex, OpenCode, Gemini CLI) and attention states
+- [ ] Session protocol over escape sequences (`HALYARD_SESSION_ID`)
+- [ ] Local session API: authenticated socket, scoped capabilities, user approval for
+      anything that writes to a pane
+- [ ] Agent dashboard with jump-to-pane and notifications
 
 ## Phase 5: optional assistant and MCP
 
@@ -71,4 +80,6 @@ named; untested platforms are listed as such.
 
 ## Phase 6: production readiness
 
-- [ ] Threat model, benchmarks, packaging (macOS bundle, Nix package), release automation
+- [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane
+- [ ] Threat model, security review
+- [ ] Release automation (macOS bundle, Nix package)
