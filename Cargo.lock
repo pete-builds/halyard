@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "halyard-agents"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "halyard-shell",
  "libc",
@@ -2389,7 +2389,7 @@ dependencies = [
 
 [[package]]
 name = "halyard-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "core-graphics 0.24.0",
  "futures",
@@ -2411,7 +2411,7 @@ dependencies = [
 
 [[package]]
 name = "halyard-config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "halyard-term",
  "libc",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "halyard-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "getrandom 0.4.3",
  "libc",
@@ -2435,14 +2435,14 @@ dependencies = [
 
 [[package]]
 name = "halyard-shell"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "portable-pty",
 ]
 
 [[package]]
 name = "halyard-term"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "halyard-workspace"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde",

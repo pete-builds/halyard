@@ -291,7 +291,7 @@ server picks the highest it shares (today, 1).
 > {"jsonrpc": "2.0", "id": 1, "method": "halyard.hello",
    "params": {"protocols": [1], "client_name": "my-tool"}}
 < {"jsonrpc": "2.0", "id": 1, "result": {"protocol": 1, "server": "halyard",
-   "server_version": "0.1.0",
+   "server_version": "0.1.1",
    "limits": {"max_message_bytes": 65536, "rate_per_sec": 32, "rate_burst": 64}}}
 ```
 

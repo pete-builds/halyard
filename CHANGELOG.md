@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.1 (2026-11-22): first published preview
+
+The `v0.1.0` tag exists but produced no release: its release run built every package and
+then stopped, because the build jobs staged their files in a folder that also holds the
+repo's desktop entry and icons. Nothing from it was published. 0.1.1 is the same code as
+0.1.0 with that fixed, and is the first release with downloads.
+
+- Release workflow: build files are staged outside the checkout, the checksum step refuses
+  anything that is not a plain file, and pull requests that touch the release path run the
+  whole workflow as a dry run.
+- Tests: a cursor-row check that a shell warning in the macOS Nix build could shift no longer
+  flakes. No change to the app itself.
+
 ## 0.1.0 (2026-11-22): first preview
 
 The first public preview. Halyard runs as a usable terminal on macOS and on Linux (NixOS,
