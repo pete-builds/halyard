@@ -103,6 +103,18 @@ fn shell_echo_reaches_the_screen() {
 }
 
 #[test]
+fn missing_home_starts_the_shell_in_root() {
+    // A HOME that does not exist (containers, service accounts, the Nix build
+    // sandbox) used to make the spawn fail with "No such file or directory".
+    let mut cfg = config(80, 24);
+    cfg.env.push(("HOME".to_owned(), "/nonexistent/halyard-home".to_owned()));
+    let s = Session::spawn(cfg).expect("spawn with a missing HOME");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    run(&s, "echo cwd:$(pwd)");
+    wait_for(&s, "the shell's cwd", |f| row_equal(f, "cwd:/").is_some());
+}
+
+#[test]
 fn default_program_is_a_login_shell() {
     // No program: the user's shell from $SHELL or passwd, run as a login
     // shell (argv[0] starts with '-'). Its prompt is whatever the user has.

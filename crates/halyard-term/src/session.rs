@@ -313,9 +313,6 @@ fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
         cmd.env("SHELL", default_shell());
         cmd
     };
-    if let Some(cwd) = &config.cwd {
-        cmd.cwd(cwd);
-    }
     for (key, _) in std::env::vars_os() {
         if key.to_str().is_some_and(is_foreign_terminal_var) {
             cmd.env_remove(key);
@@ -331,6 +328,18 @@ fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
     cmd.env("HALYARD_SESSION_ID", session_id);
     for (k, v) in &config.env {
         cmd.env(OsString::from(k), OsString::from(v));
+    }
+    if let Some(cwd) = &config.cwd {
+        cmd.cwd(cwd);
+    } else if let Some(home) = cmd.get_env("HOME").filter(|h| !Path::new(h).is_dir()) {
+        // Without a cwd, portable-pty starts the child in $HOME and the spawn fails
+        // outright when that directory does not exist (containers, service accounts,
+        // build sandboxes). A shell in "/" is better than no shell.
+        eprintln!(
+            "halyard-term: HOME ({}) is not a directory; starting in /",
+            Path::new(home).display()
+        );
+        cmd.cwd("/");
     }
     cmd
 }
