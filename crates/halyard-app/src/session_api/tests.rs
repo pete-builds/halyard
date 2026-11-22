@@ -72,6 +72,8 @@ struct Harness {
     ui: Arc<FakeUi>,
     socket: PathBuf,
     panes: Vec<(Arc<Session>, SharedMonitor)>,
+    /// Each pane's token, as its environment holds it.
+    tokens: Vec<String>,
 }
 
 fn start() -> Harness {
@@ -97,7 +99,7 @@ fn start() -> Harness {
     let ui = Arc::new(FakeUi::default());
     ui.run(rx);
     let api = PaneApi::new(socket.clone(), registry, slot, publisher, events);
-    Harness { _tmp: tmp, api, ui, socket, panes: Vec::new() }
+    Harness { _tmp: tmp, api, ui, socket, panes: Vec::new(), tokens: Vec::new() }
 }
 
 impl Harness {
@@ -121,6 +123,7 @@ impl Harness {
         );
         assert!(self.api.register(&session, &monitor, &creds.token));
         self.panes.push((Arc::clone(&session), Arc::clone(&monitor)));
+        self.tokens.push(creds.token.as_str().to_owned());
         (id, session, monitor)
     }
 
@@ -211,22 +214,10 @@ fn attach_from_outside_the_pane_is_rejected_by_ancestry() {
     let mut h = start();
     let (id, _session, monitor) = h.pane();
     assert!(h.api.registry.get(&id).is_some(), "registered");
-    // Ask the shell for its token: the test then holds the right id and token,
-    // and only the ancestry check stands between it and the pane.
-    let session = Arc::clone(&h.panes[0].0);
-    session.write("printf 'TOKEN=%s=\\n' \"$HALYARD_SESSION_TOKEN\"\n");
-    let mut token = String::new();
-    wait_for("the token on screen", || {
-        let text = session.latest_frame().text();
-        token = text
-            .lines()
-            .filter_map(|l| l.strip_prefix("TOKEN="))
-            .filter_map(|r| r.strip_suffix('='))
-            .find(|t| t.starts_with("hlys_"))
-            .unwrap_or_default()
-            .to_owned();
-        !token.is_empty()
-    });
+    // The test holds the pane's real id and token (what its environment has), so
+    // only the ancestry check stands between it and the pane.
+    let token = h.tokens[0].clone();
+    assert!(token.starts_with("hlys_"));
     let mut c = h.client();
     let r = c.call("session.attach", json!({ "session_id": id, "token": token }));
     assert_eq!(rpc_code(r), code::NOT_IN_SESSION);
