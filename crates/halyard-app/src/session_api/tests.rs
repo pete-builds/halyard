@@ -260,13 +260,15 @@ fn send_text_with_a_newline_needs_approval() {
         assert_eq!(seen[1].session.id, id);
         assert_eq!(seen[1].client_name, "test-tool");
     }
-    // The shell ran only the approved line (the quotes keep the echo's output
-    // apart from the typed command).
-    wait_for("the approved output", || session.latest_frame().text().contains("\napproved"));
+    // Only the approved text reached the pane. Whether its newline runs it
+    // depends on the shell: with bracketed paste on (bash 5 as `sh` on Arch)
+    // it waits in the line editor for the user's Enter; without (macOS `sh`,
+    // dash) it runs. Either way the typed text is on screen, the denied never.
+    wait_for("the approved text", || session.latest_frame().text().contains("echo app''roved"));
     let screen = c.call("session.read_screen", json!({ "session_id": id })).expect("read");
     let text = screen["text"].as_str().unwrap_or_default();
-    assert!(text.contains("approved"), "{text}");
-    assert!(!text.contains("\ndenied"), "{text}");
+    assert!(text.contains("echo app''roved"), "{text}");
+    assert!(!text.contains("den''ied"), "{text}");
 }
 
 /// The rule from `docs/session-api.md`: only the user's own keys in the pane
