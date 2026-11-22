@@ -15,6 +15,7 @@ Everything lives in `packaging/flatpak/`:
 | `ghostty-sources.json` | Ghostty and its Zig packages, generated |
 | `update-cargo-sources.sh`, `update-ghostty-sources.py` | Regenerate the two lists |
 | `check-sources.py` | CI check that the lists match `Cargo.lock` and the Ghostty pin |
+| `test_check_sources.py` | Controls: hand edits `check-sources.py` must catch |
 | `smoke-test.sh` | Checks the built binary's libraries without a display |
 | `check-permissions.sh` | CI check that the installed bundle has exactly the documented permissions |
 
@@ -94,12 +95,17 @@ A terminal whose shell runs inside the sandbox is not useful: it would see the r
 programs, not yours. So, as other Flatpak terminals do, Halyard asks Flatpak to start the
 shell on the host.
 
-When Halyard finds it runs inside Flatpak (`/.flatpak-info` exists, or `FLATPAK_ID` is set
-and not empty), every pane's program becomes:
+When Halyard finds `/.flatpak-info` (the file Flatpak puts at the root of every sandbox),
+every pane's program becomes:
 
 ```
-flatpak-spawn --host --watch-bus --directory=<cwd> --env=TERM=... --env=HALYARD_SESSION_ID=... <program>
+/bin/sh -c '<open the env file as fd 3, delete it, exec the rest>' halyard-env <env file> \
+  flatpak-spawn --host --watch-bus --env-fd=3 --directory=<cwd> [--unset-env=NAME ...] <program>
 ```
+
+`FLATPAK_ID` alone does not count: it leaks into host shells started from Flatpak apps (an
+IDE's terminal, for example), and a native Halyard started from one must keep running its
+panes itself.
 
 - The program is your login shell, `$SHELL -l`. If the sandbox does not know `$SHELL`
   (or it is not an absolute path), the host is asked for its own:
@@ -107,9 +113,17 @@ flatpak-spawn --host --watch-bus --directory=<cwd> --env=TERM=... --env=HALYARD_
   same way, with its arguments.
 - `--directory` is the pane's working directory, or `$HOME`.
 - `flatpak-spawn` does not forward the sandbox's environment: the host process starts from
-  your session's environment, plus every variable Halyard sets for a pane (`TERM`,
-  `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `HALYARD_SESSION_ID` and any
-  configured extras), each passed once with `--env`, and `SHELL`.
+  your session's environment plus exactly the variables Halyard sets for a pane (`TERM`,
+  `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `HALYARD_SESSION_ID`, any configured
+  extras, `SHELL`, and `LANG=C.UTF-8` when no locale is set, as for a native pane), each
+  once. Variables a pane removes become `--unset-env`.
+- **No variable value is ever on a command line.** Any local user can read a process's
+  arguments in `/proc/<pid>/cmdline`, while its environment is owner-only. Halyard writes
+  the variables to a mode 0600 file in `$XDG_RUNTIME_DIR` (private to the sandbox), and the
+  small `/bin/sh` step opens it as descriptor 3, deletes it, and runs `flatpak-spawn
+  --env-fd=3`. The `/bin/sh` step is needed because portable-pty closes every descriptor
+  above 2 before it starts the program. If the program never starts, Halyard deletes the
+  file itself.
 - `--watch-bus` makes Flatpak's session helper send SIGINT to the host process group when
   Halyard's side of the bus goes away (a crash, for example).
 - Every option uses the `--name=value` form and comes before the program: `flatpak-spawn`
@@ -122,7 +136,12 @@ kernel's hangup on a closed PTY work as they do in a native install.
 
 The decision is a pure function, `halyard_term::flatpak::host_launch`, with unit tests in
 `crates/halyard-term/src/flatpak.rs` and `session.rs` (`inside_flatpak_*`,
-`outside_flatpak_the_program_runs_directly`), so it is tested without Flatpak.
+`outside_flatpak_the_program_runs_directly`), so it is tested without Flatpak. Among them:
+no value appears in the arguments (`no_variable_value_appears_in_the_arguments`), the
+forwarded set is exact (`the_forwarded_environment_is_exactly_the_session_set`),
+`FLATPAK_ID` alone does not switch host mode on (`flatpak_id_alone_does_not_switch_on_host_mode`),
+and the real `/bin/sh` step hands a stand-in for `flatpak-spawn` the file as descriptor 3
+and deletes it (`the_wrapper_hands_flatpak_spawn_the_file_as_fd_3_and_deletes_it`).
 
 ### What this means for security
 
@@ -152,7 +171,7 @@ bundle's permissions against this list and fails if network access appears.
   `flatpak-spawn`, not the shell: the "a command is still running" confirmation on closing a
   pane does not trigger, a saved workspace records `$HOME` instead of the shell's directory
   (unless the shell reports its directory with OSC 7), and agent detection by foreground
-  process reports "unknown". Expected from reading the code, not yet observed.
+  process reports no agent. Expected from reading the code, not yet observed.
 - **Signals go through `flatpak-spawn`.** Closing a pane sends SIGHUP to `flatpak-spawn`,
   which forwards it to the host process, and closing the PTY hangs up the shell's
   controlling terminal. An interactive shell ignores the SIGINT that `--watch-bus` sends,
@@ -174,8 +193,11 @@ bundle's permissions against this list and fails if network access appears.
 
 Verified by CI (`.github/workflows/flatpak.yml`) on every pull request:
 
-- the generated source lists match `Cargo.lock` and the Ghostty pin (`check-sources.py`;
-  it fails when a crate checksum or the Ghostty commit is changed by hand);
+- the generated source lists match `Cargo.lock` and the Ghostty pin entry by entry, and
+  hold only the source types and fields the generators write (`check-sources.py`);
+  `test_check_sources.py` applies ten hand edits (a swapped Zig URL and sha256, an extra
+  `shell` source in either file, a `rustc-wrapper` added to the cargo config, changed
+  checksums, URLs and commits) and requires each to be caught;
 - the bundle builds offline on x86_64 (`ubuntu-24.04`) and aarch64 (`ubuntu-24.04-arm`) in
   the Flathub `freedesktop-26.08` build container;
 - the desktop file passes `desktop-file-validate` (inside the build and on Ubuntu) and the
