@@ -536,6 +536,20 @@ halyard-msg notify <TITLE> [BODY] [--strict]
 halyard-msg info [--strict]
 ```
 
+- **Outside Halyard** (`HALYARD_SESSION_ID` unset) it does nothing, prints nothing and
+  exits 0, so the same hook config works in every terminal.
+- It connects to `HALYARD_SOCKET`, calls `halyard.hello`, `session.attach` with
+  `HALYARD_SESSION_ID` and `HALYARD_SESSION_TOKEN`, then the request.
+- If the socket is unset or unreachable, `state` and `notify` fall back to escape
+  sequences written to `/dev/tty`: `ESC ] 7717 ; state=..;agent=..;msg=..;session=.. ST`
+  as defined in `docs/protocol.md`, and `ESC ] 777 ; notify ; title ; body ST`.
+- Control characters in `--msg`, titles and bodies are replaced with spaces, so a hook
+  can pass multi-line text.
+- It never runs longer than about 3 seconds.
+- Exit status: 0 on success, or on any failure without `--strict` (a warning goes to
+  stderr); 1 on failure with `--strict`; 64 for a usage error. **It never exits 2**,
+  because Claude Code treats exit status 2 from some hooks as "block this action".
+
 ### Where it is, and how a hook finds it
 
 Every package ships it beside the `halyard` binary:
@@ -552,27 +566,24 @@ Every package ships it beside the `halyard` binary:
 running `halyard` (symlinks resolved), Halyard appends that directory to the end of every
 pane's `PATH`. In the app that is `/Applications/Halyard.app/Contents/MacOS`. It goes last,
 so it never shadows a program you installed, and macOS's `path_helper` (run by login
-shells) keeps it at the end. It is added only when `PATH` is set and does not already hold
-the directory. A shell startup file that assigns `PATH` outright, rather than adding to it,
-drops it; put `halyard-msg` on your `PATH` yourself in that case, or call it by its full
-path. Agents started in the pane (Claude Code, for example) inherit the pane's `PATH`, and
-so do their hooks. A hook run by something started outside Halyard does not have it, and
-does not need it: outside Halyard `halyard-msg` does nothing anyway. The Flatpak does not
-do this, because its panes run on the host.
+shells) keeps it at the end. Nothing is added when:
 
-- **Outside Halyard** (`HALYARD_SESSION_ID` unset) it does nothing, prints nothing and
-  exits 0, so the same hook config works in every terminal.
-- It connects to `HALYARD_SOCKET`, calls `halyard.hello`, `session.attach` with
-  `HALYARD_SESSION_ID` and `HALYARD_SESSION_TOKEN`, then the request.
-- If the socket is unset or unreachable, `state` and `notify` fall back to escape
-  sequences written to `/dev/tty`: `ESC ] 7717 ; state=..;agent=..;msg=..;session=.. ST`
-  as defined in `docs/protocol.md`, and `ESC ] 777 ; notify ; title ; body ST`.
-- Control characters in `--msg`, titles and bodies are replaced with spaces, so a hook
-  can pass multi-line text.
-- It never runs longer than about 3 seconds.
-- Exit status: 0 on success, or on any failure without `--strict` (a warning goes to
-  stderr); 1 on failure with `--strict`; 64 for a usage error. **It never exits 2**,
-  because Claude Code treats exit status 2 from some hooks as "block this action".
+- `PATH` is unset or empty, or already lists the directory;
+- the `PATH` Halyard itself started with already finds an executable `halyard-msg` (a Nix
+  profile's `bin`, or a copy you put on `PATH`), since an entry after it would never be
+  used;
+- the directory or `halyard-msg` is writable by group or others, or owned by anyone but you
+  or root. Then another local user could choose what your hooks run (a copy started from
+  `/tmp` or a shared folder, for example), so Halyard prints
+  `halyard: not adding "<path>: <reason>" to panes' PATH` to its stderr and leaves `PATH`
+  alone.
+
+A shell startup file that assigns `PATH` outright, rather than adding to it, drops the
+entry; put `halyard-msg` on your `PATH` yourself in that case, or call it by its full path.
+Agents started in the pane (Claude Code, for example) inherit the pane's `PATH`, and so do
+their hooks. A hook run by something started outside Halyard does not have it, and does not
+need it: outside Halyard `halyard-msg` does nothing anyway. The Flatpak does not do this,
+because its panes run on the host.
 
 ## Example integrations
 
@@ -604,6 +615,8 @@ hook error and carries on). Link it onto your `PATH` once to keep them quiet eve
 ```sh
 mkdir -p ~/.local/bin
 ln -sf /Applications/Halyard.app/Contents/MacOS/halyard-msg ~/.local/bin/halyard-msg
+# or, if Halyard.app is in your own Applications folder:
+ln -sf ~/Applications/Halyard.app/Contents/MacOS/halyard-msg ~/.local/bin/halyard-msg
 ```
 
 (`~/.local/bin` must be on your `PATH`; `/usr/local/bin` works as well.)

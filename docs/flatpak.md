@@ -218,8 +218,13 @@ run` passes your environment through (so `HALYARD_SESSION_ID` arrives), the sess
 off in the Flatpak, and `halyard-msg` falls back to writing the OSC 7717 escape sequence to
 `/dev/tty`, the pane's terminal, which Halyard reads. Each call starts a fresh sandbox,
 which takes longer than running a native binary; it has not been timed. Because of the
-early `exit 0`, the wrapper prints nothing for `--help` or `--version` outside Halyard; run
-`flatpak run --command=halyard-msg io.github.pete_builds.Halyard --help` for those.
+early `exit 0`, the wrapper differs from `halyard-msg` itself outside Halyard in three
+ways: it prints nothing for `--help` or `--version` (run
+`flatpak run --command=halyard-msg io.github.pete_builds.Halyard --help` for those),
+`--strict` exits 0 where `halyard-msg` exits 1 ("not inside a Halyard session"), and a
+usage error exits 0 where `halyard-msg` exits 64. Inside Halyard it behaves exactly like
+`halyard-msg`. If a hook relies on `--strict` or on usage errors outside Halyard, drop the
+early-exit line; every call then starts a sandbox.
 
 ## What is verified, and what is not
 

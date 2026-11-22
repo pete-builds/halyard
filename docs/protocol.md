@@ -15,7 +15,7 @@ Halyard sets these in every pane:
 |----------|-------|
 | `TERM_PROGRAM` | `Halyard` |
 | `HALYARD_SESSION_ID` | An opaque id for the pane, 1 to 128 characters from `A-Z a-z 0-9 . _ -`. Stable for the life of the pane. |
-| `PATH` | The inherited `PATH` with the directory of the running `halyard` appended, when `halyard-msg` is installed there and the directory is not on `PATH` already, so hooks find `halyard-msg` (`docs/session-api.md`). Not in the Flatpak, whose panes run on the host. |
+| `PATH` | The inherited `PATH`, with the directory of the running `halyard` appended when `halyard-msg` is installed there, so hooks find it. Left as it is when `PATH` already finds a `halyard-msg` or other users could change that directory; the full rules are in `docs/session-api.md`. Not in the Flatpak, whose panes run on the host. |
 
 `HALYARD_SESSION_ID` exists because agent hook payloads carry no terminal or tab
 identifier. A hook that echoes the id back lets Halyard drop reports that reached the
