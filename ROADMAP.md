@@ -29,9 +29,13 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       Unit tests in `grid.rs` (`runs_split_on_style_and_blanks`,
       `wide_glyphs_and_clusters_are_their_own_runs`, `backgrounds_merge_equal_neighbors_and_skip_default`,
       `cursor_recolors_one_cell`). Verified on macOS arm64 with screenshots of a prompt, colored
-      `ls`, vim, htop, a title change, a selection and the exit notice. Linux: real NixOS RTX
-      4070 Ti run, sway Vulkan + XWayland, 2026-11-22 (PR #8). The window sets app id and
-      WM_CLASS `halyard` (`APP_ID`, Linux only, not checked on Linux by this PR).
+      `ls`, vim, htop, a title change, a selection and the exit notice. Linux: real NixOS
+      26.05 on an RTX 4070 Ti (2026-11-22): headless sway on Vulkan, XWayland, and a
+      launch-only check in KDE Plasma 6.6 Wayland; typing, colors, vim, htop, Ctrl+C, resize,
+      paste in, and (X11) copy out and wheel scrollback all passed. Not yet: Wayland pointer
+      selection and wheel (no pointer in a headless seat).
+      The window sets app id and WM_CLASS `halyard` (`APP_ID`; Linux only, not yet checked on
+      Linux).
 - [ ] Keyboard input (including Kitty protocol via the engine's encoder), Ctrl+C.
       Session side done: `keys_encode_with_terminal_modes`,
       `kitty_keyboard_flags_change_encoding`, `ctrl_c_byte_interrupts_sleep`,
