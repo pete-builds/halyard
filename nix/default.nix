@@ -96,7 +96,22 @@ let
 
   # Every dependency, Ghostty included, built once and shared by the package
   # and the checks.
-  cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+  cargoArtifacts = craneLib.buildDepsOnly (
+    commonArgs
+    // {
+      # crane replaces every path crate with an empty stub for the deps-only
+      # build, and that includes the [patch.crates-io] crates under vendor/.
+      # They are real dependencies (gpui needs xattr's functions), so put the
+      # real sources back.
+      dummySrc = craneLib.mkDummySrc {
+        inherit src;
+        extraDummyScript = lib.optionalString (builtins.pathExists ../vendor) ''
+          rm -rf "$out/vendor"
+          cp -r --no-preserve=mode ${src}/vendor "$out/vendor"
+        '';
+      };
+    }
+  );
 
   desktopFile = ../dist/linux/halyard.desktop;
   iconSvg = ../dist/icons/halyard.svg;
@@ -117,6 +132,9 @@ let
       cargoExtraArgs = "--locked " + (if hasApp then "-p halyard-app" else "--workspace");
       # Tests run in checks.cargo-test, not in every package build.
       doCheck = false;
+      # With no binary to install, crane's reference-stripping hook has no files
+      # to edit and its sed exits early, printing "echo: write error: Broken pipe".
+      doNotRemoveReferencesToVendorDir = !hasApp;
 
       nativeBuildInputs =
         commonArgs.nativeBuildInputs
