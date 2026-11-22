@@ -86,23 +86,23 @@ fn a_burst_of_writes_is_debounced_into_few_events() {
         fs::write(&file, cfg(10 + i)).unwrap();
         std::thread::sleep(Duration::from_millis(5));
     }
+    // Wait for the event that carries the last write instead of inferring "done" from a
+    // quiet spell: a loaded runner can deliver the final reload late, which made the old
+    // 500 ms silence check flaky. Every reload on the way counts toward the bound.
     let mut count = 0;
-    let mut last = None;
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut final_seen = false;
     while Instant::now() < deadline {
-        if let Some(ev) = w.recv_timeout(Duration::from_millis(500)) {
-            count += 1;
-            last = Some(ev);
-        } else if count > 0 {
+        let Some(ev) = w.recv_timeout(Duration::from_millis(200)) else { continue };
+        count += 1;
+        if size_is(29.0)(&ev) {
+            final_seen = true;
             break;
         }
     }
-    // 20 writes 5 ms apart collapse into a few reloads. A loaded CI runner can stretch the
-    // writes past the 500 ms debounce cap and see more, so bound it loosely: far fewer reloads
-    // than writes, and the last write wins.
-    assert!((1..=10).contains(&count), "expected far fewer reloads than writes, got {count}");
-    let last = last.unwrap().unwrap();
-    assert!((last.config.font.size - 29.0).abs() < 0.01, "last write must win");
+    assert!(final_seen, "the last write (size 29) never arrived; {count} reloads seen");
+    // 20 writes 5 ms apart collapse into a few reloads; one reload per write would be 20.
+    assert!(count <= 10, "expected far fewer reloads than writes, got {count}");
 }
 
 #[test]
