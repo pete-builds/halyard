@@ -5,6 +5,7 @@
 //! missing directory, a failed watch, a symlink swap or a directory moved into place can delay
 //! a reload by at most one poll interval but can never lose one.
 
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -17,6 +18,8 @@ use std::time::{Duration, Instant, SystemTime};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::config::{Config, ConfigError, ConfigWarning, Loaded, themes_dir_for};
+use crate::fsread::{MAX_FILE_BYTES, Refusal, kind_name, read_regular};
+use crate::theme::MAX_THEME_FILES;
 
 /// What a reload produced: the new configuration, or why it could not be loaded.
 pub type ConfigEvent = Result<Loaded, ConfigError>;
@@ -32,52 +35,89 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// The state of one file: where its symlinks lead right now, and what is in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FileState {
-    /// Absent, a dangling symlink, or not a regular file.
+    /// Absent, or a dangling symlink.
     Missing,
-    /// Present but not readable; loading reports the I/O error.
-    Unreadable,
+    /// Present but not usable: not a regular file (a FIFO, directory, device), over the size
+    /// limit, or not readable. The string is a phrase for a warning, with no file content.
+    Unreadable(String),
     Present {
         /// The path after following every symlink, resolved fresh each time.
         resolved: PathBuf,
         size: u64,
         mtime: Option<SystemTime>,
-        /// Hash of the content. Config files are tiny, so hashing every poll is cheap.
+        /// Hash of the content. Config files are tiny, so hashing is cheap, but it is only
+        /// recomputed when the size or modification time changed.
         hash: u64,
     },
 }
 
-fn file_state(path: &Path) -> FileState {
+/// What was learned about one file at the last poll, so an unchanged file is not re-read.
+#[derive(Debug, Default)]
+struct HashCache {
+    seen: HashMap<PathBuf, (u64, Option<SystemTime>, u64)>,
+    /// How many files were actually hashed; read by a test.
+    hashed: usize,
+}
+
+fn file_state(path: &Path, cache: &mut HashCache) -> FileState {
     let Ok(resolved) = fs::canonicalize(path) else { return FileState::Missing };
     let Ok(meta) = fs::metadata(&resolved) else { return FileState::Missing };
     if !meta.is_file() {
-        return FileState::Missing;
+        return FileState::Unreadable(Refusal::NotRegular(kind_name(&meta)).phrase());
     }
-    let Ok(bytes) = fs::read(&resolved) else { return FileState::Unreadable };
-    let mut h = DefaultHasher::new();
-    bytes.hash(&mut h);
-    FileState::Present { resolved, size: meta.len(), mtime: meta.modified().ok(), hash: h.finish() }
+    let (size, mtime) = (meta.len(), meta.modified().ok());
+    if size > MAX_FILE_BYTES {
+        return FileState::Unreadable(Refusal::TooLarge.phrase());
+    }
+    let hash = match cache.seen.get(&resolved) {
+        Some((s, m, h)) if *s == size && *m == mtime => *h,
+        _ => match read_regular(&resolved) {
+            Ok(bytes) => {
+                let mut h = DefaultHasher::new();
+                bytes.hash(&mut h);
+                cache.hashed += 1;
+                let h = h.finish();
+                cache.seen.insert(resolved.clone(), (size, mtime, h));
+                h
+            }
+            Err(r) => return FileState::Unreadable(r.phrase()),
+        },
+    };
+    FileState::Present { resolved, size, mtime, hash }
 }
 
 /// Everything a reload depends on: the config file, and the names and state of every
-/// `*.toml` in the themes directory.
+/// `*.toml` in the themes directory (the first [`MAX_THEME_FILES`] by name).
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fingerprint {
     config: FileState,
     themes: Vec<(String, FileState)>,
+    /// Theme files beyond the limit, which are ignored.
+    themes_ignored: usize,
 }
 
-fn fingerprint(config: &Path) -> Fingerprint {
-    let mut themes = Vec::new();
+fn fingerprint(config: &Path, cache: &mut HashCache) -> Fingerprint {
+    let mut names: Vec<(String, PathBuf)> = Vec::new();
     if let Ok(rd) = fs::read_dir(themes_dir_for(config)) {
         for e in rd.filter_map(Result::ok) {
             let p = e.path();
             if p.extension().is_some_and(|x| x == "toml") {
-                themes.push((e.file_name().to_string_lossy().into_owned(), file_state(&p)));
+                names.push((e.file_name().to_string_lossy().into_owned(), p));
             }
         }
     }
-    themes.sort_by(|a, b| a.0.cmp(&b.0));
-    Fingerprint { config: file_state(config), themes }
+    names.sort_by(|a, b| a.0.cmp(&b.0));
+    let themes_ignored = names.len().saturating_sub(MAX_THEME_FILES);
+    names.truncate(MAX_THEME_FILES);
+    let themes = names.into_iter().map(|(n, p)| (n, file_state(&p, cache))).collect();
+    Fingerprint { config: file_state(config, cache), themes, themes_ignored }
+}
+
+/// The poll interval is never shorter than this, so a zero cannot make the thread spin.
+const MIN_POLL: Duration = Duration::from_millis(50);
+
+fn clamp_poll(poll: Duration) -> Duration {
+    poll.max(MIN_POLL)
 }
 
 /// Make `path` absolute against `cwd` and drop `.` and `..` components lexically.
@@ -200,7 +240,7 @@ impl ConfigWatcher {
         Self::start(path, debounce, POLL_INTERVAL, true)
     }
 
-    /// Like [`ConfigWatcher::new`] with a chosen poll interval.
+    /// Like [`ConfigWatcher::new`] with a chosen poll interval (never shorter than 50 ms).
     ///
     /// # Errors
     /// Same as [`ConfigWatcher::new`].
@@ -235,12 +275,22 @@ impl ConfigWatcher {
         });
         // The baseline is taken before this returns, so an edit made right after `new` is
         // a change and not part of the starting state.
-        let baseline = fingerprint(&path);
+        let mut cache = HashCache::default();
+        let baseline = fingerprint(&path, &mut cache);
         let (out_tx, out_rx) = mpsc::channel::<ConfigEvent>();
         let worker_shared = Arc::clone(&shared);
         let handle =
             thread::Builder::new().name("halyard-config-watch".into()).spawn(move || {
-                run(&path, baseline, debounce, poll, use_notify, &worker_shared, &out_tx);
+                run(
+                    &path,
+                    baseline,
+                    cache,
+                    debounce,
+                    clamp_poll(poll),
+                    use_notify,
+                    &worker_shared,
+                    &out_tx,
+                );
             })?;
         Ok(Self { shared, rx: out_rx, handle: Some(handle) })
     }
@@ -322,9 +372,22 @@ impl Hints {
     }
 }
 
+fn defaults_with(reason: &str) -> Loaded {
+    Loaded {
+        config: Config::default(),
+        warnings: vec![ConfigWarning {
+            key: "config".into(),
+            line: None,
+            message: format!("{reason}; using the defaults"),
+        }],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run(
     path: &Path,
     baseline: Fingerprint,
+    mut cache: HashCache,
     debounce: Duration,
     poll: Duration,
     use_notify: bool,
@@ -340,7 +403,7 @@ fn run(
             Wake::Hint => {}
             Wake::Timeout => {
                 hints.sync(path, false);
-                if fingerprint(path) == last {
+                if fingerprint(path, &mut cache) == last {
                     continue;
                 }
             }
@@ -358,24 +421,72 @@ fn run(
                 Wake::Timeout => break,
             }
         }
-        let now = fingerprint(path);
+        let now = fingerprint(path, &mut cache);
         if now == last {
             continue;
         }
         hints.sync(path, true);
-        let mut event = Config::load(path);
-        if now.config == FileState::Missing
-            && let Ok(loaded) = &mut event
-        {
-            loaded.warnings.push(ConfigWarning {
-                key: "config".into(),
-                line: None,
-                message: "the config file does not exist; using the defaults".into(),
-            });
+        let mut event = match &now.config {
+            // Never open a file the fingerprint found missing or unusable: a FIFO would block
+            // the thread, and with it Drop, forever.
+            FileState::Missing => Ok(defaults_with("the config file does not exist")),
+            FileState::Unreadable(why) => Ok(defaults_with(&format!("the config file {why}"))),
+            FileState::Present { .. } => Config::load(path),
+        };
+        if let Ok(loaded) = &mut event {
+            if now.themes_ignored > 0 {
+                loaded.warnings.push(ConfigWarning {
+                    key: "themes".into(),
+                    line: None,
+                    message: format!(
+                        "{} theme files beyond the first {MAX_THEME_FILES} are ignored",
+                        now.themes_ignored
+                    ),
+                });
+            }
+            for (name, state) in &now.themes {
+                if let FileState::Unreadable(why) = state {
+                    loaded.warnings.push(ConfigWarning {
+                        key: format!("themes/{name}"),
+                        line: None,
+                        message: format!("the theme file {why}; it is skipped"),
+                    });
+                }
+            }
         }
         last = now;
         if out.send(event).is_err() {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unchanged_file_is_not_hashed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+        fs::write(&file, "[font]\nsize = 12\n").unwrap();
+        let mut cache = HashCache::default();
+        let a = fingerprint(&file, &mut cache);
+        assert_eq!(cache.hashed, 1);
+        for _ in 0..5 {
+            assert_eq!(fingerprint(&file, &mut cache), a);
+        }
+        assert_eq!(cache.hashed, 1, "an unchanged file must not be re-read");
+        // A change of size is hashed again, and seen.
+        fs::write(&file, "[font]\nsize = 123\n").unwrap();
+        assert_ne!(fingerprint(&file, &mut cache), a);
+        assert_eq!(cache.hashed, 2);
+    }
+
+    #[test]
+    fn the_poll_interval_has_a_floor() {
+        assert_eq!(clamp_poll(Duration::ZERO), MIN_POLL);
+        assert_eq!(clamp_poll(Duration::from_millis(10)), MIN_POLL);
+        assert_eq!(clamp_poll(Duration::from_secs(1)), Duration::from_secs(1));
     }
 }

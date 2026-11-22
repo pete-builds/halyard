@@ -36,7 +36,11 @@ config file (see [themes.md](themes.md)).
   If notifications are unavailable the once-a-second check still works. After the first
   change the reload waits until things are quiet (the debounce), and never longer than 500 ms
   in total. When the file does not exist the event holds the defaults and a warning that says
-  so. A relative `HALYARD_CONFIG` is resolved against the working directory when Halyard
+  so. A config or theme file that is not a regular file (a FIFO, directory, device) or is
+  over 4 MiB is never opened blockingly or read whole: it counts as unreadable, the event holds
+  the defaults and a warning naming what it is, and no value. At most 512 theme files are
+  looked at; extras produce a warning. A file is only re-hashed when its size or modification
+  time changed. The poll interval is never shorter than 50 ms. A relative `HALYARD_CONFIG` is resolved against the working directory when Halyard
   starts. Dropping the watcher stops and joins its thread.
 
 ### Error messages never contain values

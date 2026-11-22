@@ -7,12 +7,12 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use toml::de::{DeTable, DeValue};
 
+use crate::fsread::{Refusal, read_regular};
 use crate::keys::{Action, KeyChord, Keymap, Platform, UNBIND};
 use crate::locate::{Index, line_of_offset, parse_doc, value_free};
 use crate::theme::{Appearance, DEFAULT_DARK, DEFAULT_LIGHT};
@@ -856,13 +856,33 @@ impl Config {
     /// Returns a [`ConfigError`] (with `path` set) when the file cannot be
     /// read or fails [`Config::parse`].
     pub fn load(path: &Path) -> Result<Loaded, ConfigError> {
-        let src = match fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Loaded { config: Config::default(), warnings: Vec::new() });
-            }
-            Err(e) => return Err(ConfigError::io(path, format!("cannot read config file: {e}"))),
+        let defaults = |warning: Option<String>| Loaded {
+            config: Config::default(),
+            warnings: warning
+                .map(|message| ConfigWarning { key: "config".into(), line: None, message })
+                .into_iter()
+                .collect(),
         };
+        let bytes = match read_regular(path) {
+            Ok(b) => b,
+            Err(Refusal::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(defaults(None));
+            }
+            Err(Refusal::Io(e)) => {
+                return Err(ConfigError::io(path, format!("cannot read config file: {e}")));
+            }
+            // A FIFO, directory, device or oversized file: never opened blockingly, never read
+            // whole. Treated as unreadable: the defaults, and a warning naming what it is.
+            Err(refusal) => {
+                return Ok(defaults(Some(format!(
+                    "the config file {}; using the defaults",
+                    refusal.phrase()
+                ))));
+            }
+        };
+        let src = String::from_utf8(bytes).map_err(|e| {
+            ConfigError::io(path, format!("cannot read config file: {}", e.utf8_error()))
+        })?;
         Self::parse(&src).map_err(|mut e| {
             e.path = Some(path.to_path_buf());
             e

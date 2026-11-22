@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use halyard_term::frame::Rgb;
 use serde::{Deserialize, Serialize};
 
+use crate::fsread::{Refusal, read_regular};
 use crate::locate::{Index, parse_doc, value_free};
 
 /// Whether a theme is meant for a dark or a light window.
@@ -941,6 +942,9 @@ const BUNDLED: [(&str, &str); 6] = [
     ("paper-chart.toml", include_str!("../themes/paper-chart.toml")),
 ];
 
+/// The most `*.toml` files read from a themes directory; extras are ignored with a warning.
+pub const MAX_THEME_FILES: usize = 512;
+
 /// The set of themes available to pick from: bundled plus user themes.
 #[derive(Clone, Debug)]
 pub struct ThemeRegistry {
@@ -1003,15 +1007,30 @@ impl ThemeRegistry {
             .filter(|p| p.extension().is_some_and(|x| x == "toml"))
             .collect();
         files.sort();
+        if files.len() > MAX_THEME_FILES {
+            errors.push(
+                ThemeError::new(format!(
+                    "{} theme files beyond the first {MAX_THEME_FILES} are ignored",
+                    files.len() - MAX_THEME_FILES
+                ))
+                .with_file(dir),
+            );
+            files.truncate(MAX_THEME_FILES);
+        }
         for file in files {
-            match fs::read_to_string(&file) {
+            let loaded = read_regular(&file).and_then(|bytes| {
+                String::from_utf8(bytes)
+                    .map_err(|_| Refusal::Io(std::io::Error::other("not valid UTF-8")))
+            });
+            match loaded {
                 Ok(src) => match Theme::from_toml(&src) {
                     Ok(theme) => self.insert(theme, Origin::User),
                     Err(e) => errors.push(e.with_file(&file)),
                 },
-                Err(e) => {
-                    errors.push(ThemeError::new(format!("cannot read file: {e}")).with_file(&file))
-                }
+                Err(refusal) => errors.push(
+                    ThemeError::new(format!("theme file {}; skipped", refusal.phrase()))
+                        .with_file(&file),
+                ),
             }
         }
         errors

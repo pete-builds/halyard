@@ -321,3 +321,145 @@ fn a_relative_config_path_that_does_not_exist_yet_is_noticed() {
     fs::write(&file, cfg(37)).unwrap();
     let _ = wait_for(&w, "size 37 for a relative path", size_is(37.0));
 }
+
+fn mkfifo(path: &Path) {
+    let st = std::process::Command::new("mkfifo").arg(path).status().unwrap();
+    assert!(st.success(), "mkfifo failed");
+}
+
+/// Run `f` on another thread and fail if it does not finish within `limit`.
+fn finishes_within<T: Send + 'static>(
+    what: &str,
+    limit: Duration,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(limit).unwrap_or_else(|_| panic!("{what} did not finish within {limit:?}"))
+}
+
+fn has_warning(e: &ConfigEvent, needle: &str) -> bool {
+    e.as_ref().is_ok_and(|l| l.warnings.iter().any(|w| w.message.contains(needle)))
+}
+
+#[test]
+fn replacing_the_config_with_a_fifo_gives_a_warning_and_drop_does_not_hang() {
+    both_modes(|make| {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+        fs::write(&file, cfg(12)).unwrap();
+        settle();
+        let w = make(&file);
+        fs::remove_file(&file).unwrap();
+        mkfifo(&file);
+        let ev = wait_for(&w, "a warning about the fifo", |e| has_warning(e, "fifo"));
+        assert!(is_defaults(&ev), "a fifo means the defaults");
+        let start = Instant::now();
+        finishes_within("dropping the watcher", Duration::from_secs(1), move || drop(w));
+        assert!(start.elapsed() < Duration::from_secs(1));
+        // Back to a regular file works afterwards (a new watcher, since the old one is gone).
+        fs::remove_file(&file).unwrap();
+        fs::write(&file, cfg(14)).unwrap();
+    });
+}
+
+#[test]
+fn a_fifo_in_themes_does_not_hang_the_watcher_or_the_loader() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    fs::write(&file, cfg(12)).unwrap();
+    let themes = dir.path().join("themes");
+    fs::create_dir(&themes).unwrap();
+    mkfifo(&themes.join("trap.toml"));
+    fs::write(themes.join("ok.toml"), "name = \"x\"\n").unwrap();
+    let w = finishes_within("starting a watcher over a fifo theme", Duration::from_secs(2), {
+        let file = file.clone();
+        move || ConfigWatcher::with_poll_interval(&file, DEB, POLL).unwrap()
+    });
+    // Another FIFO appearing later is a change, with a warning, and no hang.
+    mkfifo(&themes.join("late.toml"));
+    let ev = wait_for(&w, "a warning for the fifo theme", |e| has_warning(e, "fifo"));
+    assert!(ev.is_ok());
+    finishes_within("dropping the watcher", Duration::from_secs(1), move || drop(w));
+    // The loader refuses it as well, naming the kind, and still loads the good theme.
+    let errors =
+        finishes_within("loading the themes directory", Duration::from_secs(1), move || {
+            let mut reg = halyard_config::ThemeRegistry::bundled();
+            let errors = reg.load_user_dir(&themes);
+            errors.iter().map(ToString::to_string).collect::<Vec<_>>()
+        });
+    assert_eq!(errors.iter().filter(|e| e.contains("fifo")).count(), 2, "{errors:?}");
+}
+
+#[test]
+fn config_load_on_a_fifo_returns_at_once_with_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    mkfifo(&file);
+    let loaded = finishes_within("Config::load on a fifo", Duration::from_secs(1), {
+        let file = file.clone();
+        move || Config::load(&file)
+    })
+    .unwrap();
+    assert_eq!(loaded.config, Config::default());
+    assert!(loaded.warnings.iter().any(|w| w.message.contains("fifo")), "{loaded:?}");
+    // A directory in its place is refused the same way.
+    let sub = dir.path().join("asdir.toml");
+    fs::create_dir(&sub).unwrap();
+    let loaded = Config::load(&sub).unwrap();
+    assert!(loaded.warnings.iter().any(|w| w.message.contains("directory")), "{loaded:?}");
+}
+
+#[test]
+fn oversized_config_and_theme_files_are_refused_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    // A sparse file just over 4 MiB.
+    let f = fs::File::create(&file).unwrap();
+    f.set_len(4 * 1024 * 1024 + 1).unwrap();
+    let loaded = Config::load(&file).unwrap();
+    assert_eq!(loaded.config, Config::default());
+    assert!(loaded.warnings.iter().any(|w| w.message.contains("4 MiB")), "{loaded:?}");
+    // Exactly at the limit is read: NULs are not TOML, so it is a parse error, not a size warning.
+    f.set_len(4 * 1024 * 1024).unwrap();
+    let at_limit = Config::load(&file);
+    assert!(at_limit.is_err(), "{at_limit:?}");
+
+    let themes = dir.path().join("themes");
+    fs::create_dir(&themes).unwrap();
+    let big = fs::File::create(themes.join("big.toml")).unwrap();
+    big.set_len(4 * 1024 * 1024 + 1).unwrap();
+    let mut reg = halyard_config::ThemeRegistry::bundled();
+    let errors = reg.load_user_dir(&themes);
+    assert!(errors.iter().any(|e| e.to_string().contains("4 MiB")), "{errors:?}");
+
+    // The watcher reports it as a warning too.
+    let w = ConfigWatcher::with_poll_interval(&file, DEB, POLL).unwrap();
+    f.set_len(4 * 1024 * 1024 + 5).unwrap();
+    let _ = wait_for(&w, "a size warning", |e| has_warning(e, "4 MiB"));
+}
+
+#[test]
+fn only_the_first_512_theme_files_count_and_the_rest_warn() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("config.toml");
+    fs::write(&file, cfg(12)).unwrap();
+    let themes = dir.path().join("themes");
+    fs::create_dir(&themes).unwrap();
+    for i in 0..520 {
+        fs::write(themes.join(format!("t{i:04}.toml")), "").unwrap();
+    }
+    settle();
+    let w = ConfigWatcher::with_poll_interval(&file, DEB, POLL).unwrap();
+    // A file past the limit changes nothing the watcher looks at; one inside it does.
+    fs::write(themes.join("t0519.toml"), "x = 1\n").unwrap();
+    assert!(w.recv_timeout(Duration::from_millis(900)).is_none(), "extras must be ignored");
+    fs::write(themes.join("t0000.toml"), "x = 1\n").unwrap();
+    let ev = wait_for(&w, "a change inside the first 512", |_| true);
+    assert!(has_warning(&ev, "8 theme files beyond the first 512"), "{ev:?}");
+    let mut reg = halyard_config::ThemeRegistry::bundled();
+    let errors = reg.load_user_dir(&themes);
+    assert!(errors.iter().any(|e| e.to_string().contains("beyond the first 512")), "{errors:?}");
+}

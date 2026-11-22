@@ -9,6 +9,7 @@
 //! network calls and never stores secrets.
 
 pub mod config;
+mod fsread;
 pub mod keys;
 mod locate;
 pub mod theme;
