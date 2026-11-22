@@ -597,8 +597,23 @@ fn mark_rows_scenario() -> Result<(), String> {
     if rows[1] != f.scroll.offset + u64::from(m2) {
         return fail("the second mark is the m2 row on screen");
     }
-    if rows[1] - rows[0] != 13 {
-        return fail("12 lines of seq plus the m1 line");
+    // Each mark names its own line, read back through the same row numbers.
+    let text = |r: u64| s.screen_rows_text(r, r).unwrap_or_default();
+    if text(rows[0]) != "m1" || text(rows[1]) != "m2" {
+        return fail("each mark's row holds its line");
+    }
+    // All 12 lines of seq, in order, lie between the marks: the first mark's
+    // row counted the rows that later scrolled off the 5-row screen. Rows that
+    // are not seq output are allowed, so this does not assert a fixed distance:
+    // in the macOS Nix build, bash 3.2's job control sometimes prints
+    // "sh: child setpgid (N to N): Operation not permitted" from the forked
+    // `seq` (two rows at 40 columns), which made the marks 15 rows apart.
+    let between: Vec<String> = (rows[0] + 1..rows[1]).map(text).collect();
+    let numbers: Vec<&str> =
+        between.iter().map(String::as_str).filter(|t| t.parse::<u32>().is_ok()).collect();
+    let want: Vec<String> = (1..=12).map(|n| n.to_string()).collect();
+    if numbers != want {
+        return fail("the 12 lines of seq between the marks");
     }
     assert!(*chunks.lock().unwrap() >= 1);
     Ok(())
@@ -609,20 +624,6 @@ fn observer_sees_the_cursor_row_at_each_mark() {
     if let Err(e) = mark_rows_scenario() {
         panic!("{e}");
     }
-}
-
-/// TEMPORARY: repeats the scenario to catch the macOS Nix flake in CI.
-#[test]
-fn tmp_mark_rows_stress() {
-    let handles: Vec<_> = (0..4)
-        .map(|_| {
-            std::thread::spawn(|| {
-                (0..40).filter_map(|_| mark_rows_scenario().err()).collect::<Vec<_>>()
-            })
-        })
-        .collect();
-    let errors: Vec<String> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
-    assert!(errors.is_empty(), "{} of 160 runs failed; first:\n{}", errors.len(), errors[0]);
 }
 
 /// Newlines earlier in the same chunk move the cursor before the mark: the row
