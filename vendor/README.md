@@ -17,6 +17,10 @@ below with the reason and the condition for removing it.
 - **Patch:** `src/sys/mod.rs` uses `libc::ENODATA` on Linux and Android. glibc defines
   `ENOATTR` as `ENODATA` in `<sys/xattr.h>`, so the value is identical. Other platforms
   still use `libc::ENOATTR`.
+- **Second patch (macOS):** `src/sys/linux_macos/macos.rs` uses `u32` instead of the
+  deprecated alias `libc::uint32_t` (identical type). Path dependencies do not get
+  `--cap-lints`, so with CI's `RUSTFLAGS=-D warnings` the deprecation fails the macOS build
+  as soon as gpui is in the graph (the app crate). Found 2026-11-22 on `feat/app-window`.
 - **Check:** CI runs `cargo check --manifest-path vendor/xattr/Cargo.toml` on Ubuntu,
   which resolves the newest `libc` and fails if the patch is lost.
 - **Remove when:** gpui moves to `xattr` 1.x, or no longer depends on `zed-async-tar`.
