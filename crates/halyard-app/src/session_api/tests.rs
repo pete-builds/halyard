@@ -431,6 +431,30 @@ fn dialogs_name_a_pane_by_title_else_folder() {
     assert_eq!(pane_label(&info), "the pane in /src (id p7)");
     info.cwd = None;
     assert_eq!(pane_label(&info), "a pane (id p7)");
+    // A hostile title: a bidi override that would reverse the line, and enough
+    // text to push the buttons off screen.
+    info.title = format!("evil\u{202e}txt.exe{}", "A".repeat(1000));
+    let label = pane_label(&info);
+    assert!(label.contains("evil\\u{202e}txt.exe"), "{label}");
+    assert!(!label.contains('\u{202e}'));
+    assert!(label.chars().count() < MAX_DIALOG_NAME + 20, "{label}");
+    assert!(label.contains('\u{2026}'));
+}
+
+#[test]
+fn dialog_names_are_escaped_and_capped_at_the_limit() {
+    let exactly = "a".repeat(MAX_DIALOG_NAME);
+    assert_eq!(dialog_text(&exactly, MAX_DIALOG_NAME), exactly, "at the cap: whole");
+    let over = "a".repeat(MAX_DIALOG_NAME + 1);
+    let cut = dialog_text(&over, MAX_DIALOG_NAME);
+    assert_eq!(cut.chars().count(), MAX_DIALOG_NAME);
+    assert!(cut.ends_with('\u{2026}'));
+    assert_eq!(dialog_text("a\nb\u{1b}", 80), "a\\nb\\e");
+    let path = format!("/{}/python3", "d".repeat(300));
+    let tail = dialog_tail(&path, MAX_DIALOG_PATH);
+    assert_eq!(tail.chars().count(), MAX_DIALOG_PATH);
+    assert!(tail.starts_with('\u{2026}') && tail.ends_with("/python3"), "{tail}");
+    assert_eq!(dialog_tail("/bin/sh", MAX_DIALOG_PATH), "/bin/sh");
 }
 
 #[test]
@@ -493,9 +517,14 @@ fn a_dialog_nobody_answers_is_a_denial() {
 fn the_approver_never_asks_about_text_over_the_dialog_cap() {
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
     let approver = DialogApprover::new(tx, Duration::from_secs(5));
-    let long = "x".repeat(crate::approval::MAX_DIALOG_TEXT_BYTES + 1);
-    assert!(!approver.approve_send_text(&request_for(&long)));
-    assert!(rx.try_recv().is_err(), "no dialog was requested");
+    let max = crate::approval::MAX_DIALOG_TEXT_BYTES;
+    assert_eq!(max, 4096);
+    assert!(!approver.approve_send_text(&request_for(&"x".repeat(max + 1))));
+    assert!(rx.try_recv().is_err(), "no dialog was requested for 4097 bytes");
+    // Exactly the cap is asked about (and, unanswered, times out to a denial).
+    let approver = DialogApprover::new(approver.ui.clone(), Duration::from_millis(50));
+    assert!(!approver.approve_send_text(&request_for(&"x".repeat(max))));
+    assert!(rx.try_recv().is_ok(), "a dialog was requested for 4096 bytes");
 }
 
 /// The real key path from the pane (`view::send_user_key`, what

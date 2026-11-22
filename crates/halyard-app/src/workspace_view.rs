@@ -1328,8 +1328,8 @@ impl Render for WorkspaceView {
         let panes = self.render_panes(&theme, window, cx);
         let banner = self.render_banner(&theme, cx);
         let palette = self.render_palette(&theme, window, cx);
-        self.approval_prepaint(cx);
-        let approval = self.render_approval(&theme, cx);
+        self.approval_prepaint(window, cx);
+        let approval = self.render_approval(&theme, window, cx);
         root.child(tab_bar)
             .child(panes)
             .children(banner)

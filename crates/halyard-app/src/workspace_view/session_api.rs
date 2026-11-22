@@ -17,7 +17,9 @@ use halyard_workspace::PaneId;
 use super::{WorkspaceView, rgba};
 use crate::approval::{self, Ask, Dialog, Mods, Outcome};
 use crate::palette::{self, Mode};
-use crate::session_api::{DIALOG_TIMEOUT, PairedTools};
+use crate::session_api::{
+    DIALOG_TIMEOUT, MAX_DIALOG_NAME, MAX_DIALOG_PATH, PairedTools, dialog_tail, dialog_text,
+};
 use crate::view::to_hsla;
 
 /// Where a dialog's answer goes. Dropping it unanswered is a denial.
@@ -44,15 +46,19 @@ pub(super) struct ApprovalUi {
 const SCROLL_LINE: f32 = 18.0;
 
 impl ApprovalUi {
-    /// Reads the text box's layout into the scroll gate. Returns true when the
-    /// gate changed (redraw, so the Approve button follows).
-    fn observe_scroll(&mut self) -> bool {
-        let max = f32::from(self.scroll.max_offset().height);
-        let scrolled = -f32::from(self.scroll.offset().y);
-        let laid_out = f32::from(self.scroll.bounds().size.height) > 0.0;
-        let before = self.dialog.view;
-        self.dialog.view = self.dialog.view.observe(laid_out, max, scrolled);
-        before != self.dialog.view
+    /// Reads the scrolling box's last layout into the gate: how far it scrolls,
+    /// and whether the whole box is inside the window (`window_h` tall). Returns
+    /// true when the gate changed (redraw, so the Approve button follows).
+    fn observe_scroll(&mut self, window_h: f32) -> bool {
+        let bounds = self.scroll.bounds();
+        let top = f32::from(bounds.origin.y);
+        let bottom = top + f32::from(bounds.size.height);
+        self.dialog.observe(approval::BoxLayout {
+            laid_out: f32::from(bounds.size.height) > 0.0,
+            max: f32::from(self.scroll.max_offset().height),
+            scrolled: -f32::from(self.scroll.offset().y),
+            bottom_visible: top >= -0.5 && bottom <= window_h + 0.5,
+        })
     }
 
     fn scroll_by(&mut self, lines: i32) {
@@ -241,7 +247,7 @@ impl WorkspaceView {
     /// The approve chord (the dialog's own action) or a click on Approve.
     pub(super) fn approval_approve(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(a) = &mut self.approval else { return };
-        a.observe_scroll();
+        a.observe_scroll(f32::from(window.viewport_size().height));
         let outcome = a.dialog.approve_action(Instant::now());
         self.finish_approval(outcome, window, cx);
     }
@@ -268,9 +274,9 @@ impl WorkspaceView {
     }
 
     /// Updates the scroll gate from the last layout (called each render).
-    pub(super) fn approval_prepaint(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn approval_prepaint(&mut self, window: &Window, cx: &mut Context<Self>) {
         if let Some(a) = &mut self.approval
-            && a.observe_scroll()
+            && a.observe_scroll(f32::from(window.viewport_size().height))
         {
             cx.notify();
         }
@@ -284,6 +290,7 @@ impl WorkspaceView {
     pub(super) fn render_approval(
         &self,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let a = self.approval.as_ref()?;
@@ -303,14 +310,14 @@ impl WorkspaceView {
                 body = body
                     .child(line(format!(
                         "A program calling itself \u{201c}{}\u{201d} asks for access.",
-                        r.client_name
+                        dialog_text(&r.client_name, MAX_DIALOG_NAME)
                     )))
                     .child(div().text_xs().text_color(muted).whitespace_normal().child(format!(
                         "The name is the tool's own claim. Process {}: {}",
                         r.peer.pid,
                         r.peer.exe.as_ref().map_or_else(
                             || "executable unknown".to_owned(),
-                            |p| p.display().to_string()
+                            |p| dialog_tail(&p.to_string_lossy(), MAX_DIALOG_PATH)
                         )
                     )));
                 for (i, scope) in a.dialog.requested().into_iter().enumerate() {
@@ -394,7 +401,7 @@ impl WorkspaceView {
                 body = body
                     .child(line(format!(
                         "\u{201c}{}\u{201d} wants to type into {pane}.",
-                        r.client_name
+                        dialog_text(&r.client_name, MAX_DIALOG_NAME)
                     )))
                     .child(div().text_xs().text_color(muted).child(match r.reason {
                         halyard_ipc::SendTextReason::ControlCharacters => {
@@ -440,6 +447,10 @@ impl WorkspaceView {
                         } else {
                             to_hsla(ui.border)
                         })
+                        // The part that gives way in a short window, down to
+                        // about three lines.
+                        .flex_shrink()
+                        .min_h(px(3.0 * SCROLL_LINE))
                         .max_h(px(200.0))
                         .overflow_y_scroll()
                         .track_scroll(&a.scroll)
@@ -454,6 +465,20 @@ impl WorkspaceView {
                 }
             }
         }
+        // The pairing body is the scrolling box; the typing body holds one.
+        let body = if matches!(a.dialog.ask, Ask::Pairing(_)) {
+            div()
+                .id("approval-body")
+                .flex_1()
+                .min_h(px(3.0 * SCROLL_LINE))
+                .overflow_y_scroll()
+                .track_scroll(&a.scroll)
+                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                .child(body)
+                .into_any_element()
+        } else {
+            div().flex().flex_col().flex_1().min_h(px(0.0)).child(body).into_any_element()
+        };
         let (_, chord) = approval::approve_chord(cfg!(target_os = "macos"));
         let button = |id: &'static str, label: String, bg, fg| {
             div()
@@ -518,6 +543,8 @@ impl WorkspaceView {
                         .on_key_down(cx.listener(Self::approval_key))
                         .w(px(520.0))
                         .max_w_full()
+                        // Never taller than the window: the scrolling box gives way.
+                        .max_h(px((f32::from(window.viewport_size().height) - 16.0).max(80.0)))
                         .flex()
                         .flex_col()
                         .gap_3()
@@ -528,10 +555,11 @@ impl WorkspaceView {
                         .bg(to_hsla(ui.surface_raised))
                         .text_color(to_hsla(ui.text))
                         .shadow_lg()
-                        .child(div().text_color(to_hsla(ui.attention)).child(title))
+                        .child(div().flex_none().text_color(to_hsla(ui.attention)).child(title))
                         .child(body)
                         .child(
                             div()
+                                .flex_none()
                                 .flex()
                                 .flex_row()
                                 .justify_end()

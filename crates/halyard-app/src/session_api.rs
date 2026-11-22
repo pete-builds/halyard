@@ -389,15 +389,55 @@ pub fn pane_cwd(session: &Session) -> Option<String> {
     dir.to_str().and_then(halyard_workspace::persist::valid_cwd).map(str::to_owned)
 }
 
+/// Longest untrusted name a dialog shows (a pane title, a folder, a client name),
+/// in characters after escaping; the same cap as notification titles.
+pub const MAX_DIALOG_NAME: usize = crate::attention_ui::MAX_TITLE;
+
+/// Longest executable path a dialog shows, in characters after escaping.
+pub const MAX_DIALOG_PATH: usize = 120;
+
+/// Untrusted text for a dialog line: control, bidi and other invisible
+/// characters escaped (`\u{202e}`), then cut to `max` characters with an
+/// ellipsis, so a hostile title can neither reorder the line nor push the
+/// dialog's buttons off screen.
+#[must_use]
+pub fn dialog_text(text: &str, max: usize) -> String {
+    let escaped = halyard_ipc::text::escape_for_display(text);
+    if escaped.chars().count() <= max {
+        return escaped;
+    }
+    let mut out: String = escaped.chars().take(max.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
+}
+
+/// Like [`dialog_text`], but keeps the end (for paths, where the file name
+/// matters most).
+#[must_use]
+pub fn dialog_tail(text: &str, max: usize) -> String {
+    let escaped = halyard_ipc::text::escape_for_display(text);
+    let n = escaped.chars().count();
+    if n <= max {
+        return escaped;
+    }
+    let mut out = String::from('\u{2026}');
+    out.extend(escaped.chars().skip(n - max.saturating_sub(1)));
+    out
+}
+
 /// How a dialog names a pane: its title, else its folder, plus the id that
-/// `sessions.list` shows. Every part is untrusted text, quoted.
+/// `sessions.list` shows. Title and folder come from untrusted terminal output
+/// (the engine keeps titles up to 1024 bytes): escaped, capped, quoted.
 #[must_use]
 pub fn pane_label(info: &SessionInfo) -> String {
     let title = info.title.trim();
     let name = if title.is_empty() {
-        info.cwd.as_deref().map_or_else(|| "a pane".to_owned(), |c| format!("the pane in {c}"))
+        info.cwd.as_deref().map_or_else(
+            || "a pane".to_owned(),
+            |c| format!("the pane in {}", dialog_tail(c, MAX_DIALOG_NAME)),
+        )
     } else {
-        format!("\u{201c}{title}\u{201d}")
+        format!("\u{201c}{}\u{201d}", dialog_text(title, MAX_DIALOG_NAME))
     };
     format!("{name} (id {})", info.id)
 }

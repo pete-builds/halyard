@@ -628,7 +628,11 @@ The typing dialog shows the tool, the pane (its title, or its folder, and its id
 of the text ("2036 characters, 1 line"), the exact text escaped, and the text typed since
 the last approval when there is any, all in one box. When that box has to scroll, it is
 outlined, a line says there is more below, and Approve stays disabled, saying why, until the
-end of the box has been on screen at least once (wheel, Down, Page Down or End). A request
+end of the box has been on screen at least once (wheel, Down, Page Down or End). The
+dialog is never taller than the window; the scrolling box is what gives way, down to about
+three lines. In a window too short even for that, Approve says "Make the window taller to see
+all of it" and stays disabled while the box's top or bottom edge is outside the window,
+because a box below the window's edge reports "fits" while showing nothing. A request
 whose escaped text is over 4 KiB is refused without a dialog: error `-32005` with
 `data.reason` `"too_long_to_review"` and the message "the text is too long to show in an
 approval dialog; send it in smaller pieces, or clear the line in the pane". Runs of spaces
@@ -638,7 +642,10 @@ The pairing dialog lists the requested scopes as checkboxes (keys 1 to 5 untick 
 them), shows `input:write` and `screen:read` in the warning color, and offers "always allow
 typing from this tool" only while `input:write` is ticked. That box changes only by a
 click, never by a key. It shows the tool's name as a claim next to the kernel-reported pid
-and executable.
+and executable. In the pairing dialog the list of scopes is the scrolling part, with the
+same rule. Names from programs (pane titles, which the engine keeps up to 1024 bytes,
+folders, client names, the executable path) are shown with control, bidi and other
+invisible characters escaped and cut to 80 characters (the path to its last 120).
 
 On top of the server's limits, the app shows at most 3 pairing dialogs a minute across all
 connections, and none for 30 seconds after the user denies one; those requests are denied

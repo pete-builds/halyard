@@ -315,8 +315,14 @@ fn text_too_long_to_show_is_refused_without_a_dialog() {
     let escapes = "\u{1}".repeat(700); // each shown as `\u{0001}`, 8 bytes
     let err = c.call("session.send_text", json!({ "session_id": "s1", "text": escapes }));
     assert_eq!(err.expect_err("too long once escaped").rpc_code(), Some(code::DENIED));
-    // Just under the cap still asks.
-    let fits = "x".repeat(halyard_ipc::text::MAX_APPROVAL_DISPLAY_BYTES);
+    // The boundary: exactly the cap asks, one byte more does not.
+    let max = halyard_ipc::text::MAX_APPROVAL_DISPLAY_BYTES;
+    assert_eq!(max, 4096);
+    let over = "x".repeat(max + 1);
+    let err = c.call("session.send_text", json!({ "session_id": "s1", "text": over }));
+    assert_eq!(err.expect_err("4097 bytes").rpc_code(), Some(code::DENIED));
+    assert!(h.approver.send_seen.lock().unwrap().is_empty());
+    let fits = "x".repeat(max);
     c.call("session.send_text", json!({ "session_id": "s1", "text": fits })).expect("approved");
     assert_eq!(h.approver.send_seen.lock().unwrap().len(), 1);
 }
