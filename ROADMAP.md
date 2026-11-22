@@ -61,17 +61,42 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 
 ## Phase 3: modern shell experience
 
-- [ ] Shell integration (OSC 133, OSC 7) for zsh, bash, fish
-- [ ] Command blocks: navigate, copy output, rerun
+- [x] Shell integration scripts (OSC 133 A/B/C/D, OSC 633;E, OSC 7) for zsh and bash,
+  as a library (`halyard-shell`): run in real shells under a PTY by
+  `crates/halyard-shell/tests/shell_scripts.rs` (`zsh_integration`, `bash_integration`,
+  `scripts_are_inert_outside_halyard`, `scripts_are_inert_in_non_interactive_shells`).
+  Tested on macOS (zsh 5.9, bash 3.2). Ubuntu CI runs the same tests if zsh is installed
+  on the runner, otherwise they print SKIPPED.
+- [ ] fish integration script: written (`crates/halyard-shell/scripts/halyard.fish`) but
+  NOT tested; fish is not installed on the build machine and the test skips.
+- [x] Escape sequence scanner (OSC 133, 633, 7, 9, 9;4, 777, 0/1/2, BEL, alternate
+  screen, Halyard protocol) over chunks split anywhere:
+  `scanner::tests::corpus_every_pair_of_split_points`, `overflow_drops_and_resyncs`
+- [x] Command block model as a library (missing marks, nested shells, alternate
+  screen, navigation, last failed, bounded history): `halyard-shell` `blocks::tests`
+- [ ] Command blocks in the UI: wiring the scanner tap and engine rows into panes,
+  navigate, copy output, rerun (pending; needs `halyard-term` and `halyard-app`)
 - [ ] SQLite history and search
 
 ## Phase 4: agent awareness and the open protocol
 
-- [ ] Agent detection (Claude Code, Codex, OpenCode, Gemini CLI) and attention states
-- [ ] Session protocol over escape sequences (`HALYARD_SESSION_ID`)
+- [x] Agent detection (Claude Code, Codex, OpenCode, Gemini CLI, Aider, Goose, Amp) from
+  the foreground process, as a library (`halyard-agents`): `detect::tests::table`; real
+  PTY foreground lookup in `crates/halyard-agents/tests/foreground.rs` (macOS tested;
+  Linux path compiled and run by CI)
+- [x] Attention states from observable signals, as a library:
+  `attention::tests::state_machine_table`, `unread_rules`; rules in `docs/agents.md`
+- [x] Session protocol over escape sequences (OSC 7717 and the OSC 777;halyard carrier):
+  parsing and `docs/protocol.md`; Claude Code hook script tested in
+  `crates/halyard-agents/tests/claude_hook.rs` (not yet run inside a live Claude Code
+  session)
+- [ ] Setting `HALYARD_SESSION_ID` and `TERM_PROGRAM=Halyard` in each pane's environment
+  (pending: belongs to the PTY session code)
+- [x] Dashboard model (git branch without running git, attention sort order):
+  `dashboard::tests::sort_order`, `git::tests`
 - [ ] Local session API: authenticated socket, scoped capabilities, user approval for
       anything that writes to a pane
-- [ ] Agent dashboard with jump-to-pane and notifications
+- [ ] Agent dashboard with jump-to-pane and notifications: UI wiring pending
 
 ## Phase 5: optional assistant and MCP
 
