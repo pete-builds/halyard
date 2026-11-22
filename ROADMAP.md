@@ -1,7 +1,7 @@
 # Roadmap
 
 Living status. Every feature PR updates this file. "Done" means tested, and the test is
-named; untested platforms are listed as such.
+named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs/PRODUCT.md).
 
 ## Phase 0: architecture and feasibility
 
@@ -10,9 +10,8 @@ named; untested platforms are listed as such.
 - [x] Spike: `libghostty-vt` 0.2.2 builds on macOS arm64 with Zig 0.15.2 (fails on 0.17.1)
 - [x] Spike: GPUI 0.2.2 builds on macOS arm64 with Command Line Tools only (`runtime_shaders`)
 - [x] CI: fmt, clippy, test on macOS and Ubuntu; cargo-deny
-- [ ] Nix flake with dev shell and `nix build`
 
-## Phase 1: an excellent basic terminal
+## Phase 1: a fully functional terminal on macOS and NixOS
 
 - [ ] PTY sessions running the user's login shell
 - [ ] libghostty-vt adapter publishing `Frame`s
@@ -21,13 +20,20 @@ named; untested platforms are listed as such.
 - [ ] Keyboard input (including Kitty protocol via the engine's encoder), Ctrl+C
 - [ ] Resize propagation, scrollback, mouse reporting
 - [ ] Selection, copy, paste (bracketed)
+- [ ] `flake.nix`: `nix develop`, `nix build`, `nix run`, offline build (Ghostty source and
+      Zig packages pinned as inputs)
+- [ ] NixOS VM test: launches under Wayland and X11, screenshots
+- [ ] Desktop entry, icon, macOS app bundle
+- [ ] Real-hardware runs: macOS arm64 (cypher), NixOS on a real GPU (pending)
 
-## Phase 2: workspace and theming
+## Phase 2: modern UI
 
-- [ ] Tabs, split panes, keyboard pane navigation, resizing
-- [x] TOML config and token-based themes, bundled themes: library done in `crates/halyard-config` (`default_config_file_parses_to_exactly_the_default_impl`, `every_bundled_theme_meets_the_contrast_rule`, `export_round_trips_every_bundled_theme`, `reloads_on_change_reports_errors_and_handles_delete`). Wiring into the app UI (applying settings, theme picker, `halyard config` subcommand) is pending
-  - [ ] Wire config and themes into the app, including live reload notices
+- [ ] Tabs, draggable split panes, keyboard pane navigation and resizing
+- [x] TOML config and token-based themes, bundled themes (library: `crates/halyard-config`, tests named in docs/themes.md)
+- [ ] Settings wired into the app with live reload
 - [ ] Command palette
+- [ ] Persistent workspaces (layouts, cwd, names) restored on launch
+- [ ] Home Manager module: themes, fonts, keybindings, settings
 
 ## Phase 3: modern shell experience
 
@@ -35,11 +41,13 @@ named; untested platforms are listed as such.
 - [ ] Command blocks: navigate, copy output, rerun
 - [ ] SQLite history and search
 
-## Phase 4: agent workspace
+## Phase 4: agent awareness and the open protocol
 
-- [ ] Agent detection and attention states from observable signals
-- [ ] `HALYARD_SESSION_ID` and the session notification protocol
-- [ ] Agent dashboard with jump-to-pane
+- [ ] Agent detection (Claude Code, Codex, OpenCode, Gemini CLI) and attention states
+- [ ] Session protocol over escape sequences (`HALYARD_SESSION_ID`)
+- [ ] Local session API: authenticated socket, scoped capabilities, user approval for
+      anything that writes to a pane
+- [ ] Agent dashboard with jump-to-pane and notifications
 
 ## Phase 5: optional assistant and MCP
 
@@ -48,4 +56,6 @@ named; untested platforms are listed as such.
 
 ## Phase 6: production readiness
 
-- [ ] Threat model, benchmarks, packaging (macOS bundle, Nix package), release automation
+- [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane
+- [ ] Threat model, security review
+- [ ] Release automation (macOS bundle, Nix package)
