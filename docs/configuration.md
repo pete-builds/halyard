@@ -24,13 +24,20 @@ config file (see [themes.md](themes.md)).
   "did you mean" hint for near misses.
 * An invalid value is an error that names the key and the line, for example
   `config.toml:3: key `font.size`: is out of range; expected 4 to 128`.
-* `ConfigWatcher` reports a reload after a change settles (debounced, and never later than
-  500 ms after the first change of a burst): the new config, or the error for a broken edit,
-  so the app can keep the previous settings and show it. Deleting the file reloads the
-  defaults. Only events for the exact config path or the `themes/` folder next to it count; a
-  `config.toml` elsewhere does not. A relative `HALYARD_CONFIG` is resolved against the
-  working directory when Halyard starts. The `themes/` folder is watched as soon as it exists,
-  even if it is created later.
+* `ConfigWatcher` reports a reload after a change settles: the new config, or the error for a
+  broken edit, so the app can keep the previous settings and show it. A change is a different
+  fingerprint, checked about once a second and woken early by file system notifications: for
+  `config.toml`, the path it resolves to after following every symlink (fresh each time), its
+  size, modification time and a hash of its content; for `themes/` next to it, the sorted
+  names of the `*.toml` files with the same data for each. So an edit made through a symlink, a
+  symlink swapped by rename or by unlink and link (Home Manager, stow, chezmoi), a directory
+  moved into place or away, a `themes/` folder created later, and a file that appears,
+  disappears or is recreated are all noticed, and unrelated files in the same folders are not.
+  If notifications are unavailable the once-a-second check still works. After the first
+  change the reload waits until things are quiet (the debounce), and never longer than 500 ms
+  in total. When the file does not exist the event holds the defaults and a warning that says
+  so. A relative `HALYARD_CONFIG` is resolved against the working directory when Halyard
+  starts. Dropping the watcher stops and joins its thread.
 
 ### Error messages never contain values
 
@@ -42,7 +49,9 @@ holds for theme files and for the Ghostty importer.
 Which key names can appear in a message:
 
 * Keys Halyard defines (`font.size`, `ai.providers[0].kind`, a chord under `[keybindings]`).
-* An unknown key name OUTSIDE `[ai]`, in the "unknown key" warning with its "did you mean" hint.
+* An unknown key name OUTSIDE `[ai]`, in the "unknown key" warning with its "did you mean" hint,
+  and a secret-looking key name outside `[ai]` (top level or any section), in the error that
+  rejects it. The value is never shown.
 * Never an unknown or secret-looking key name under `[ai]`, at any depth. Those are reported as
   "unknown key in [ai]" (or "in [[ai.providers]]") with the section and the line, because a
   pasted key can end up as a key name. Open that line to see it.

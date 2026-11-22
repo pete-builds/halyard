@@ -613,9 +613,57 @@ fn find_secret_name(src: &str, table: &DeTable<'_>) -> Option<usize> {
     None
 }
 
-/// Reject any secret-looking key name anywhere under `[ai]`. Decided from the parsed tree, so
-/// quoting, dotted keys and multi-line strings cannot hide one. Names are never reported.
+/// A secret-looking key NAME outside `[ai]`: top level, any section, any depth. Documented
+/// names (such as the `keybindings` section) are exempt, and the chords inside `[keybindings]`
+/// are not checked at all. Returns the dotted path and line. Only the name is ever shown.
+fn find_secret_outside_ai(
+    src: &str,
+    table: &DeTable<'_>,
+    prefix: &str,
+    top: bool,
+) -> Option<(String, usize)> {
+    const SECTION_SCHEMAS: [Schema; 6] = [FONT, WINDOW, TERMINAL, SHELL, THEME, AGENTS];
+    for (k, v) in table {
+        let name = k.get_ref().as_ref();
+        let path = if prefix.is_empty() { name.to_string() } else { format!("{prefix}.{name}") };
+        if top && matches!(name, "ai" | "keybindings") {
+            continue;
+        }
+        let known =
+            (top && TOP_KEYS.contains(&name)) || SECTION_SCHEMAS.iter().any(|s| in_schema(s, name));
+        let lower = name.to_ascii_lowercase();
+        if !known && SECRET_FRAGMENTS.iter().any(|f| lower.contains(f)) {
+            return Some((path, line_of_offset(src, k.span().start)));
+        }
+        let nested = match v.get_ref() {
+            DeValue::Table(t) => find_secret_outside_ai(src, t, &path, false),
+            DeValue::Array(a) => a
+                .iter()
+                .filter_map(|x| x.get_ref().as_table())
+                .find_map(|t| find_secret_outside_ai(src, t, &path, false)),
+            _ => None,
+        };
+        if nested.is_some() {
+            return nested;
+        }
+    }
+    None
+}
+
+/// Reject any secret-looking key name anywhere in the file. Decided from the parsed tree, so
+/// quoting, dotted keys and multi-line strings cannot hide one. Under `[ai]` the name is never
+/// reported; elsewhere the key path (a name) is, and the value never is.
 fn reject_secrets(src: &str, root: &DeTable<'_>) -> Result<(), ConfigError> {
+    if let Some((path, line)) = find_secret_outside_ai(src, root, "", true) {
+        return Err(ConfigError::at(
+            &path,
+            Some(line),
+            "this key is named like a secret (key, token, secret, password or auth). Halyard never \
+             stores API keys in the config file. Export the key in an environment variable (or keep \
+             it in your keychain or secret manager and export it from there) and set \
+             `api_key_env = \"NAME_OF_VARIABLE\"` on an `[[ai.providers]]` entry instead",
+        ));
+    }
     let Some(ai) = sub_table(root, "ai") else { return Ok(()) };
     if let Some(line) = find_secret_name(src, ai) {
         // Say where: the nearest documented section, never the name.

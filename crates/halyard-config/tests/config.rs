@@ -649,3 +649,27 @@ fn no_error_or_warning_ever_echoes_a_value_whatever_the_section() {
     }
     assert!(checked > 800 && errors > 400, "checked {checked}, errors {errors}: not a real test");
 }
+
+#[test]
+fn secret_looking_key_names_are_rejected_at_the_top_level_and_in_every_section() {
+    for (src, key) in [
+        (format!("api_key = \"{SENT}\"\n"), "api_key"),
+        (format!("\"Authorization\" = \"{SENT}\"\n"), "Authorization"),
+        (format!("[font]\ntoken = \"{SENT}\"\n"), "font.token"),
+        (format!("[window]\n\"Secret\" = \"{SENT}\"\n"), "window.Secret"),
+        (
+            format!("[terminal.shell]\nprogram = \"sh\"\npasswd = \"{SENT}\"\n"),
+            "terminal.shell.passwd",
+        ),
+        (format!("\"agents\".\"x-api-key\" = \"{SENT}\"\n"), "agents.x-api-key"),
+        (format!("[mystery.deeper]\nPASSWORD = \"{SENT}\"\n"), "mystery.deeper.PASSWORD"),
+    ] {
+        let e = err(&src);
+        assert_eq!(e.key.as_deref(), Some(key), "{src:?}: {e}");
+        assert!(e.message.contains("never stores API keys"), "{e}");
+        assert!(!format!("{e} {e:?}").contains(SENT), "the value must not be echoed: {e}");
+    }
+    // Control: documented names and chords containing those fragments are fine.
+    let ok = "[keybindings]\n\"cmd+k\" = \"find\"\n[ai]\nenabled = false\n";
+    assert!(Config::parse(ok).is_ok());
+}
