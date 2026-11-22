@@ -13,6 +13,9 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 
 ## Phase 1: a fully functional terminal on macOS and NixOS
 
+- [x] Fedora, Debian, Arch, Ubuntu CI targets (`.github/workflows/distros.yml`, all four green; headless
+      only). Debian stable's fish 4.0.2 sends no B mark, so `halyard.fish` now appends it on fish 4.0 to
+      4.2 (tests `fish_integration`, `fish_integration_without_native_marks`)
 - [x] PTY sessions running the user's login shell (`halyard-term::Session`; tests
       `default_program_is_a_login_shell`, `shell_echo_reaches_the_screen`,
       `session_environment_is_set`, `shell_exit_reports_status`,
@@ -201,6 +204,7 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 
 ## Phase 6: production readiness
 
+- [ ] Flatpak package (see `docs/adr/0005-linux-distribution.md`)
 - [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane
 - [x] Threat model written: `docs/THREAT_MODEL.md` (cites code in PRs that were still open when it was written)
 - [ ] Security review (no outside review yet)

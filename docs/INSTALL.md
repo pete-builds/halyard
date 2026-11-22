@@ -101,6 +101,58 @@ cargo build --release --locked -p halyard-app
 ./target/release/halyard
 ```
 
+## Building on Linux distributions
+
+Fedora, Debian, Ubuntu and Arch are official targets. `.github/workflows/distros.yml`
+builds `halyard-app` and runs the workspace tests inside each distro's own container image,
+using the package lists below. **CI verifies the build and the headless tests only.** It
+does not start a desktop session or open a window. NixOS real-hardware verification is
+separate and is tracked in `ROADMAP.md`.
+
+Install these packages, then install Rust through rustup (`rust-toolchain.toml` picks the
+toolchain) and Zig 0.15.2 exactly from ziglang.org, which no distro package manager
+provides at that version:
+
+Fedora (dnf):
+
+```sh
+sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config git curl xz tar \
+    libxkbcommon-devel libxkbcommon-x11-devel libxcb-devel wayland-devel \
+    vulkan-loader-devel fontconfig-devel freetype-devel \
+    libX11-devel libXcursor-devel libXi-devel libXrandr-devel \
+    vim-enhanced less htop zsh fish bash procps-ng
+```
+
+Debian and Ubuntu (apt):
+
+```sh
+sudo apt-get install -y --no-install-recommends ca-certificates gcc g++ make \
+    pkg-config git curl xz-utils tar \
+    libxkbcommon-dev libxkbcommon-x11-dev libxcb1-dev libwayland-dev \
+    libvulkan-dev libfontconfig-dev libfreetype-dev \
+    libx11-dev libxcursor-dev libxi-dev libxrandr-dev libx11-xcb-dev \
+    vim less htop zsh fish bash procps
+```
+
+Arch (pacman):
+
+```sh
+sudo pacman -Syu --noconfirm --needed base-devel git curl xz tar \
+    libxkbcommon libxkbcommon-x11 libxcb wayland vulkan-icd-loader \
+    vulkan-headers fontconfig freetype2 libx11 libxcursor libxi libxrandr \
+    vim less htop zsh fish bash procps-ng
+```
+
+The last line of each list (vim, less, htop, zsh, fish) is only for the tests that drive
+real programs; you do not need them to run Halyard. Then:
+
+```sh
+cargo build --release --locked -p halyard-app
+CI=1 cargo test --workspace --locked
+```
+
+A Flatpak is planned; see [ADR 0005](adr/0005-linux-distribution.md).
+
 ## Not available
 
 No Homebrew formula or cask, no `.deb` or `.rpm`, no Windows build, and no auto-update.
