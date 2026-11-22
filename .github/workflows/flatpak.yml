@@ -55,7 +55,10 @@ jobs:
           bundle: halyard.flatpak
           arch: ${{ matrix.arch }}
           artifact-name: halyard-${{ matrix.arch }}.flatpak
-          cache-key: flatpak-builder-${{ hashFiles('packaging/flatpak/*.yml', 'packaging/flatpak/*.json') }}
+          # A restored .flatpak-builder cache made the runtime update fail with
+          # "Invalid cross-device link" (2026-11-22), and this repo already saw a
+          # cancelled run poison a Zig cache. A clean build takes about 9 minutes.
+          cache: false
       - name: Install the bundle
         run: |
           flatpak install --user --noninteractive --assumeyes halyard.flatpak
