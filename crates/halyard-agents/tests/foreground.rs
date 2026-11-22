@@ -103,16 +103,28 @@ impl Pty {
     /// Reads the foreground process once it has finished exec'ing: right after
     /// fork it is still a copy of this test binary.
     fn exec_done_info(&self) -> halyard_agents::ProcessInfo {
-        let me = std::env::current_exe().unwrap();
+        self.exec_done_info_from(&std::env::current_exe().unwrap())
+    }
+
+    /// Reads the foreground process once it is no longer a copy of `forked_from`.
+    /// Between fork and exec the new group leader already holds the terminal but
+    /// still runs its parent's image: this test binary for a direct spawn, the
+    /// shell for a job the shell started. A read in that window is accurate, it
+    /// just describes the program before the exec.
+    fn exec_done_info_from(&self, forked_from: &Path) -> halyard_agents::ProcessInfo {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Ok(info) = self.read_foreground()
                 && !info.argv.is_empty()
-                && info.exe.as_deref().and_then(Path::file_name) != me.file_name()
+                && info.exe.as_deref().and_then(Path::file_name) != forked_from.file_name()
             {
                 return info;
             }
-            assert!(Instant::now() < deadline, "child never finished exec\n{}", self.trace);
+            assert!(
+                Instant::now() < deadline,
+                "foreground never stopped being a copy of {forked_from:?}\n{}",
+                self.trace
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -168,15 +180,27 @@ fn follows_the_foreground_job_of_an_interactive_shell() {
     let pty = Pty::spawn(cmd);
     let shell_pid = pty.child.process_id().expect("pid") as i32;
     pty.wait_foreground(|pg| pg == shell_pid);
+    let shell = pty.exec_done_info();
+    let t = &pty.trace;
+    assert_eq!(shell.pid, shell_pid, "{t}");
+    let shell_exe = shell.exe.expect("exe path readable for our own child");
+    assert_eq!(shell_exe, std::fs::canonicalize(&bash).unwrap(), "{t}");
 
     let mut w = pty.master.take_writer().expect("writer");
     w.write_all(b"sleep 7\r").unwrap();
     w.flush().unwrap();
     let job = pty.wait_foreground(|pg| pg != shell_pid);
-    let info = pty.exec_done_info();
+    // The shell hands the terminal to the job before the job execs `sleep`
+    // (seen on Ubuntu CI and on macOS under load): wait for that exec rather than
+    // taking the first read, which can still be the shell's fork.
+    let info = pty.exec_done_info_from(&shell_exe);
     let t = &pty.trace;
     assert_eq!(info.pid, job, "{t}");
     assert_eq!(info.argv, vec!["sleep".to_string(), "7".into()], "{t}");
+    // The shell ran the `sleep` this test finds on the same PATH.
+    let sleep = find_in_path("sleep").expect("sleep is on PATH");
+    assert_eq!(info.exe, Some(std::fs::canonicalize(&sleep).unwrap()), "{t}");
+    assert_eq!(detect_agent(&info), None, "{t}");
 
     // Ctrl+C ends the job and the shell is foreground again.
     w.write_all(b"\x03").unwrap();
