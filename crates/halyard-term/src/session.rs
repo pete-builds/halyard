@@ -1,0 +1,794 @@
+//! A program running in a PTY, with its VT engine on a dedicated thread.
+//!
+//! Threads per session:
+//!
+//! - **reader**: blocking reads from the PTY master, forwarding chunks over a
+//!   bounded channel (backpressure: a flood of output cannot grow memory
+//!   without bound).
+//! - **session**: owns the [`Engine`] (which is `!Send`), consumes output and
+//!   commands, and publishes [`Frame`]s at most once per [`FRAME_INTERVAL`].
+//! - **writer**: blocking writes to the PTY master, so a program that is not
+//!   reading its input (a large paste into `sleep`) never stalls rendering.
+//! - **waiter**: blocks on the child process and reports its exit status.
+//!
+//! The [`Session`] handle is `Send + Sync`; the UI talks to it from any thread.
+
+use std::ffi::{CStr, OsString};
+use std::fmt;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crossbeam_channel::{Receiver, Sender, bounded, never, select, unbounded};
+use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+
+use crate::engine::{Engine, EngineError};
+use crate::frame::Frame;
+use crate::input::{KeyInput, MouseInput, ScrollRequest};
+use crate::palette::Palette;
+
+/// Minimum time between two published frames while output is streaming.
+pub const FRAME_INTERVAL: Duration = Duration::from_millis(8);
+
+/// How long to keep reading output after the child exits, so its last words
+/// reach the screen before [`SessionEvent::Exited`] is reported.
+const EXIT_DRAIN: Duration = Duration::from_millis(200);
+
+/// A callback the session calls (from its own thread) after queueing an
+/// event, so the UI can wake up and drain [`Session::events`].
+pub type NotifyFn = Arc<dyn Fn() + Send + Sync>;
+
+/// A tap that sees every raw PTY output chunk before the engine parses it.
+/// It runs on the session thread and must return quickly.
+pub type OutputTap = Box<dyn FnMut(&[u8]) + Send>;
+
+/// How to start a session.
+pub struct SessionConfig {
+    /// Program to run. `None` runs the user's login shell (see
+    /// [`default_shell`]) as a login shell.
+    pub program: Option<PathBuf>,
+    /// Arguments for `program`. Ignored when `program` is `None`.
+    pub args: Vec<String>,
+    /// Working directory. `None` uses `$HOME`.
+    pub cwd: Option<PathBuf>,
+    /// Extra environment variables, applied after Halyard's own.
+    pub env: Vec<(String, String)>,
+    /// Environment variables to remove from the inherited environment.
+    pub env_remove: Vec<String>,
+    /// Initial width in cells.
+    pub cols: u16,
+    /// Initial height in cells.
+    pub rows: u16,
+    /// Cell width in pixels.
+    pub cell_width: u32,
+    /// Cell height in pixels.
+    pub cell_height: u32,
+    /// Lines of scrollback to keep.
+    pub scrollback_lines: usize,
+    /// Colors.
+    pub palette: Palette,
+    /// Treat the macOS Option key as Alt (see [`Engine::set_option_as_alt`]).
+    pub option_as_alt: bool,
+    /// Called after each event is queued.
+    pub notify: Option<NotifyFn>,
+    /// Sees raw output before the engine (for shell-integration scanners).
+    pub output_tap: Option<OutputTap>,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            program: None,
+            args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            cols: 80,
+            rows: 24,
+            cell_width: 8,
+            cell_height: 16,
+            scrollback_lines: 10_000,
+            palette: Palette::default(),
+            option_as_alt: false,
+            notify: None,
+            output_tap: None,
+        }
+    }
+}
+
+impl fmt::Debug for SessionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionConfig")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("cwd", &self.cwd)
+            .field("env", &self.env)
+            .field("env_remove", &self.env_remove)
+            .field("cols", &self.cols)
+            .field("rows", &self.rows)
+            .field("cell_width", &self.cell_width)
+            .field("cell_height", &self.cell_height)
+            .field("scrollback_lines", &self.scrollback_lines)
+            .field("palette", &self.palette)
+            .field("option_as_alt", &self.option_as_alt)
+            .field("notify", &self.notify.is_some())
+            .field("output_tap", &self.output_tap.is_some())
+            .finish()
+    }
+}
+
+/// Something the UI may want to react to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionEvent {
+    /// A new frame is available from [`Session::latest_frame`].
+    FrameReady,
+    /// The program set the window title.
+    TitleChanged(String),
+    /// The program rang the bell.
+    Bell,
+    /// The program exited. `Some(code)` for a normal exit, `None` when it was
+    /// killed by a signal or its status could not be read.
+    Exited(Option<i32>),
+}
+
+/// Failure to start a session.
+#[derive(Debug)]
+pub enum SessionError {
+    /// Opening the PTY or spawning the program failed.
+    Spawn(String),
+    /// The VT engine could not be created.
+    Engine(EngineError),
+    /// A thread could not be started.
+    Thread(std::io::Error),
+}
+
+impl fmt::Display for SessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Spawn(e) => write!(f, "could not start the program: {e}"),
+            Self::Engine(e) => write!(f, "{e}"),
+            Self::Thread(e) => write!(f, "could not start a session thread: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
+
+enum Command {
+    Write(Vec<u8>),
+    Key(KeyInput),
+    Mouse(MouseInput),
+    Paste(String),
+    Resize { cols: u16, rows: u16, cell_width: u32, cell_height: u32 },
+    Scroll(ScrollRequest),
+    SelectStart(u16, u16),
+    SelectExtend(u16, u16),
+    SelectWord(u16, u16),
+    SelectClear,
+    SelectionText(Sender<Option<String>>),
+    SetPalette(Palette),
+    Shutdown,
+}
+
+/// A running terminal session. Dropping it terminates the program.
+pub struct Session {
+    id: String,
+    pid: Option<u32>,
+    commands: Sender<Command>,
+    events: Receiver<SessionEvent>,
+    frame: Arc<Mutex<Arc<Frame>>>,
+}
+
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Session").field("id", &self.id).field("pid", &self.pid).finish()
+    }
+}
+
+/// The user's login shell: `$SHELL` if it names an executable, else the
+/// shell in the password database, else `/bin/sh`.
+#[must_use]
+pub fn default_shell() -> PathBuf {
+    if let Some(shell) = std::env::var_os("SHELL").map(PathBuf::from)
+        && is_executable(&shell)
+    {
+        return shell;
+    }
+    if let Some(shell) = passwd_shell()
+        && is_executable(&shell)
+    {
+        return shell;
+    }
+    PathBuf::from("/bin/sh")
+}
+
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.is_absolute()
+        && std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+fn passwd_shell() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let mut buf: Vec<libc::c_char> = vec![0; 4096];
+    loop {
+        // SAFETY: passwd is plain old data; an all-zero value is valid.
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: every pointer refers to live, writable storage of the
+        // stated size, and getpwuid_r is the reentrant variant.
+        let rc = unsafe {
+            libc::getpwuid_r(uid, &raw mut pwd, buf.as_mut_ptr(), buf.len(), &raw mut result)
+        };
+        if rc == libc::ERANGE && buf.len() < (1 << 20) {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if rc != 0 || result.is_null() || pwd.pw_shell.is_null() {
+            return None;
+        }
+        // SAFETY: on success pw_shell points to a NUL-terminated string
+        // inside `buf`, which is still alive.
+        let shell = unsafe { CStr::from_ptr(pwd.pw_shell) };
+        let bytes = shell.to_bytes();
+        return (!bytes.is_empty()).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(bytes)));
+    }
+}
+
+fn new_session_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
+    let mut cmd = if let Some(program) = &config.program {
+        let mut cmd = CommandBuilder::new(program);
+        cmd.args(&config.args);
+        cmd
+    } else {
+        // portable-pty runs the builder's $SHELL as a login shell
+        // (argv[0] = "-zsh") when no program is given.
+        let mut cmd = CommandBuilder::new_default_prog();
+        cmd.env("SHELL", default_shell());
+        cmd
+    };
+    if let Some(cwd) = &config.cwd {
+        cmd.cwd(cwd);
+    }
+    for key in &config.env_remove {
+        cmd.env_remove(key);
+    }
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM_PROGRAM", "Halyard");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    cmd.env("HALYARD_SESSION_ID", session_id);
+    for (k, v) in &config.env {
+        cmd.env(OsString::from(k), OsString::from(v));
+    }
+    cmd
+}
+
+fn pty_size(cols: u16, rows: u16, cell_width: u32, cell_height: u32) -> PtySize {
+    let px = |cells: u16, cell: u32| {
+        u16::try_from(u32::from(cells).saturating_mul(cell)).unwrap_or(u16::MAX)
+    };
+    PtySize {
+        rows: rows.max(1),
+        cols: cols.max(1),
+        pixel_width: px(cols, cell_width),
+        pixel_height: px(rows, cell_height),
+    }
+}
+
+fn spawn_thread(
+    name: &str,
+    f: impl FnOnce() + Send + 'static,
+) -> Result<thread::JoinHandle<()>, SessionError> {
+    thread::Builder::new().name(name.to_owned()).spawn(f).map_err(SessionError::Thread)
+}
+
+impl Session {
+    /// Start `config.program` (or the login shell) in a new PTY.
+    pub fn spawn(mut config: SessionConfig) -> Result<Self, SessionError> {
+        let id = new_session_id();
+        let spawn_err = |e: &dyn fmt::Display| SessionError::Spawn(format!("{e:#}"));
+        let size = pty_size(config.cols, config.rows, config.cell_width, config.cell_height);
+        let pair = native_pty_system().openpty(size).map_err(|e| spawn_err(&e))?;
+        let cmd = build_command(&config, &id);
+        let mut child = pair.slave.spawn_command(cmd).map_err(|e| spawn_err(&e))?;
+        // The parent must not hold the slave open, or the reader never sees
+        // end-of-file when the program exits.
+        drop(pair.slave);
+        let pid = child.process_id();
+        let killer = child.clone_killer();
+        let reader = pair.master.try_clone_reader().map_err(|e| spawn_err(&e))?;
+        let writer = pair.master.take_writer().map_err(|e| spawn_err(&e))?;
+
+        let (out_tx, out_rx) = bounded::<Vec<u8>>(32);
+        let (cmd_tx, cmd_rx) = unbounded::<Command>();
+        let (write_tx, write_rx) = unbounded::<Vec<u8>>();
+        let (exit_tx, exit_rx) = bounded::<Option<i32>>(1);
+        let (event_tx, event_rx) = unbounded::<SessionEvent>();
+        let frame = Arc::new(Mutex::new(Arc::new(Frame::default())));
+        let (ready_tx, ready_rx) = bounded::<Result<(), EngineError>>(1);
+
+        spawn_thread("halyard-pty-reader", move || read_loop(reader, &out_tx))?;
+        spawn_thread("halyard-pty-writer", move || write_loop(writer, &write_rx))?;
+        spawn_thread("halyard-child-wait", move || {
+            let code = match child.wait() {
+                Ok(status) if status.signal().is_none() => i32::try_from(status.exit_code()).ok(),
+                Ok(_) => None,
+                Err(e) => {
+                    eprintln!("halyard-term: waiting for the child failed: {e}");
+                    None
+                }
+            };
+            // The session may already be gone; nothing to report then.
+            exit_tx.send(code).ok();
+        })?;
+
+        let mut shared = SessionThread {
+            master: pair.master,
+            killer,
+            out_rx,
+            cmd_rx,
+            write_tx,
+            exit_rx,
+            event_tx,
+            frame: Arc::clone(&frame),
+            notify: config.notify.take(),
+            tap: config.output_tap.take(),
+        };
+        let (cols, rows, cw, ch) =
+            (config.cols, config.rows, config.cell_width, config.cell_height);
+        let (scrollback, palette) = (config.scrollback_lines, config.palette.clone());
+        let option_as_alt = config.option_as_alt;
+        spawn_thread("halyard-session", move || {
+            let engine = Engine::new(cols, rows, scrollback, &palette)
+                .and_then(|mut e| e.resize(cols, rows, cw, ch).map(|()| e))
+                .map(|mut e| {
+                    e.set_option_as_alt(option_as_alt);
+                    e
+                });
+            match engine {
+                Ok(engine) => {
+                    // The receiver waits for this message; if it is gone the
+                    // spawn call already failed and the loop exits on its own.
+                    ready_tx.send(Ok(())).ok();
+                    shared.run(engine);
+                }
+                Err(e) => {
+                    ready_tx.send(Err(e)).ok();
+                    shared.shutdown();
+                }
+            }
+        })?;
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(SessionError::Engine(e)),
+            Err(_) => {
+                return Err(SessionError::Spawn(
+                    "the session thread stopped during startup".into(),
+                ));
+            }
+        }
+        Ok(Self { id, pid, commands: cmd_tx, events: event_rx, frame })
+    }
+
+    /// The value of `HALYARD_SESSION_ID` given to the program.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The child's process id, if the platform reported one.
+    #[must_use]
+    pub const fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Events from the session. Drain with `try_recv` after a notify call,
+    /// or block with `recv_timeout`.
+    #[must_use]
+    pub const fn events(&self) -> &Receiver<SessionEvent> {
+        &self.events
+    }
+
+    /// The most recently published frame.
+    #[must_use]
+    pub fn latest_frame(&self) -> Arc<Frame> {
+        Arc::clone(&self.frame.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    fn send(&self, cmd: Command) {
+        // A send only fails after the session thread stopped, which happens
+        // once the session is shut down; input to a dead session is dropped.
+        self.commands.send(cmd).ok();
+    }
+
+    /// Write raw bytes to the program's input.
+    pub fn write(&self, bytes: impl Into<Vec<u8>>) {
+        self.send(Command::Write(bytes.into()));
+    }
+
+    /// Send a key, encoded for the program's current keyboard modes.
+    pub fn send_key(&self, key: KeyInput) {
+        self.send(Command::Key(key));
+    }
+
+    /// Send a mouse event. Nothing is sent unless the program enabled mouse
+    /// tracking (see [`Frame::mouse_tracking`]).
+    pub fn send_mouse(&self, mouse: MouseInput) {
+        self.send(Command::Mouse(mouse));
+    }
+
+    /// Paste text: unsafe control bytes are neutralized and the text is
+    /// bracketed when the program enabled bracketed paste. Check
+    /// [`crate::paste_is_safe`] first if you want to confirm multi-line
+    /// pastes with the user.
+    pub fn paste(&self, text: impl Into<String>) {
+        self.send(Command::Paste(text.into()));
+    }
+
+    /// Resize the grid (the engine reflows) and the PTY (the program gets
+    /// `SIGWINCH`). Cell sizes are in pixels.
+    pub fn resize(&self, cols: u16, rows: u16, cell_width: u32, cell_height: u32) {
+        self.send(Command::Resize { cols, rows, cell_width, cell_height });
+    }
+
+    /// Move the viewport through scrollback.
+    pub fn scroll(&self, request: ScrollRequest) {
+        self.send(Command::Scroll(request));
+    }
+
+    /// Start a selection at a viewport cell (clears the old one).
+    pub fn selection_start(&self, col: u16, row: u16) {
+        self.send(Command::SelectStart(col, row));
+    }
+
+    /// Extend the selection to a viewport cell.
+    pub fn selection_extend(&self, col: u16, row: u16) {
+        self.send(Command::SelectExtend(col, row));
+    }
+
+    /// Select the word at a viewport cell.
+    pub fn select_word(&self, col: u16, row: u16) {
+        self.send(Command::SelectWord(col, row));
+    }
+
+    /// Clear the selection.
+    pub fn selection_clear(&self) {
+        self.send(Command::SelectClear);
+    }
+
+    /// The selected text, or `None` when nothing is selected. Blocks until
+    /// the session thread answers (at most one second).
+    #[must_use]
+    pub fn selection_text(&self) -> Option<String> {
+        let (tx, rx) = bounded(1);
+        self.send(Command::SelectionText(tx));
+        rx.recv_timeout(Duration::from_secs(1)).ok().flatten()
+    }
+
+    /// Change the colors.
+    pub fn set_palette(&self, palette: Palette) {
+        self.send(Command::SetPalette(palette));
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.send(Command::Shutdown);
+    }
+}
+
+fn read_loop(mut reader: Box<dyn Read + Send>, out: &Sender<Vec<u8>>) {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match reader.read(&mut buf) {
+            // End of file, or EIO once the program closed the PTY: done.
+            Ok(0) => return,
+            Ok(n) => {
+                if out.send(buf[..n].to_vec()).is_err() {
+                    return;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
+fn write_loop(mut writer: Box<dyn Write + Send>, input: &Receiver<Vec<u8>>) {
+    for bytes in input {
+        if let Err(e) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
+            eprintln!("halyard-term: writing to the PTY failed: {e}");
+            return;
+        }
+    }
+}
+
+struct SessionThread {
+    master: Box<dyn MasterPty + Send>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
+    out_rx: Receiver<Vec<u8>>,
+    cmd_rx: Receiver<Command>,
+    write_tx: Sender<Vec<u8>>,
+    exit_rx: Receiver<Option<i32>>,
+    event_tx: Sender<SessionEvent>,
+    frame: Arc<Mutex<Arc<Frame>>>,
+    notify: Option<NotifyFn>,
+    tap: Option<OutputTap>,
+}
+
+impl SessionThread {
+    fn emit(&self, event: SessionEvent) {
+        // The UI may have stopped listening; the session keeps running.
+        if self.event_tx.send(event).is_ok()
+            && let Some(notify) = &self.notify
+        {
+            notify();
+        }
+    }
+
+    fn publish(&self, engine: &mut Engine) {
+        match engine.frame() {
+            Ok(frame) => {
+                *self.frame.lock().unwrap_or_else(PoisonError::into_inner) = Arc::new(frame);
+                self.emit(SessionEvent::FrameReady);
+            }
+            Err(e) => eprintln!("halyard-term: {e}"),
+        }
+    }
+
+    fn to_pty(&self, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            // The writer thread stops only after a write error, which it
+            // already reported.
+            self.write_tx.send(bytes).ok();
+        }
+    }
+
+    fn shutdown(&mut self) {
+        if let Err(e) = self.killer.kill() {
+            // Already exited is the common case here.
+            if e.kind() != std::io::ErrorKind::InvalidInput {
+                eprintln!("halyard-term: stopping the child: {e}");
+            }
+        }
+    }
+
+    fn run(mut self, mut engine: Engine) {
+        self.publish(&mut engine);
+        let mut last_publish = Instant::now();
+        let mut dirty = false;
+        let mut reader_open = true;
+        let mut exit_code: Option<Option<i32>> = None;
+        let mut exit_deadline: Option<Instant> = None;
+        let mut exit_reported = false;
+        let mut child_running = true;
+
+        loop {
+            let now = Instant::now();
+            let mut timeout = Duration::from_secs(3600);
+            if dirty {
+                timeout = timeout.min(FRAME_INTERVAL.saturating_sub(now - last_publish));
+            }
+            if let Some(deadline) = exit_deadline {
+                timeout = timeout.min(deadline.saturating_duration_since(now));
+            }
+            let out_rx = if reader_open { self.out_rx.clone() } else { never() };
+            let exit_rx = if child_running { self.exit_rx.clone() } else { never() };
+
+            select! {
+                recv(out_rx) -> msg => match msg {
+                    Ok(chunk) => {
+                        if let Some(tap) = self.tap.as_mut() {
+                            tap(&chunk);
+                        }
+                        engine.write(&chunk);
+                        let fx = engine.take_effects();
+                        self.to_pty(fx.pty_reply);
+                        if fx.bell {
+                            self.emit(SessionEvent::Bell);
+                        }
+                        if fx.title_changed {
+                            self.emit(SessionEvent::TitleChanged(engine.title()));
+                        }
+                        dirty = true;
+                    }
+                    Err(_) => {
+                        reader_open = false;
+                        if exit_code.is_some() {
+                            exit_deadline = Some(Instant::now());
+                        }
+                    }
+                },
+                recv(exit_rx) -> msg => {
+                    child_running = false;
+                    exit_code = Some(msg.unwrap_or(None));
+                    exit_deadline =
+                        Some(if reader_open { Instant::now() + EXIT_DRAIN } else { Instant::now() });
+                },
+                recv(self.cmd_rx) -> msg => match msg {
+                    Ok(Command::Shutdown) | Err(_) => break,
+                    Ok(cmd) => {
+                        if self.handle(&mut engine, cmd) {
+                            dirty = true;
+                        }
+                    }
+                },
+                default(timeout) => {},
+            }
+
+            if dirty && last_publish.elapsed() >= FRAME_INTERVAL {
+                self.publish(&mut engine);
+                last_publish = Instant::now();
+                dirty = false;
+            }
+            if !exit_reported
+                && let (Some(code), Some(deadline)) = (exit_code, exit_deadline)
+                && Instant::now() >= deadline
+            {
+                if dirty {
+                    self.publish(&mut engine);
+                    last_publish = Instant::now();
+                    dirty = false;
+                }
+                exit_reported = true;
+                exit_deadline = None;
+                self.emit(SessionEvent::Exited(code));
+            }
+        }
+        if !exit_reported {
+            self.shutdown();
+        }
+    }
+
+    /// Apply a command. Returns true if the screen may have changed.
+    fn handle(&self, engine: &mut Engine, cmd: Command) -> bool {
+        let report = |r: Result<(), EngineError>| {
+            if let Err(e) = r {
+                eprintln!("halyard-term: {e}");
+            }
+        };
+        match cmd {
+            Command::Write(bytes) => {
+                self.to_pty(bytes);
+                false
+            }
+            Command::Key(key) => {
+                match engine.encode_key(&key) {
+                    Ok(bytes) => self.to_pty(bytes),
+                    Err(e) => eprintln!("halyard-term: {e}"),
+                }
+                // Typing snaps the viewport back to the live screen.
+                if key.action != crate::input::KeyAction::Release {
+                    engine.scroll(ScrollRequest::Bottom);
+                    return true;
+                }
+                false
+            }
+            Command::Mouse(mouse) => {
+                match engine.encode_mouse(&mouse) {
+                    Ok(bytes) => self.to_pty(bytes),
+                    Err(e) => eprintln!("halyard-term: {e}"),
+                }
+                false
+            }
+            Command::Paste(text) => {
+                match engine.encode_paste(&text) {
+                    Ok(bytes) => self.to_pty(bytes),
+                    Err(e) => eprintln!("halyard-term: {e}"),
+                }
+                engine.scroll(ScrollRequest::Bottom);
+                true
+            }
+            Command::Resize { cols, rows, cell_width, cell_height } => {
+                report(engine.resize(cols, rows, cell_width, cell_height));
+                if let Err(e) = self.master.resize(pty_size(cols, rows, cell_width, cell_height)) {
+                    eprintln!("halyard-term: resizing the PTY failed: {e:#}");
+                }
+                true
+            }
+            Command::Scroll(request) => {
+                engine.scroll(request);
+                true
+            }
+            Command::SelectStart(col, row) => {
+                report(engine.selection_start(col, row));
+                true
+            }
+            Command::SelectExtend(col, row) => {
+                report(engine.selection_extend(col, row));
+                true
+            }
+            Command::SelectWord(col, row) => {
+                report(engine.select_word(col, row));
+                true
+            }
+            Command::SelectClear => {
+                report(engine.selection_clear());
+                true
+            }
+            Command::SelectionText(reply) => {
+                let text = engine.selection_text().unwrap_or_else(|e| {
+                    eprintln!("halyard-term: {e}");
+                    None
+                });
+                // The caller may have timed out and gone away.
+                reply.send(text).ok();
+                false
+            }
+            Command::SetPalette(palette) => {
+                report(engine.set_palette(&palette));
+                true
+            }
+            Command::Shutdown => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_handle_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<Session>();
+    }
+
+    #[test]
+    fn default_shell_is_an_executable_absolute_path() {
+        let shell = default_shell();
+        assert!(shell.is_absolute(), "{shell:?}");
+        assert!(is_executable(&shell), "{shell:?}");
+    }
+
+    #[test]
+    fn passwd_lookup_finds_a_shell() {
+        // Every CI and dev account has a passwd entry with a shell.
+        assert!(passwd_shell().is_some());
+    }
+
+    #[test]
+    fn pty_size_saturates_pixels() {
+        let s = pty_size(1000, 1000, 1000, 1000);
+        assert_eq!((s.cols, s.rows), (1000, 1000));
+        assert_eq!(s.pixel_width, u16::MAX);
+        assert_eq!(pty_size(0, 0, 8, 16).cols, 1);
+    }
+
+    #[test]
+    fn command_sets_halyard_environment() {
+        let config = SessionConfig {
+            env: vec![("FOO".into(), "bar".into())],
+            env_remove: vec!["HALYARD_TEST_REMOVED".into()],
+            ..SessionConfig::default()
+        };
+        let cmd = build_command(&config, "abc123");
+        let get = |k: &str| cmd.get_env(k).and_then(|v| v.to_str()).map(str::to_owned);
+        assert_eq!(get("TERM").as_deref(), Some("xterm-256color"));
+        assert_eq!(get("COLORTERM").as_deref(), Some("truecolor"));
+        assert_eq!(get("TERM_PROGRAM").as_deref(), Some("Halyard"));
+        assert_eq!(get("TERM_PROGRAM_VERSION").as_deref(), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(get("HALYARD_SESSION_ID").as_deref(), Some("abc123"));
+        assert_eq!(get("FOO").as_deref(), Some("bar"));
+        assert!(cmd.is_default_prog());
+        assert_eq!(get("SHELL").map(PathBuf::from), Some(default_shell()));
+    }
+
+    #[test]
+    fn session_ids_are_unique_hex() {
+        let a = new_session_id();
+        let b = new_session_id();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 32);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+}

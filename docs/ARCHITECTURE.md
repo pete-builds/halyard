@@ -21,9 +21,22 @@ Halyard is a terminal first. Everything else is layered on top and can be turned
 - `libghostty-vt` handles are `!Send + !Sync`. Each pane gets a dedicated session thread
   that owns its `Terminal`, `RenderState`, and key and mouse encoders.
 - A PTY reader thread does blocking reads and forwards byte chunks to the session thread
-  over a channel. Writes to the PTY happen on the session thread.
-- After consuming a burst of output (or at most every frame interval) the session thread
-  builds a new `Frame` and publishes it as `Arc<Frame>`, then notifies the UI.
+  over a bounded channel, so a flood of output applies backpressure instead of growing
+  memory.
+- A PTY writer thread does the blocking writes. Encoding (keys, mouse, paste, query
+  replies) happens on the session thread, but the write itself does not, so a program
+  that stops reading its input cannot stall rendering.
+- A waiter thread blocks on the child process and reports its exit status. The session
+  keeps draining output for a short grace period after the exit so the last lines reach
+  the screen before `Exited` is reported.
+- Commands from the UI (`Session` is `Send + Sync`) and output chunks meet in one
+  `crossbeam_channel::select!` loop on the session thread.
+- An optional output tap sees every raw chunk before the engine parses it; the shell
+  integration scanner plugs in there.
+- After consuming a burst of output the session thread builds a new `Frame` and publishes
+  it as `Arc<Frame>`, at most once per 8 ms while output streams, then notifies the UI
+  through a callback and an event channel (`FrameReady`, `TitleChanged`, `Bell`,
+  `Exited`).
 - The UI thread never blocks on the engine. It draws the latest frame it has.
 
 ## Engine boundary
