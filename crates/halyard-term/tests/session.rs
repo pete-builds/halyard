@@ -237,7 +237,8 @@ fn trickling_output_is_read_in_batches() {
     let (bytes, chunks) = (bytes.load(Ordering::Relaxed), chunks.load(Ordering::Relaxed));
     assert!(bytes > 400_000, "only {bytes} bytes arrived");
     let average = bytes / chunks.max(1);
-    assert!(average >= 32, "{average} bytes per chunk ({chunks} chunks)");
+    // A build without the pause measured 8 to 21 bytes; with it, at least 217.
+    assert!(average >= 64, "{average} bytes per chunk ({chunks} chunks)");
 }
 
 #[test]

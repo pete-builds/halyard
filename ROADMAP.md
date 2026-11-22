@@ -53,8 +53,11 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       updates `stty size` (verified on macOS); wheel scrolling (scrollback, alternate scroll,
       mouse reporting) and click/drag reporting are implemented but not exercised in a window.
       Scrollback length: `scrollback_lines` is converted to Ghostty's byte limit, so 10,000
-      lines are kept at 80 and 200 columns (`scrollback_keeps_the_configured_lines`, bounded by
-      `scrollback_limit_still_bounds_memory`); before, 247 rows were kept at 200 columns.
+      lines of ordinary text are kept at 80 and 200 columns (`scrollback_keeps_the_configured_lines`,
+      bounded by `scrollback_limit_still_bounds_memory`); before, 247 rows were kept at 200
+      columns. Dense lines (many styles, emoji or combining marks per line) use more of each
+      page, so fewer of them are kept: 1,893 to 3,797 of 10,000 in review measurements
+      (`docs/PERFORMANCE.md`).
 - [ ] Selection, copy, paste (bracketed). Session side done: `selection_highlights_and_copies`,
       `selection_copies_text`, `paste_is_bracketed_only_when_enabled`. Window: highlight verified;
       drag to select, double-click word, Cmd+C/Cmd+V (Ctrl+Shift+C/V on Linux) implemented
@@ -292,9 +295,6 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       100 MB on macOS (`trickling_output_is_read_in_batches`). The reader pause is macOS only
       until a Linux A/B on the NixOS box is run. Not yet: startup, memory, end to end input
       latency, GPU render time, multi-pane, Linux numbers
-- [ ] Scrollback is far shorter than configured: `scrollback_lines` reaches libghostty-vt's
-      `max_scrollback`, which Ghostty treats as bytes (247 rows kept at 200 columns for 10,000;
-      see `docs/PERFORMANCE.md`)
 - [x] Threat model written: `docs/THREAT_MODEL.md` (cites code in PRs that were still open when it was written)
 - [ ] Security review (no outside review yet)
 - [ ] Release automation: `.github/workflows/release.yml` (macOS zip, Linux tarballs, SHA256SUMS, provenance,

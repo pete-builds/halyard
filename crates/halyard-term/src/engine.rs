@@ -1132,6 +1132,36 @@ mod tests {
         assert!(scrollback_bytes(10_000, 1000, 24) > scrollback_bytes(10_000, 256, 24));
         // The configuration maximum does not overflow.
         assert!(scrollback_bytes(1_000_000, u16::MAX, u16::MAX) > 0);
+        // The pages that hold the lines and the screen, plus the partial page
+        // after a prune and one spare. With Ghostty's real page geometry the
+        // two extra pages are slack (see `scrollback_kept_through_page_prunes`),
+        // so only this arithmetic catches their removal.
+        let per_page = 371_520 / (8 * 257);
+        assert_eq!(per_page, 180);
+        assert_eq!(scrollback_bytes(10_000, 256, 24), (10_024usize.div_ceil(180) + 2) * 409_600);
+    }
+
+    #[test]
+    fn scrollback_kept_through_page_prunes() {
+        // Ghostty drops a whole page when the next one would pass the limit, so
+        // the fewest rows are kept just after a prune. Sample every few lines
+        // across more than two page cycles at the widest width the limit is
+        // sized for, where there is the least slack. Measured minimum: 10,579.
+        // Ghostty fits 186 rows per page here against the 180 assumed, so even
+        // three fewer pages would still keep 10,021: this guards the page
+        // geometry, and `scrollback_bytes_grow_with_lines_and_width` guards the
+        // spare pages.
+        let cols = SCROLLBACK_BUDGET_MIN_COLS;
+        let mut e = Engine::new(cols, 24, 10_000, &Palette::default()).unwrap();
+        e.resize(cols, 24, 8, 16).unwrap();
+        e.write(&b"x\r\n".repeat(12_000));
+        let mut fewest = u64::MAX;
+        for _ in 0..100 {
+            e.write(&b"x\r\n".repeat(5));
+            let f = e.frame().unwrap();
+            fewest = fewest.min(f.scroll.total - u64::from(f.rows));
+        }
+        assert!(fewest >= 10_000, "kept as few as {fewest} of 10,000 lines");
     }
 
     #[test]
