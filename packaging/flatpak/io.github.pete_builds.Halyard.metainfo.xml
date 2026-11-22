@@ -40,9 +40,10 @@
     <control>pointing</control>
   </supports>
   <releases>
-    <release version="0.1.0~dev" date="2026-11-22" type="development">
+    <release version="0.1.0" date="2026-11-22" type="stable">
       <description>
-        <p>First Flatpak build. Development snapshot, not a release.</p>
+        <p>First preview release: Ghostty VT engine, GPU rendering, tabs, splits, themes,
+        saved workspaces, shell integration, agent attention and the session API.</p>
       </description>
     </release>
   </releases>

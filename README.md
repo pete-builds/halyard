@@ -3,8 +3,21 @@
 A fast, open-source terminal for macOS and Linux, built to host coding agents without
 depending on any of them.
 
-> **Status: early development.** See [ROADMAP.md](ROADMAP.md) for what works today and what
-> does not. Nothing here is claimed until it is tested.
+> **Status: 0.1.0, first preview.** Usable on macOS and Linux; see [CHANGELOG.md](CHANGELOG.md)
+> for what is verified and what is not, and [ROADMAP.md](ROADMAP.md) for what comes next.
+
+## What it does today
+
+- A GPU terminal on Ghostty's VT engine with real PTYs, tabs, draggable split panes, a command
+  palette, live themes and config, and workspaces restored on launch.
+- Shell integration for zsh, bash and fish: jump between prompts, copy a command's output, see
+  which commands failed.
+- Agent awareness: Claude Code, Codex, OpenCode and Gemini CLI show as working, waiting or
+  finished on their tab and pane, with a notification when one needs you and a dashboard of
+  all of them.
+- A local session API so agents and tools can report state or ask to type, with your approval
+  for anything that touches a shell.
+- Packages: a macOS app, a Nix flake with Home Manager and NixOS modules, and a Flatpak.
 
 ## Why another terminal
 
