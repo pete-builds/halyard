@@ -197,7 +197,10 @@ in
                 package = fakeHalyard;
               };
               boot.loader.grub.enable = false;
-              fileSystems."/".device = "/dev/null";
+              fileSystems."/" = {
+                device = "/dev/null";
+                fsType = "ext4";
+              };
               system.stateVersion = "25.11";
             }
           ];
