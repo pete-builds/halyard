@@ -24,17 +24,30 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       `palette_change_recolors_ansi_and_defaults`; integration `sgr_red_is_rendered_red`)
 - [x] Headless tests: vim, less, htop through PTY plus engine (`vim_uses_the_alternate_screen`,
       `less_pages_and_quits`, `htop_starts_and_quits`)
-- [ ] GPUI window rendering the grid (colors, bold, italic, underline, wide glyphs)
+- [x] GPUI window rendering the grid (colors, bold, italic, underline, strikethrough, inverse,
+      wide glyphs, block/bar/underline/hollow cursor, selection highlight): `crates/halyard-app`.
+      Unit tests in `grid.rs` (`runs_split_on_style_and_blanks`,
+      `wide_glyphs_and_clusters_are_their_own_runs`, `backgrounds_merge_equal_neighbors_and_skip_default`,
+      `cursor_recolors_one_cell`). Verified on macOS arm64 with screenshots of a prompt, colored
+      `ls`, vim, htop, a title change, a selection and the exit notice. Linux: builds and
+      unit-tests in CI only; never run in a Linux window.
 - [ ] Keyboard input (including Kitty protocol via the engine's encoder), Ctrl+C.
       Session side done: `keys_encode_with_terminal_modes`,
       `kitty_keyboard_flags_change_encoding`, `ctrl_c_byte_interrupts_sleep`,
-      `ctrl_c_key_event_interrupts_sleep`, `typed_keys_run_a_command`. Window input pending.
+      `ctrl_c_key_event_interrupts_sleep`, `typed_keys_run_a_command`. Window: key routing in
+      `keys.rs` (`named_keys_go_to_the_terminal`, `altgr_types_the_layout_character`,
+      `platform_shortcuts_are_reserved_for_the_app`), driven through the real key handler on
+      macOS by a debug script. Not verified: a physical keyboard, IME composition, dead keys.
 - [ ] Resize propagation, scrollback, mouse reporting. Session side done:
       `resize_reaches_the_program`, `resize_reflows_and_changes_grid`,
       `scrollback_scrolls_and_typing_returns_to_bottom`, `mouse_reports_only_when_tracking`,
-      `bracketed_paste_and_mouse_reach_the_program`. Window side pending.
+      `bracketed_paste_and_mouse_reach_the_program`. Window: resizing the window reflows and
+      updates `stty size` (verified on macOS); wheel scrolling (scrollback, alternate scroll,
+      mouse reporting) and click/drag reporting are implemented but not exercised in a window.
 - [ ] Selection, copy, paste (bracketed). Session side done: `selection_highlights_and_copies`,
-      `selection_copies_text`, `paste_is_bracketed_only_when_enabled`. Window side pending.
+      `selection_copies_text`, `paste_is_bracketed_only_when_enabled`. Window: highlight verified;
+      drag to select, double-click word, Cmd+C/Cmd+V (Ctrl+Shift+C/V on Linux) implemented
+      but not exercised with a real mouse or clipboard.
 - Security and lifecycle (review of PR #2): query replies pass an allowlist so title
   reports cannot inject commands (`title_reports_are_never_sent_back`,
   `title_report_cannot_inject_a_command`); dropping a session kills its program and frees

@@ -61,3 +61,18 @@ Run them locally before opening a PR.
 Unit tests do not prove a window works. For UI changes, launch the app, exercise it, and
 take a screenshot (`screencapture -l <windowid>` on macOS). Say plainly which platforms
 were not tested.
+
+When no one is at the keyboard (or the process lacks screen recording permission), build
+with the debug-only `debug-script` feature and drive the window from a script:
+
+```sh
+cargo build --release -p halyard-app --features debug-script
+HALYARD_DEBUG_SCRIPT=steps.txt ./target/release/halyard
+```
+
+Commands, one per line: `sleep <ms>`, `type <text>`, `key <keystroke>` (GPUI syntax, through
+the real key handler), `select <c1> <r1> <c2> <r2>`, `resize <w> <h>`, `shot <file.png>`
+(macOS: captures the app's own window), `dump` (frame text to stderr), `quit`. GPUI stops
+drawing while the window is occluded and the window server returns black images while
+the display sleeps, so wake the display first (`caffeinate -u -t 1`). Mouse, IME and
+clipboard paths are not scriptable yet.
