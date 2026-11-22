@@ -17,9 +17,9 @@ pub mod watcher;
 
 pub use config::{
     AgentsConfig, AiConfig, Config, ConfigError, ConfigWarning, CursorStyle, Decorations,
-    FontConfig, Loaded, ProviderConfig, ProviderKind, ShellConfig, TerminalConfig, ThemeSelection,
-    WindowConfig, WorkingDirectory, config_path, config_path_with, default_config_toml,
-    themes_dir_for,
+    FontConfig, Loaded, ProviderConfig, ProviderKind, SessionApiConfig, ShellConfig,
+    TerminalConfig, ThemeSelection, WindowConfig, WorkingDirectory, config_path, config_path_with,
+    default_config_toml, themes_dir_for,
 };
 pub use keys::{Action, ChordError, Key, KeyChord, Keymap, Mods, NamedKey, Platform};
 pub use theme::{

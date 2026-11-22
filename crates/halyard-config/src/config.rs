@@ -344,6 +344,21 @@ impl Default for AgentsConfig {
     }
 }
 
+/// `[session_api]`
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct SessionApiConfig {
+    /// Start the local session API socket (`docs/session-api.md`), so hooks and paired
+    /// tools can talk to Halyard. Read at startup; changing it needs a restart.
+    pub enabled: bool,
+}
+
+impl Default for SessionApiConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 /// The whole configuration.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 #[serde(default)]
@@ -362,13 +377,16 @@ pub struct Config {
     pub ai: AiConfig,
     /// `[agents]`
     pub agents: AgentsConfig,
+    /// `[session_api]`
+    pub session_api: SessionApiConfig,
 }
 
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
 
-const TOP_KEYS: &[&str] = &["font", "window", "terminal", "theme", "keybindings", "ai", "agents"];
+const TOP_KEYS: &[&str] =
+    &["font", "window", "terminal", "theme", "keybindings", "ai", "agents", "session_api"];
 
 /// What a key's value must be. The checks run on the parsed document, so no error needs to
 /// quote the value to say what was wrong.
@@ -456,6 +474,7 @@ const PROVIDER: Schema = &[
     ("api_key_env", Kind::Str),
 ];
 const AGENTS: Schema = &[("notify_on_waiting", Kind::Bool), ("detect", Kind::StrArray)];
+const SESSION_API: Schema = &[("enabled", Kind::Bool)];
 
 /// Substrings that make a key name look like it holds a secret (matched case-insensitively).
 /// Applies to every key under `[ai]`, except the documented names such as `api_key_env`.
@@ -561,6 +580,7 @@ fn collect_warnings(src: &str, root: &DeTable<'_>) -> Vec<ConfigWarning> {
         ("terminal", TERMINAL),
         ("theme", THEME),
         ("agents", AGENTS),
+        ("session_api", SESSION_API),
     ] {
         if let Some(t) = sub_table(root, name) {
             unknown_in(&mut w, src, t, name, Some(schema), &[], false);
@@ -627,7 +647,8 @@ fn find_secret_outside_ai(
     prefix: &str,
     top: bool,
 ) -> Option<(String, usize)> {
-    const SECTION_SCHEMAS: [Schema; 6] = [FONT, WINDOW, TERMINAL, SHELL, THEME, AGENTS];
+    const SECTION_SCHEMAS: [Schema; 7] =
+        [FONT, WINDOW, TERMINAL, SHELL, THEME, AGENTS, SESSION_API];
     for (k, v) in table {
         let name = k.get_ref().as_ref();
         let path = if prefix.is_empty() { name.to_string() } else { format!("{prefix}.{name}") };
@@ -754,6 +775,7 @@ fn check_types(src: &str, root: &DeTable<'_>) -> Result<(), ConfigError> {
         ("terminal", TERMINAL),
         ("theme", THEME),
         ("agents", AGENTS),
+        ("session_api", SESSION_API),
         ("ai", AI),
     ] {
         if let Some(t) = sub_table(root, name) {
