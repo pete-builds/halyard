@@ -1,0 +1,99 @@
+name: flatpak
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flatpak-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Cheap, no build: the generated source lists still match Cargo.lock and the
+  # Ghostty commit libghostty-vt-sys pins.
+  sources:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Generated sources match Cargo.lock and the Ghostty pin
+        run: python3 -I packaging/flatpak/check-sources.py
+      - name: Controls, check-sources.py catches hand edits
+        run: python3 -I packaging/flatpak/test_check_sources.py
+      - name: Shell scripts
+        run: shellcheck packaging/flatpak/*.sh
+      - name: AppStream metadata and desktop entry
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends appstream desktop-file-utils
+          appstreamcli --version
+          appstreamcli validate --no-net --explain packaging/flatpak/io.github.pete_builds.Halyard.metainfo.xml
+          desktop-file-validate packaging/flatpak/io.github.pete_builds.Halyard.desktop
+
+  bundle:
+    name: bundle (${{ matrix.arch }})
+    needs: sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container:
+      # ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08 (multi-arch index)
+      image: ghcr.io/flathub-infra/flatpak-github-actions@sha256:6ed6921bb5a9e1a916989971844f159b854b7b225880c381fa34f7a158863039
+      options: --privileged
+    env:
+      # The image ships the runtimes in /var/lib/flatpak, on Docker's overlay
+      # file system. Whenever Flathub has a newer runtime than the image,
+      # flatpak-builder updates it there and the update fails with "Invalid
+      # cross-device link" (seen 2026-11-22). A system installation on the
+      # runner's own disk sidesteps that; it starts empty, so every run pulls
+      # the current runtime and SDK.
+      FLATPAK_SYSTEM_DIR: /__w/_temp/flatpak-system
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Flatpak installation outside the image's overlay
+        run: |
+          mkdir -p "$FLATPAK_SYSTEM_DIR"
+          flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak remotes --system --show-details
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+        with:
+          manifest-path: packaging/flatpak/io.github.pete_builds.Halyard.yml
+          bundle: halyard.flatpak
+          arch: ${{ matrix.arch }}
+          artifact-name: halyard-${{ matrix.arch }}.flatpak
+          # A restored .flatpak-builder cache made the runtime update fail with
+          # "Invalid cross-device link" (2026-11-22), and this repo already saw a
+          # cancelled run poison a Zig cache. A clean build takes about 9 minutes.
+          cache: false
+      - name: Install the bundle
+        run: |
+          flatpak install --user --noninteractive --assumeyes halyard.flatpak
+          flatpak info --user io.github.pete_builds.Halyard
+      - name: Permissions are exactly the documented ones
+        run: |
+          flatpak info --user --show-permissions io.github.pete_builds.Halyard \
+            | sh packaging/flatpak/check-permissions.sh
+      - name: Smoke test inside the runtime
+        run: |
+          dbus-run-session -- flatpak run --user --command=sh io.github.pete_builds.Halyard \
+            -c "$(cat packaging/flatpak/smoke-test.sh)" sh /app/bin/halyard
+      - name: Control, the smoke test fails on a missing binary
+        run: |
+          if dbus-run-session -- flatpak run --user --command=sh io.github.pete_builds.Halyard \
+              -c "$(cat packaging/flatpak/smoke-test.sh)" sh /app/bin/no-such-binary; then
+            echo "smoke-test.sh passed on a missing binary, so it proves nothing" >&2
+            exit 1
+          fi

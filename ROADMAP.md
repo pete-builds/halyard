@@ -84,6 +84,17 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       `checks.*.package-contents` on x86_64-linux and aarch64-linux (`desktop-file-validate`,
       `StartupWMClass=halyard` matching the app id "halyard") and inspected in the package built on
       the real NixOS box. Not yet seen in a desktop launcher menu
+- [x] Flatpak host shells: inside Flatpak each pane runs `flatpak-spawn --host --watch-bus` with
+      the pane's directory and environment (`halyard_term::flatpak`; tests
+      `login_shell_runs_on_the_host_with_cwd_and_env`, `inside_flatpak_the_login_shell_runs_on_the_host`,
+      `outside_flatpak_the_program_runs_directly` and the rest of `flatpak::tests`). Unit tested only:
+      no real host shell has been started through `flatpak-spawn` yet
+- [x] Flatpak package (`packaging/flatpak/`, `docs/flatpak.md`): offline build on Freedesktop 26.08 for
+      x86_64 and aarch64 in CI (`.github/workflows/flatpak.yml`), bundle uploaded as an artifact; CI checks
+      the source lists against `Cargo.lock` and the Ghostty pin (`check-sources.py`), the installed
+      permissions exactly (`check-permissions.sh`), and libraries inside the runtime (`smoke-test.sh`, with a
+      control). Not covered: no window opened and no host shell started from the Flatpak; not on Flathub
+- [ ] Flatpak on a real Linux desktop: open a window, start a host shell, close a pane (pending)
 - [ ] Real-hardware runs: macOS arm64 (cypher), NixOS on a real GPU (pending)
 
 ## Phase 2: modern UI
@@ -167,8 +178,24 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
   (`halyard-term::OutputObserver`, `observer_sees_the_cursor_row_at_each_mark`); a real
   zsh or bash with the integration script sourced makes blocks with rows, statuses and
   command lines (`signals::tests::integration_script_in_a_real_shell_makes_blocks`).
-  Rows drift once scrollback is full and old rows are dropped (not handled yet).
-- [ ] Command blocks in the UI: navigate, copy output, failure marks, rerun (pending)
+  Rows survive a full scrollback dropping its oldest rows: the engine counts dropped
+  rows with a pinned row (`Engine::dropped_rows`) and block rows count from the
+  session's first row (`rows_stay_on_their_line_when_scrollback_drops_old_rows`,
+  `pane::tests::dropped_scrollback_moves_the_base_and_forgets_dropped_blocks`).
+- [x] Command blocks in the UI: `prev_prompt` and `next_prompt` scroll the prompt to the
+  top (`blocks_ui::tests::prompt_jumps_go_to_the_nearest_block_start`, and in a real zsh
+  `signals::tests::integration_script_in_a_real_shell_makes_blocks`;
+  `rows_text_and_scroll_to_row_use_screen_rows`), `copy_last_output`
+  (`last_output_is_the_newest_finished_block`, the same real-shell test), a danger-colored
+  margin bar beside failed commands (`failure_spans_are_clipped_to_the_viewport`), and a
+  palette entry that writes the script and copies the `install_line` for the configured
+  shell (`integration_line_writes_the_script_and_never_follows_a_symlink`). Blocks on rows
+  that `clear` erased are forgotten (`a_mark_above_the_newest_block_forgets_the_erased_blocks`,
+  `cleared_scrollback_forgets_closed_blocks`). A command with no output copies nothing
+  (`last_output_is_the_newest_finished_block`). Verified by debug-script screenshots on
+  macOS arm64 (prompt jumps, failure bars). Not built: rerun. Not handled: rows after a
+  window resize reflows lines, and a last output line without a trailing newline (it
+  shares the row of the next prompt, so it is not copied).
 - [ ] SQLite history and search
 
 ## Phase 4: agent awareness and the open protocol
@@ -239,7 +266,13 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
         dialogs, export the pane env vars, publish events, grants settings page
   - [ ] Peer uid rejection tested with a second real user (code path is a uid compare;
         not exercised by tests)
-- [ ] Agent dashboard with jump-to-pane: pending
+- [x] Agent dashboard: `agent_dashboard` (palette mode), every pane of every window in
+  the model's order with agent, tab title, cwd, branch, state with "since", last
+  notification and unread; Enter focuses the pane, its tab and its window
+  (`dashboard_ui::tests::rows_follow_the_dashboard_order_and_carry_their_targets`,
+  `ago_reads_naturally`). Verified by debug-script screenshots on macOS arm64 (the list,
+  and Enter switching to the waiting pane's tab). Not verified: jumping to a pane in
+  another window (code path written, no scripted second window).
 
 ## Phase 5: optional assistant and MCP
 

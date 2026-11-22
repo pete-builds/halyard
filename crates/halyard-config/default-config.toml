@@ -69,7 +69,7 @@ dark = "Halyard Night"
 # zoom_pane, increase_font_size, decrease_font_size, reset_font_size,
 # agent_dashboard, new_window, quit, resize_pane_left, resize_pane_right,
 # resize_pane_up, resize_pane_down, move_tab_left, move_tab_right, rename_tab,
-# reload_config, open_config.
+# reload_config, open_config, prev_prompt, next_prompt, copy_last_output.
 # "primary+k" = "command_palette"
 # "cmd+q" = "none"
 

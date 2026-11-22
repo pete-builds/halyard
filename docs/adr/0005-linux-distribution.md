@@ -1,6 +1,6 @@
-# ADR 0005: Linux distribution: Nix now, tarballs, Flatpak planned
+# ADR 0005: Linux distribution: Nix, tarballs and Flatpak
 
-Status: accepted, 2026-11-22
+Status: accepted, 2026-11-22. Amended the same day when the Flatpak package landed (PR #21).
 
 ## Decision
 
@@ -9,9 +9,35 @@ Status: accepted, 2026-11-22
 - **Official CI targets:** Fedora, Debian, Arch and Ubuntu. `.github/workflows/distros.yml`
   builds and runs the headless tests in each distro's own container with its own
   packages. That proves the build and the PTY tests, not a desktop session.
-- **Flatpak is planned, not in this release.** It follows the Nix package.
+- **Flatpak exists, alongside the Nix package** (PR #21, `packaging/flatpak/`,
+  `docs/flatpak.md`). It is built in CI and shipped as a workflow artifact; it is not on
+  Flathub. Shells run on the host through `flatpak-spawn --host`: the sandbox does not
+  confine them, by design. Flatpak is used to distribute Halyard to desktops without Nix,
+  not to confine it.
 
-## Why Flatpak waits
+## How each Flatpak concern below was settled
+
+The concerns that held Flatpak back, and how the package answers each:
+
+- **Offline build:** `cargo-sources.json` (from `flatpak-cargo-generator`) and
+  `ghostty-sources.json` (Ghostty at the commit `libghostty-vt-sys` pins, plus every Zig
+  package from Ghostty's `build.zig.zon.json` at that commit). CI checks both against
+  `Cargo.lock` and the pin entry by entry (`check-sources.py`), and `test_check_sources.py`
+  proves hand edits are caught.
+- **Zig 0.15.2:** a build-only module from the official tarballs, pinned by sha256.
+- **GPU access:** `--device=dri`; the GL extensions come from the runtime as usual.
+- **Host shells:** decided: `--talk-name=org.freedesktop.Flatpak` and
+  `flatpak-spawn --host --watch-bus`. Pane variables reach the host through an owner-only
+  file and `--env-fd`, never on a command line. The security meaning is written down in
+  `docs/flatpak.md` and `docs/THREAT_MODEL.md`.
+- **Flathub policy:** still open. Nothing is submitted.
+
+How it is verified: CI builds the bundle offline for x86_64 and aarch64, installs it,
+compares its permissions with the documented set exactly (no network), and checks the
+binary's libraries inside the runtime. No window has been opened from the Flatpak and no
+host shell has been started through it yet; that needs a real Linux desktop.
+
+## Why Flatpak waited (the original reasoning)
 
 - **Offline build.** Flathub builds have no network access
   (https://docs.flathub.org/docs/for-app-authors/requirements). Cargo sources must be
@@ -31,6 +57,7 @@ Status: accepted, 2026-11-22
 
 ## Consequences
 
-- Fedora, Debian, Arch and Ubuntu users build from source or use the tarball until Flatpak
-  exists. `docs/INSTALL.md` lists the exact package commands CI uses.
+- Fedora, Debian, Arch and Ubuntu users can install the Flatpak from a CI artifact, build
+  from source, or use the tarball. `docs/INSTALL.md` lists the exact package commands CI
+  uses.
 - NixOS real-hardware verification stays separate from distro CI.

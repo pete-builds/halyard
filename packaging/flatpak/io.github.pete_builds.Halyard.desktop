@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Halyard
+GenericName=Terminal
+Comment=A fast, open-source terminal
+Exec=halyard
+Icon=io.github.pete_builds.Halyard
+Terminal=false
+StartupNotify=true
+StartupWMClass=halyard
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;console;command;prompt;

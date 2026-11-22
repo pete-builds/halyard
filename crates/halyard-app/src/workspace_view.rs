@@ -20,6 +20,7 @@ use halyard_workspace::{
 };
 
 mod attention;
+mod dashboard;
 
 use halyard_agents::AttentionState;
 
@@ -97,6 +98,8 @@ struct PaletteUi {
     model: palette::Model,
     commands: Vec<Command>,
     focus: FocusHandle,
+    /// Dashboard rows, in [`Mode::Agents`] (`dashboard.rs`).
+    agents: Vec<crate::dashboard_ui::Row>,
 }
 
 /// One window.
@@ -400,6 +403,7 @@ impl WorkspaceView {
                     ..PaneChrome::default()
                 }
             };
+            chrome.failure = Some(to_hsla(theme.ui.danger));
             if let Some((badge, outline)) = self.pane_marks(*id, &theme, cx) {
                 chrome.badge = Some(badge);
                 chrome.border = outline.or(chrome.border);
@@ -679,7 +683,11 @@ impl WorkspaceView {
                     cx.notify();
                 }
             }
-            Action::Copy | Action::Find | Action::AgentDashboard => {}
+            Action::AgentDashboard => self.open_dashboard(window, cx),
+            Action::PrevPrompt => self.jump_prompt(crate::blocks_ui::Jump::Previous, cx),
+            Action::NextPrompt => self.jump_prompt(crate::blocks_ui::Jump::Next, cx),
+            Action::CopyLastOutput => self.copy_last_output(cx),
+            Action::Copy | Action::Find => {}
             Action::FocusLeft
             | Action::FocusRight
             | Action::FocusUp
@@ -727,7 +735,7 @@ impl WorkspaceView {
         let focus = cx.focus_handle();
         window.focus(&focus);
         self.end_preview_unless(Some(&model.mode), window, cx);
-        self.palette = Some(PaletteUi { model, commands, focus });
+        self.palette = Some(PaletteUi { model, commands, focus, agents: Vec::new() });
         cx.notify();
     }
 
@@ -812,6 +820,7 @@ impl WorkspaceView {
                 self.focus_active_pane(window, cx);
                 match picked.and_then(|i| p.commands.get(i).copied()) {
                     Some(Command::SwitchTheme) => self.open_themes(window, cx),
+                    Some(Command::CopyShellIntegration) => self.copy_shell_integration(cx),
                     Some(Command::Run(a)) if palette::runs_in_pane(a) => {
                         // Copy and paste belong to the pane, which has focus
                         // again; dispatch once this update is over.
@@ -840,6 +849,12 @@ impl WorkspaceView {
             Mode::Rename { tab } => {
                 self.model.rename_tab(tab, Some(&p.model.query));
                 self.after_change(window, cx);
+            }
+            Mode::Agents => {
+                self.focus_active_pane(window, cx);
+                if let Some(row) = picked.and_then(|i| p.agents.get(i)) {
+                    self.jump_to(row.target, window, cx);
+                }
             }
         }
         cx.notify();
@@ -1088,6 +1103,7 @@ impl WorkspaceView {
             Mode::Commands => ("Type a command", "›"),
             Mode::Themes { .. } => ("Pick a theme (Escape restores)", "Theme"),
             Mode::Rename { .. } => ("Tab name (empty clears)", "Name"),
+            Mode::Agents => ("Agents: type to filter, Enter jumps to the pane", "Agents"),
         };
         let query: SharedString = if p.model.query.is_empty() {
             placeholder.into()
@@ -1098,6 +1114,14 @@ impl WorkspaceView {
         let selected_row = p.model.selected_row();
         let first = selected_row.saturating_sub(11);
         for (row, (entry, label, selected)) in p.model.rows().enumerate().skip(first).take(12) {
+            if matches!(p.model.mode, Mode::Agents) {
+                if let Some(el) = Self::agent_row(p, entry, selected, theme) {
+                    list = list.child(div().id(("palette-row", row)).child(el).on_click(
+                        cx.listener(move |this, _, window, cx| this.palette_click(row, window, cx)),
+                    ));
+                }
+                continue;
+            }
             let shortcut = match p.commands.get(entry) {
                 Some(Command::Run(a)) => {
                     keymap.chords_for(*a).first().map(keybind::label).unwrap_or_default()
@@ -1245,6 +1269,10 @@ impl Render for WorkspaceView {
             RenameTab => RenameTab,
             ReloadConfig => ReloadConfig,
             OpenConfig => OpenConfig,
+            AgentDashboard => AgentDashboard,
+            PrevPrompt => PrevPrompt,
+            NextPrompt => NextPrompt,
+            CopyLastOutput => CopyLastOutput,
         );
         let root = root.on_action(cx.listener(|this, _: &SwitchTheme, window, cx| {
             this.open_themes(window, cx);

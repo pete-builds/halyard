@@ -7,8 +7,11 @@
 //!   frames. This is what the UI uses.
 //! - [`Engine`] is the headless VT engine (libghostty-vt) behind a session.
 //!   It is the only code that touches libghostty-vt.
+//! - [`flatpak`] decides how a session starts its program on the host when
+//!   Halyard itself runs inside a Flatpak sandbox.
 
 pub mod engine;
+pub mod flatpak;
 pub mod frame;
 pub mod input;
 pub mod palette;
@@ -21,6 +24,6 @@ pub use input::{
 };
 pub use palette::Palette;
 pub use session::{
-    OutputObserver, Session, SessionConfig, SessionError, SessionEvent, default_shell,
+    History, OutputObserver, Session, SessionConfig, SessionError, SessionEvent, default_shell,
     new_session_id,
 };

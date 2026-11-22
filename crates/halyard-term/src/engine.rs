@@ -25,8 +25,8 @@ use libghostty_vt::selection::{FormatOptions, SelectWordOptions, Selection};
 use libghostty_vt::style::{PaletteIndex, RgbColor, Underline};
 use libghostty_vt::terminal::{
     ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode, Point,
-    PointCoordinate, PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes,
-    SizeReportSize, TertiaryDeviceAttributes,
+    PointCoordinate, PointSpace, PrimaryDeviceAttributes, ScrollViewport,
+    SecondaryDeviceAttributes, SizeReportSize, TertiaryDeviceAttributes,
 };
 use libghostty_vt::{RenderState, Terminal, TerminalOptions};
 
@@ -87,6 +87,9 @@ pub struct Engine {
     // Field order is drop order: the tracked selection anchor and the
     // iterators go before the terminal that owns their memory.
     selection_anchor: Option<TrackedGridRef>,
+    /// A pin on a primary-screen row and that row's screen y when it was
+    /// placed, for counting rows dropped from the top of scrollback.
+    drop_anchor: Option<(TrackedGridRef, u64)>,
     key_event: key::Event<'static>,
     key_encoder: key::Encoder<'static>,
     mouse_event: mouse::Event<'static>,
@@ -99,6 +102,8 @@ pub struct Engine {
     palette: Palette,
     option_as_alt: bool,
     generation: u64,
+    /// Rows dropped from the top of the primary screen's scrollback so far.
+    dropped: u64,
 }
 
 impl fmt::Debug for Engine {
@@ -198,6 +203,8 @@ impl Engine {
 
         let mut engine = Self {
             selection_anchor: None,
+            drop_anchor: None,
+            dropped: 0,
             key_event: key::Event::new().map_err(err("creating a key event"))?,
             key_encoder: key::Encoder::new().map_err(err("creating the key encoder"))?,
             mouse_event: mouse::Event::new().map_err(err("creating a mouse event"))?,
@@ -240,6 +247,60 @@ impl Engine {
         let history = self.terminal.scrollback_rows().unwrap_or(0);
         let y = self.terminal.cursor_y().unwrap_or(0);
         u64::try_from(history).unwrap_or(u64::MAX).saturating_add(u64::from(y))
+    }
+
+    /// The last count [`Engine::dropped_rows`] made.
+    #[must_use]
+    pub const fn dropped_total(&self) -> u64 {
+        self.dropped
+    }
+
+    /// Counts rows dropped from the top of the primary screen's scrollback
+    /// since the engine started (a full scrollback drops its oldest rows in
+    /// page-sized steps, so the scrollback row count alone does not show it),
+    /// and re-pins the count on the cursor's row. Returns the total, or `None`
+    /// when the pin itself was dropped (more rows went than the scrollback
+    /// holds since the last call, so the exact count is lost; the total then
+    /// stays where it was). Rows recorded as [`Engine::cursor_screen_row`] plus
+    /// this total keep naming the same text. While the alternate screen is
+    /// active nothing is counted.
+    pub fn dropped_rows(&mut self) -> Option<u64> {
+        if matches!(self.terminal.active_screen(), Ok(Screen::Alternate)) {
+            return Some(self.dropped);
+        }
+        let mut known = true;
+        if let Some((pin, then)) = &self.drop_anchor {
+            let now = pin.snapshot(&self.terminal).ok().flatten().and_then(|g| {
+                self.terminal.point_from_grid_ref(&g, PointSpace::Screen).ok().flatten()
+            });
+            match now {
+                // When the page holding the pin is dropped, the engine moves the
+                // pin to the new first row (row 0) without marking it invalid,
+                // so a pin on row 0 cannot tell how many rows went: count it as
+                // lost. (A pin that moved up to row 0 by itself is counted as
+                // lost too; that only makes the caller forget closed blocks.)
+                Some(p) if p.y == 0 && *then > 0 => known = false,
+                Some(p) => {
+                    self.dropped += then.saturating_sub(u64::from(p.y));
+                }
+                None => known = false,
+            }
+        }
+        let row = self.cursor_screen_row();
+        let point =
+            Point::Screen(PointCoordinate { x: 0, y: u32::try_from(row).unwrap_or(u32::MAX) });
+        self.drop_anchor = self.terminal.track_grid_ref(point).ok().map(|pin| (pin, row));
+        known.then_some(self.dropped)
+    }
+
+    /// Scrollback rows of the primary screen, or `None` while the alternate
+    /// screen is active (it has no scrollback of its own to compare).
+    #[must_use]
+    pub fn primary_history_rows(&self) -> Option<u64> {
+        if matches!(self.terminal.active_screen(), Ok(Screen::Alternate)) {
+            return None;
+        }
+        self.terminal.scrollback_rows().ok().and_then(|n| u64::try_from(n).ok())
     }
 
     /// The current window title (empty if none was set).
@@ -288,6 +349,15 @@ impl Engine {
             ScrollRequest::Pages(n) => ScrollViewport::Delta(n.saturating_mul(rows)),
             ScrollRequest::Top => ScrollViewport::Top,
             ScrollRequest::Bottom => ScrollViewport::Bottom,
+            ScrollRequest::Row(row) => {
+                let Ok(bar) = self.terminal.scrollbar() else { return };
+                let delta = i128::from(row) - i128::from(bar.offset);
+                ScrollViewport::Delta(isize::try_from(delta).unwrap_or(if delta < 0 {
+                    isize::MIN
+                } else {
+                    isize::MAX
+                }))
+            }
         };
         self.terminal.scroll_viewport(target);
     }
@@ -506,6 +576,40 @@ impl Engine {
             .terminal
             .format_selection_alloc(None, options)
             .map_err(err("formatting the selection"))?;
+        Ok(bytes.map(|b| String::from_utf8_lossy(&b).into_owned()))
+    }
+
+    /// The text of rows `first..=last` (counted from the top of scrollback, as
+    /// [`Engine::cursor_screen_row`] counts) as plain text: soft wraps joined,
+    /// trailing blanks trimmed. `None` when the range is empty or out of range.
+    /// The user's selection is left alone.
+    pub fn screen_rows_text(&self, first: u64, last: u64) -> Result<Option<String>, EngineError> {
+        if first > last {
+            return Ok(None);
+        }
+        let total = u64::try_from(self.terminal.total_rows().map_err(err("reading rows"))?)
+            .unwrap_or(u64::MAX);
+        if first >= total {
+            return Ok(None);
+        }
+        let last = last.min(total - 1);
+        let point = |x: u16, y: u64| {
+            Point::Screen(PointCoordinate { x, y: u32::try_from(y).unwrap_or(u32::MAX) })
+        };
+        let start =
+            self.terminal.grid_ref(point(0, first)).map_err(err("resolving the first row"))?;
+        let end = self
+            .terminal
+            .grid_ref(point(self.cols().saturating_sub(1), last))
+            .map_err(err("resolving the last row"))?;
+        let selection = Selection::new(start, end, false);
+        let options = FormatOptions::new()
+            .with_emit_format(Format::Plain)
+            .with_unwrap(true)
+            .with_trim(true)
+            .with_selection(&selection);
+        let bytes =
+            self.terminal.format_selection_alloc(None, options).map_err(err("formatting rows"))?;
         Ok(bytes.map(|b| String::from_utf8_lossy(&b).into_owned()))
     }
 
@@ -1159,6 +1263,32 @@ mod tests {
         assert!(!evil[6..evil.len() - 6].windows(6).any(|w| w == b"\x1b[201~"));
         assert!(!paste_is_safe("ls\n"));
         assert!(paste_is_safe("ls"));
+    }
+
+    #[test]
+    fn dropped_rows_are_counted_or_reported_lost() {
+        let mut e = Engine::new(40, 5, 200, &Palette::default()).unwrap();
+        assert_eq!(e.dropped_rows(), Some(0));
+        // A few lines at a time: the pin is re-placed often enough to count.
+        let mut last = 0;
+        for i in 0..5000 {
+            e.write(format!("line {i}\r\n").as_bytes());
+            if let Some(d) = e.dropped_rows() {
+                assert!(d >= last);
+                last = d;
+            } else {
+                panic!("lost while counting line by line at line {i}");
+            }
+        }
+        // Rows dropped so far plus rows kept is everything written.
+        let kept = e.primary_history_rows().unwrap() + u64::from(e.terminal.cursor_y().unwrap());
+        assert!(last > 0, "the scrollback dropped rows");
+        assert_eq!(last + kept, 5000, "dropped {last}, kept {kept}");
+        // Far more lines than the scrollback holds in one write: the pin's page
+        // is dropped and the count is reported lost, never undercounted.
+        let flood: String = (0..20_000).map(|i| format!("f{i}\r\n")).collect();
+        e.write(flood.as_bytes());
+        assert_eq!(e.dropped_rows(), None);
     }
 
     #[test]

@@ -62,10 +62,28 @@ pub trait OutputObserver: Send {
     fn scan(&mut self, chunk: &[u8], marks: &mut Vec<usize>);
     /// The engine has consumed the chunk up to mark number `index` (in the order
     /// pushed by `scan`); `row` is the cursor's row counted from the top of
-    /// scrollback (see [`Engine::cursor_screen_row`]).
+    /// scrollback (see [`Engine::cursor_screen_row`]) plus the rows dropped from
+    /// the top of scrollback so far ([`History::dropped`]), so it keeps naming
+    /// the same line as old rows are dropped. Subtract `dropped` for a row of
+    /// [`Session::screen_rows_text`] or [`crate::ScrollRequest::Row`].
     fn at_mark(&mut self, index: usize, row: u64);
-    /// The whole chunk has been consumed.
-    fn chunk_done(&mut self);
+    /// The whole chunk has been consumed. `history` describes the primary
+    /// screen's scrollback now (`None` while the alternate screen is shown).
+    fn chunk_done(&mut self, history: Option<History>);
+}
+
+/// The primary screen's scrollback after a chunk, for an [`OutputObserver`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct History {
+    /// Scrollback rows now. When this shrinks, scrollback was cleared (`CSI 3 J`,
+    /// as `clear` sends, or a reset) and rows recorded before point at other text.
+    pub rows: u64,
+    /// Rows dropped from the top of scrollback since the session started.
+    pub dropped: u64,
+    /// True when, since the last chunk, more rows were dropped than could be
+    /// counted (more than the scrollback holds went by): `dropped` is then too
+    /// small and every row recorded before is unreliable.
+    pub lost: bool,
 }
 
 /// How to start a session.
@@ -203,6 +221,7 @@ enum Command {
     SelectWord(u16, u16),
     SelectClear,
     SelectionText(Sender<Option<String>>),
+    RowsText(u64, u64, Sender<Option<String>>),
     SetPalette(Palette),
     Shutdown,
 }
@@ -343,7 +362,90 @@ impl ShutdownPlan {
     }
 }
 
-fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
+/// Where a session's program runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Placement {
+    /// In Halyard's own environment (every normal install).
+    Local,
+    /// On the host, through `flatpak-spawn --host`, because Halyard itself
+    /// runs inside a Flatpak sandbox (see [`crate::flatpak`]).
+    FlatpakHost,
+}
+
+impl Placement {
+    fn detect() -> Self {
+        if crate::flatpak::in_flatpak() { Self::FlatpakHost } else { Self::Local }
+    }
+}
+
+/// The variables Halyard sets for every program, in the order they apply:
+/// Halyard's own first, then the session's extras, which may override them.
+fn session_env(config: &SessionConfig, session_id: &str) -> Vec<(OsString, OsString)> {
+    let own = [
+        ("TERM", "xterm-256color"),
+        ("COLORTERM", "truecolor"),
+        ("TERM_PROGRAM", "Halyard"),
+        ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION")),
+        ("HALYARD_SESSION_ID", session_id),
+    ];
+    own.iter()
+        .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+        .chain(config.env.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))))
+        .collect()
+}
+
+/// A command ready to spawn, plus the environment file it reads when it runs
+/// on the host through Flatpak (see [`crate::flatpak::EnvFile`]).
+struct Built {
+    cmd: CommandBuilder,
+    env_file: Option<crate::flatpak::EnvFile>,
+}
+
+fn build_command(config: &SessionConfig, session_id: &str) -> std::io::Result<Built> {
+    build_command_for(config, session_id, Placement::detect())
+}
+
+fn build_command_for(
+    config: &SessionConfig,
+    session_id: &str,
+    placement: Placement,
+) -> std::io::Result<Built> {
+    let mut env = session_env(config, session_id);
+    if placement == Placement::FlatpakHost {
+        // The same UTF-8 locale default as a local program gets, judged on the
+        // variables the program will see: the session's, else the sandbox's
+        // (inherited from the desktop session) unless the session removes them.
+        let lookup = |k: &str| {
+            env.iter().rev().find(|(name, _)| name == k).map(|(_, v)| v.clone()).or_else(|| {
+                if config.env_remove.iter().any(|r| r == k) { None } else { std::env::var_os(k) }
+            })
+        };
+        if let Some(lang) = default_locale(lookup, cfg!(target_os = "macos")) {
+            env.push(("LANG".into(), lang.into()));
+        }
+        let home = std::env::var_os("HOME");
+        let shell = std::env::var_os("SHELL");
+        let env_path = crate::flatpak::EnvFile::path_in(&crate::flatpak::env_file_dir());
+        let launch = crate::flatpak::host_launch(&crate::flatpak::HostSpawn {
+            program: config.program.as_deref(),
+            args: &config.args,
+            cwd: config.cwd.as_deref(),
+            home: home.as_deref(),
+            shell: shell.as_deref(),
+            env: &env,
+            unset: &config.env_remove,
+            env_file: &env_path,
+        });
+        let env_file = crate::flatpak::EnvFile::create(env_path, &launch.env_block)?;
+        // The wrapper and flatpak-spawn run in the sandbox, in portable-pty's
+        // default directory ($HOME); the host program gets the session's
+        // directory through --directory, which may not exist inside the
+        // sandbox. Their own environment is the sandbox's: the host program's
+        // comes only from the env file.
+        let mut cmd = CommandBuilder::new(launch.program);
+        cmd.args(launch.args);
+        return Ok(Built { cmd, env_file: Some(env_file) });
+    }
     let mut cmd = if let Some(program) = &config.program {
         let mut cmd = CommandBuilder::new(program);
         cmd.args(&config.args);
@@ -363,13 +465,8 @@ fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
     for key in &config.env_remove {
         cmd.env_remove(key);
     }
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-    cmd.env("TERM_PROGRAM", "Halyard");
-    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-    cmd.env("HALYARD_SESSION_ID", session_id);
-    for (k, v) in &config.env {
-        cmd.env(OsString::from(k), OsString::from(v));
+    for (k, v) in &env {
+        cmd.env(k, v);
     }
     if let Some(cwd) = &config.cwd {
         cmd.cwd(cwd);
@@ -386,7 +483,7 @@ fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
     {
         cmd.env("LANG", lang);
     }
-    cmd
+    Ok(Built { cmd, env_file: None })
 }
 
 /// The `LANG` to add when the child's environment names no locale at all.
@@ -442,8 +539,13 @@ impl Session {
             pair.master.as_raw_fd().ok_or_else(|| SessionError::Spawn("PTY has no fd".into()))?;
         let reader = dup_cloexec(master_fd).map_err(|e| spawn_err(&e))?;
         let (wake_read, wake_write) = wake_pipe().map_err(|e| spawn_err(&e))?;
-        let cmd = build_command(&config, &id);
+        let Built { cmd, env_file } = build_command(&config, &id).map_err(|e| spawn_err(&e))?;
+        // On failure the env file (if any) is dropped and deleted here.
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| spawn_err(&e))?;
+        // The wrapper in the child deletes it now; see `flatpak::EnvFile`.
+        if let Some(env_file) = env_file {
+            env_file.handed_over();
+        }
         // The parent must not hold the slave open, or the reader never sees
         // end-of-file when the program exits.
         drop(pair.slave);
@@ -622,6 +724,17 @@ impl Session {
     pub fn selection_text(&self) -> Option<String> {
         let (tx, rx) = bounded(1);
         self.send(Command::SelectionText(tx));
+        rx.recv_timeout(Duration::from_secs(1)).ok().flatten()
+    }
+
+    /// The text of rows `first..=last`, counted from the top of scrollback as
+    /// [`Engine::cursor_screen_row`] counts (the rows the shell integration
+    /// marks carry), or `None` when out of range. Blocks until the session
+    /// thread answers (at most one second).
+    #[must_use]
+    pub fn screen_rows_text(&self, first: u64, last: u64) -> Option<String> {
+        let (tx, rx) = bounded(1);
+        self.send(Command::RowsText(first, last, tx));
         rx.recv_timeout(Duration::from_secs(1)).ok().flatten()
     }
 
@@ -831,14 +944,25 @@ impl SessionThread {
         self.marks.clear();
         observer.scan(chunk, &mut self.marks);
         let mut done = 0;
+        let mut lost = false;
+        let mut dropped;
         for (index, &mark) in self.marks.iter().enumerate() {
             let mark = mark.clamp(done, chunk.len());
             engine.write(&chunk[done..mark]);
             done = mark;
-            observer.at_mark(index, engine.cursor_screen_row());
+            dropped = engine.dropped_rows().unwrap_or_else(|| {
+                lost = true;
+                engine.dropped_total()
+            });
+            observer.at_mark(index, engine.cursor_screen_row().saturating_add(dropped));
         }
         engine.write(&chunk[done..]);
-        observer.chunk_done();
+        dropped = engine.dropped_rows().unwrap_or_else(|| {
+            lost = true;
+            engine.dropped_total()
+        });
+        let history = engine.primary_history_rows().map(|rows| History { rows, dropped, lost });
+        observer.chunk_done(history);
     }
 
     fn run(mut self, mut engine: Engine) {
@@ -1001,6 +1125,15 @@ impl SessionThread {
                 reply.send(text).ok();
                 false
             }
+            Command::RowsText(first, last, reply) => {
+                let text = engine.screen_rows_text(first, last).unwrap_or_else(|e| {
+                    eprintln!("halyard-term: {e}");
+                    None
+                });
+                // The caller may have timed out and gone away.
+                reply.send(text).ok();
+                false
+            }
             Command::SetPalette(palette) => {
                 report(engine.set_palette(&palette));
                 true
@@ -1013,6 +1146,7 @@ impl SessionThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn session_handle_is_send_and_sync() {
@@ -1060,7 +1194,7 @@ mod tests {
             env_remove: vec!["LANG".into(), "LC_ALL".into(), "LC_CTYPE".into()],
             ..SessionConfig::default()
         };
-        let cmd = build_command(&config, "abc123");
+        let cmd = build_command(&config, "abc123").unwrap().cmd;
         let lang = cmd.get_env("LANG").and_then(|v| v.to_str()).map(str::to_owned);
         assert!(lang.as_deref().is_some_and(|l| l.ends_with("UTF-8")), "{lang:?}");
 
@@ -1068,7 +1202,7 @@ mod tests {
             env: vec![("LANG".into(), "de_DE.UTF-8".into())],
             ..SessionConfig::default()
         };
-        let cmd = build_command(&config, "abc123");
+        let cmd = build_command(&config, "abc123").unwrap().cmd;
         assert_eq!(cmd.get_env("LANG").and_then(|v| v.to_str()), Some("de_DE.UTF-8"));
     }
 
@@ -1079,7 +1213,7 @@ mod tests {
             env_remove: vec!["HALYARD_TEST_REMOVED".into()],
             ..SessionConfig::default()
         };
-        let cmd = build_command(&config, "abc123");
+        let cmd = build_command(&config, "abc123").unwrap().cmd;
         let get = |k: &str| cmd.get_env(k).and_then(|v| v.to_str()).map(str::to_owned);
         assert_eq!(get("TERM").as_deref(), Some("xterm-256color"));
         assert_eq!(get("COLORTERM").as_deref(), Some("truecolor"));
@@ -1089,6 +1223,137 @@ mod tests {
         assert_eq!(get("FOO").as_deref(), Some("bar"));
         assert!(cmd.is_default_prog());
         assert_eq!(get("SHELL").map(PathBuf::from), Some(default_shell()));
+    }
+
+    fn argv(cmd: &CommandBuilder) -> Vec<String> {
+        cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
+    /// The env file's `KEY=VALUE` entries, read before the `Built` (and its
+    /// file) is dropped.
+    fn env_entries(built: &Built) -> Vec<String> {
+        let file = built.env_file.as_ref().expect("an env file");
+        let bytes = std::fs::read(file.path()).unwrap();
+        let mode = std::fs::metadata(file.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the env file must be owner-only");
+        bytes
+            .split(|b| *b == 0)
+            .filter(|e| !e.is_empty())
+            .map(|e| String::from_utf8_lossy(e).into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn inside_flatpak_the_login_shell_runs_on_the_host() {
+        let secret = "token-value-that-must-stay-out-of-argv";
+        let config = SessionConfig {
+            cwd: Some(PathBuf::from("/srv/project")),
+            env: vec![
+                ("FOO".into(), "bar".into()),
+                ("TERM".into(), "dumb".into()),
+                ("HALYARD_SESSION_TOKEN".into(), secret.into()),
+            ],
+            env_remove: vec!["OLDVAR".into()],
+            ..SessionConfig::default()
+        };
+        let built = build_command_for(&config, "abc123", Placement::FlatpakHost).unwrap();
+        let cmd = &built.cmd;
+        assert!(!cmd.is_default_prog());
+        let argv = argv(cmd);
+        assert_eq!(argv[..2], ["/bin/sh", "-c"], "{argv:?}");
+        let spawn = argv.iter().position(|a| a == "flatpak-spawn").unwrap();
+        assert_eq!(
+            argv[spawn..spawn + 4],
+            ["flatpak-spawn", "--host", "--watch-bus", "--env-fd=3"]
+        );
+        assert!(argv.contains(&"--directory=/srv/project".to_owned()), "{argv:?}");
+        assert!(argv.contains(&"--unset-env=OLDVAR".to_owned()), "{argv:?}");
+        for arg in &argv {
+            assert!(!arg.contains(secret) && !arg.contains("abc123"), "value in argv: {arg}");
+        }
+
+        // Exactly the session's variables, plus SHELL and LANG when they
+        // apply, and nothing else from this process's environment.
+        let entries = env_entries(&built);
+        let mut names: Vec<&str> =
+            entries.iter().map(|e| e.split_once('=').map_or(e.as_str(), |(k, _)| k)).collect();
+        names.retain(|n| *n != "SHELL" && *n != "LANG");
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "COLORTERM",
+                "FOO",
+                "HALYARD_SESSION_ID",
+                "HALYARD_SESSION_TOKEN",
+                "TERM",
+                "TERM_PROGRAM",
+                "TERM_PROGRAM_VERSION"
+            ]
+        );
+        for want in ["TERM=dumb", "HALYARD_SESSION_ID=abc123", "FOO=bar"] {
+            assert!(entries.contains(&want.to_owned()), "{want} missing from {entries:?}");
+        }
+        assert!(entries.contains(&format!("HALYARD_SESSION_TOKEN={secret}")));
+        // The program comes last: the login shell from $SHELL, or the host's own.
+        let tail = &argv[argv.len() - 2..];
+        assert!(tail[1] == "-l" || tail[1] == crate::flatpak::HOST_SHELL_FALLBACK, "{argv:?}");
+        // The sandbox side does not chdir to a host path that may not exist in it.
+        assert_eq!(cmd.get_cwd(), None);
+        // The wrapper never ran, so dropping the command removes its env file.
+        let path = built.env_file.as_ref().unwrap().path().to_owned();
+        drop(built);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn inside_flatpak_the_locale_default_applies_too() {
+        let config = SessionConfig {
+            env_remove: vec!["LANG".into(), "LC_ALL".into(), "LC_CTYPE".into()],
+            ..SessionConfig::default()
+        };
+        let built = build_command_for(&config, "id", Placement::FlatpakHost).unwrap();
+        let entries = env_entries(&built);
+        assert!(
+            entries.iter().any(|e| e.starts_with("LANG=") && e.ends_with("UTF-8")),
+            "{entries:?}"
+        );
+        let config = SessionConfig {
+            env: vec![("LANG".into(), "de_DE.UTF-8".into())],
+            ..SessionConfig::default()
+        };
+        let built = build_command_for(&config, "id", Placement::FlatpakHost).unwrap();
+        let langs: Vec<_> =
+            env_entries(&built).into_iter().filter(|e| e.starts_with("LANG=")).collect();
+        assert_eq!(langs, ["LANG=de_DE.UTF-8"]);
+    }
+
+    #[test]
+    fn inside_flatpak_an_explicit_program_runs_on_the_host() {
+        let config = SessionConfig {
+            program: Some(PathBuf::from("/usr/bin/htop")),
+            args: vec!["-d".into(), "10".into()],
+            ..SessionConfig::default()
+        };
+        let built = build_command_for(&config, "id", Placement::FlatpakHost).unwrap();
+        let argv = argv(&built.cmd);
+        assert!(argv.contains(&"flatpak-spawn".to_owned()), "{argv:?}");
+        assert_eq!(argv[argv.len() - 3..], ["/usr/bin/htop", "-d", "10"], "{argv:?}");
+    }
+
+    #[test]
+    fn outside_flatpak_the_program_runs_directly() {
+        let config = SessionConfig {
+            program: Some(PathBuf::from("/usr/bin/htop")),
+            args: vec!["-d".into(), "10".into()],
+            cwd: Some(PathBuf::from("/tmp")),
+            ..SessionConfig::default()
+        };
+        let built = build_command_for(&config, "id", Placement::Local).unwrap();
+        assert!(built.env_file.is_none());
+        let cmd = built.cmd;
+        assert_eq!(argv(&cmd), ["/usr/bin/htop", "-d", "10"]);
+        assert_eq!(cmd.get_cwd().map(PathBuf::from), Some(PathBuf::from("/tmp")));
     }
 
     #[test]
