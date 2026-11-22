@@ -217,6 +217,28 @@ fn save_is_atomic_and_private() {
 }
 
 #[test]
+fn only_the_default_state_dir_counts_as_halyards_own() {
+    let env = |pairs: &'static [(&'static str, &'static str)]| {
+        move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| OsString::from(v))
+    };
+    let mac = Path::new("/Users/p/Library/Application Support/Halyard");
+    assert!(persist::is_default_state_dir(mac, env(&[("HOME", "/Users/p")]), true));
+    // An override pointing at home is not Halyard's own folder.
+    assert!(!persist::is_default_state_dir(
+        Path::new("/Users/p"),
+        env(&[("HOME", "/Users/p"), ("HALYARD_STATE_DIR", "/Users/p")]),
+        true
+    ));
+    let linux = Path::new("/home/p/.local/state/halyard");
+    assert!(persist::is_default_state_dir(linux, env(&[("HOME", "/home/p")]), false));
+    assert!(!persist::is_default_state_dir(
+        Path::new("/srv/shared"),
+        env(&[("HOME", "/home/p")]),
+        false
+    ));
+}
+
+#[test]
 fn state_dir_per_platform() {
     let env = |pairs: &'static [(&'static str, &'static str)]| {
         move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| OsString::from(v))
@@ -373,7 +395,8 @@ fn save_refuses_symlinks_and_tightens_the_folder() {
     assert!(persist::save(&link.join("workspace.json"), &state).is_err());
     assert!(std::fs::read_dir(&real).unwrap().next().is_none(), "nothing written through it");
 
-    // An existing folder is tightened to 0700.
+    // An existing folder that is not Halyard's default (a user-set
+    // HALYARD_STATE_DIR such as a shared folder) keeps its mode.
     let state_dir = dir.path().join("state");
     std::fs::create_dir(&state_dir).unwrap();
     std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -385,6 +408,16 @@ fn save_refuses_symlinks_and_tightens_the_folder() {
     persist::save(&state_dir.join("workspace.json"), &state).unwrap();
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
     let mode = std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode, 0o700);
+    assert_eq!(mode, 0o755, "a folder save did not create is left alone");
     assert_eq!(persist::load(&state_dir.join("workspace.json")).windows.len(), 1);
+    // A folder save creates is 0700, even under a permissive umask.
+    let fresh = dir.path().join("fresh").join("halyard");
+    // SAFETY: umask has no memory-safety preconditions; restored below.
+    let old = unsafe { libc::umask(0o000) };
+    let r = persist::save(&fresh.join("workspace.json"), &state);
+    // SAFETY: as above.
+    unsafe { libc::umask(old) };
+    r.unwrap();
+    let mode = std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
 }
