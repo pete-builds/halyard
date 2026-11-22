@@ -29,8 +29,11 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       Unit tests in `grid.rs` (`runs_split_on_style_and_blanks`,
       `wide_glyphs_and_clusters_are_their_own_runs`, `backgrounds_merge_equal_neighbors_and_skip_default`,
       `cursor_recolors_one_cell`). Verified on macOS arm64 with screenshots of a prompt, colored
-      `ls`, vim, htop, a title change, a selection and the exit notice. Linux: builds and
-      unit-tests in CI only; never run in a Linux window.
+      `ls`, vim, htop, a title change, a selection and the exit notice. Linux: real NixOS
+      26.05 on an RTX 4070 Ti (2026-11-22): headless sway on Vulkan, XWayland, and a
+      launch-only check in KDE Plasma 6.6 Wayland; typing, colors, vim, htop, Ctrl+C, resize,
+      paste in, and (X11) copy out and wheel scrollback all passed. Not yet: Wayland pointer
+      selection and wheel (no pointer in a headless seat).
 - [ ] Keyboard input (including Kitty protocol via the engine's encoder), Ctrl+C.
       Session side done: `keys_encode_with_terminal_modes`,
       `kitty_keyboard_flags_change_encoding`, `ctrl_c_byte_interrupts_sleep`,
@@ -66,7 +69,7 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 ## Phase 2: modern UI
 
 - [ ] Tabs, draggable split panes, keyboard pane navigation and resizing
-- [ ] TOML config and token-based themes, bundled themes
+- [x] TOML config and token-based themes, bundled themes (library: `crates/halyard-config`, tests named in docs/themes.md)
 - [ ] Settings wired into the app with live reload
 - [ ] Command palette
 - [ ] Persistent workspaces (layouts, cwd, names) restored on launch

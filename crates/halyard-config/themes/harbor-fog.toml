@@ -1,0 +1,12 @@
+# Harbor Fog: low-saturation grey-blue dark theme. The [ui] section is derived
+# from the terminal colors (see docs/themes.md).
+name = "Harbor Fog"
+appearance = "dark"
+
+[terminal]
+foreground = "#cdd6d9"
+background = "#20282c"
+ansi = [
+  "#2e393f", "#e0848c", "#8fc79a", "#d9bd82", "#82aed6", "#b79bd6", "#78c4c4", "#aab6ba",
+  "#4b5a61", "#f0a0a6", "#a9dab3", "#ead29f", "#a2c7e8", "#cdb4e6", "#98d9d9", "#e9eff1",
+]
