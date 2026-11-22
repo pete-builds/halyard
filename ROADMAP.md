@@ -112,7 +112,7 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       `keyboard_resize_moves_the_nearest_divider_and_respects_minimums`,
       `dragging_a_divider_clamps_to_nested_minimums`, `zoom_shows_only_the_focused_pane`,
       `tabs_move_rename_and_cycle`, `random_operations_keep_invariants`). Window in
-      `workspace_view.rs`: tab bar (new, close, rename by double click, reorder by drag or
+      `workspace_view.rs`: tab bar (new, close, rename in place, reorder by drag or
       `move_tab_*`, title from the focused pane), dividers dragged with the mouse (minimum pane
       size), inactive panes dimmed and the focused one outlined from theme tokens, hollow
       cursor when unfocused, every keymap action wired. With `confirm_close_running`, these
@@ -124,6 +124,26 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       divider, a dragged tab, 9 panes. Not verified: vertical tabs (not built, follow-up),
       Linux windows, the outline on the focused pane in an active window (scripted windows
       are never active), answering the close prompt (a native dialog a script cannot click).
+- [x] Rename tabs in place and right-click menus. A double click, the tab menu or `rename_tab`
+      turns the title into a field (`line_edit.rs`): Enter saves, Escape cancels, a click
+      elsewhere saves, empty clears. The field and menus hold their tab by pane id, not index
+      (`workspace_view/tab_ui.rs`: `a_rename_lands_on_its_tab_after_an_earlier_tab_closes`,
+      which failed with an index; `a_tab_ref_follows_moves_and_ends_with_its_tab`,
+      `a_refreshed_tab_ref_survives_its_first_pane_closing`,
+      `empty_clears_and_an_unchanged_automatic_title_stays_automatic`). Tab menu: Rename,
+      Close, Close Other Tabs, Move Left, Move Right, New Tab. Pane menu: Copy (needs a
+      selection), Paste, Select All (`select_all_takes_scrollback_and_screen`), Split Right,
+      Split Down, Close Pane; items run their actions, so the close and paste confirmations
+      match the keyboard. Mouse-reporting programs keep a plain right click, Shift+right-click
+      opens the menu (`context_menu.rs`: `right_click_goes_to_programs_that_report_the_mouse`,
+      plus enablement, keyboard selection and clamping tests). Fixed on the way: a click on a
+      tab bubbled to the window root, which took keyboard focus, so typing after a tab click
+      or into the old rename box went nowhere. Verified on macOS arm64 by debug script
+      (double click, type, Enter; both menus; Copy, Paste and Split Right picked from the
+      pane menu; keyboard selection; Shift+right-click under mouse reporting; a control run
+      without the focus fix failed). No Clear item: there is no clear action yet. Not
+      verified: Linux windows, a real mouse's right button (scripts post a Control-click,
+      which GPUI maps to the same right-button event), answering a close prompt from a menu.
 - [x] TOML config and token-based themes, bundled themes (library: `crates/halyard-config`, tests named in docs/themes.md)
 - [x] Settings wired into the app with live reload: font family, size and line height,
       padding, cursor style and blink, scrollback, shell and arguments, working directory,

@@ -607,6 +607,24 @@ impl Engine {
         Ok(())
     }
 
+    /// Select everything: every row of scrollback and the screen.
+    pub fn select_all(&mut self) -> Result<(), EngineError> {
+        self.selection_clear()?;
+        let total = self.terminal.total_rows().map_err(err("reading rows"))?;
+        let Some(last) = total.checked_sub(1) else { return Ok(()) };
+        let point = |x: u16, y: usize| {
+            Point::Screen(PointCoordinate { x, y: u32::try_from(y).unwrap_or(u32::MAX) })
+        };
+        let start = self.terminal.grid_ref(point(0, 0)).map_err(err("resolving the first row"))?;
+        let end = self
+            .terminal
+            .grid_ref(point(self.cols().saturating_sub(1), last))
+            .map_err(err("resolving the last row"))?;
+        let selection = Selection::new(start, end, false);
+        self.terminal.set_selection(Some(&selection)).map_err(err("setting the selection"))?;
+        Ok(())
+    }
+
     /// Remove the selection.
     pub fn selection_clear(&mut self) -> Result<(), EngineError> {
         self.selection_anchor = None;
@@ -1476,6 +1494,24 @@ mod tests {
         e.selection_clear().unwrap();
         assert_eq!(e.selection_text().unwrap(), None);
         assert!(!e.frame().unwrap().cell(6, 0).unwrap().flags.has(CellFlags::SELECTED));
+    }
+
+    #[test]
+    fn select_all_takes_scrollback_and_screen() {
+        // Five rows on screen; the first lines scroll into scrollback.
+        let mut e = engine();
+        for i in 0..12 {
+            e.write(format!("line {i}\r\n").as_bytes());
+        }
+        e.write(b"last");
+        e.select_all().unwrap();
+        let text = e.selection_text().unwrap().unwrap();
+        assert!(text.starts_with("line 0\n"), "{text}");
+        assert!(text.contains("line 11\n"), "{text}");
+        assert!(text.ends_with("last"), "{text}");
+        // A new selection replaces it.
+        e.select_word(0, 4).unwrap();
+        assert_eq!(e.selection_text().unwrap().as_deref(), Some("last"));
     }
 
     #[test]

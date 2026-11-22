@@ -148,6 +148,14 @@ pub enum PaneEvent {
     Focused,
     /// The agent attention state or its unread flag changed.
     AttentionChanged,
+    /// A right click asked for the pane's menu, at this window position.
+    /// The selection is untouched, so Copy still has it.
+    ContextMenu {
+        /// Where the click was, in window coordinates.
+        position: Point<Pixels>,
+        /// Whether there is a selection to copy.
+        has_selection: bool,
+    },
 }
 
 /// Pick the first candidate family that is installed, else the first one
@@ -222,6 +230,9 @@ pub struct TerminalView {
     style: PaneStyle,
     layout: Rc<StdCell<Layout>>,
     selecting: bool,
+    /// The last right press opened the menu, so its release is not the
+    /// program's either.
+    menu_press: bool,
     marked: Option<String>,
     text_mods: Modifiers,
     exited: Option<Option<i32>>,
@@ -411,6 +422,7 @@ impl TerminalView {
             style,
             layout: Rc::new(StdCell::new(Layout { origin, cols, rows })),
             selecting: false,
+            menu_press: false,
             marked: None,
             text_mods: Modifiers::NONE,
             exited: None,
@@ -591,6 +603,11 @@ impl TerminalView {
         decide::pane_has_focus(self.focus.is_focused(window), window.is_window_active())
     }
 
+    /// Select all of scrollback and the screen (the pane menu's Select All).
+    pub fn select_all(&self) {
+        self.session.select_all();
+    }
+
     /// Select between two cells (debug scripts).
     #[cfg(feature = "debug-script")]
     pub fn select_cells(&self, c1: u16, r1: u16, c2: u16, r2: u16) {
@@ -751,6 +768,19 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        if button == MouseButton::Right {
+            self.menu_press = crate::context_menu::right_click_opens_menu(
+                frame.mouse_tracking,
+                ev.modifiers.shift,
+            );
+            if self.menu_press {
+                // Leave the selection alone: Copy in the menu needs it.
+                let has_selection = self.session.selection_text().is_some_and(|t| !t.is_empty());
+                cx.emit(PaneEvent::ContextMenu { position: ev.position, has_selection });
+                cx.stop_propagation();
+                return;
+            }
+        }
         if frame.mouse_tracking && !ev.modifiers.shift {
             let input =
                 self.mouse_input(MouseAction::Press, Some(button), ev.position, ev.modifiers, true);
@@ -773,6 +803,10 @@ impl TerminalView {
         if self.selecting && ev.button == GpuiButton::Left {
             self.selecting = false;
             self.selection_made(cx);
+            return;
+        }
+        if ev.button == GpuiButton::Right && std::mem::take(&mut self.menu_press) {
+            cx.stop_propagation();
             return;
         }
         let frame = self.session.latest_frame();

@@ -132,11 +132,6 @@ pub enum Mode {
         /// The theme override in effect before the picker opened.
         previous: Option<String>,
     },
-    /// Renaming a tab; the query is the new name.
-    Rename {
-        /// Tab index.
-        tab: usize,
-    },
     /// The agent dashboard: one entry per pane, in attention order.
     Agents,
     /// Tools paired through the session API; Enter revokes the selected one.
@@ -156,7 +151,7 @@ pub struct Model {
 }
 
 impl Model {
-    /// A palette in `mode` over `entries` (empty for rename), with an
+    /// A palette in `mode` over `entries`, with an
     /// initial query and the entry to select first (if it matches).
     #[must_use]
     pub fn new(mode: Mode, entries: Vec<String>, query: String, select: Option<usize>) -> Self {
@@ -176,24 +171,13 @@ impl Model {
     /// Add typed text.
     pub fn type_text(&mut self, text: &str) {
         self.query.extend(text.chars().filter(|c| !c.is_control()));
-        if self.rename_tab().is_none() {
-            self.refilter();
-        }
+        self.refilter();
     }
 
     /// Delete the last character.
     pub fn backspace(&mut self) {
         self.query.pop();
-        if self.rename_tab().is_none() {
-            self.refilter();
-        }
-    }
-
-    fn rename_tab(&self) -> Option<usize> {
-        match self.mode {
-            Mode::Rename { tab } => Some(tab),
-            _ => None,
-        }
+        self.refilter();
     }
 
     /// Move the selection by `delta`, wrapping. Returns true if it moved.
@@ -271,7 +255,7 @@ mod tests {
     fn previews_end_with_the_theme_picker() {
         assert!(preview_survives(Some(&Mode::Themes { previous: None })));
         assert!(!preview_survives(Some(&Mode::Commands)), "replaced by the command list");
-        assert!(!preview_survives(Some(&Mode::Rename { tab: 0 })));
+        assert!(!preview_survives(Some(&Mode::Agents)));
         assert!(!preview_survives(None), "closed");
     }
 
@@ -339,15 +323,5 @@ mod tests {
             Some(2),
         );
         assert_eq!(m.selected_entry(), Some(2));
-    }
-
-    #[test]
-    fn rename_mode_edits_text_without_filtering() {
-        let mut m = Model::new(Mode::Rename { tab: 1 }, Vec::new(), "logs".into(), None);
-        m.type_text("!\u{7}");
-        assert_eq!(m.query, "logs!");
-        m.backspace();
-        assert_eq!(m.query, "logs");
-        assert_eq!(m.rows().count(), 0);
     }
 }

@@ -178,6 +178,23 @@ On fish 4.0 to 4.2 (Debian stable ships 4.0.2), put the line after anything that
 Halyard to add the "input starts here" mark to your prompt, and a prompt defined later
 replaces that. Command blocks still work without it, but without the input start.
 
+### Tab names and right-click menus
+
+`rename_tab`, a double click on a tab, or Rename Tab in the tab's right-click menu turns the
+tab's title into a text field, with the current name (or the automatic title) selected.
+Enter saves, Escape cancels, and clicking anywhere else saves, as text fields do on macOS
+and Linux. An empty name clears it, and the tab follows the focused pane's title again.
+
+Right-click a tab for Rename Tab, Close Tab, Close Other Tabs, Move Tab Left, Move Tab Right
+and New Tab. Right-click a pane for Copy (needs a selection), Paste, Select All, Split Right,
+Split Down and Close Pane. Each item takes the same path as its action, so closing a tab or
+pane with a command running asks first, and a multi-line paste asks as it does from the
+keyboard. Use the arrow keys and Enter, or the mouse; Escape or a click outside closes the
+menu. A right click does not clear the selection, so Copy still has it.
+
+A program that turned on mouse reporting (vim, htop, tmux with `mouse on`) gets a plain
+right click, as before; Shift+right-click opens the menu there.
+
 ## `[ai]`
 
 AI features are off by default. With `enabled = false` no AI code runs.

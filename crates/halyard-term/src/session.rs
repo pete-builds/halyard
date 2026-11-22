@@ -219,6 +219,7 @@ enum Command {
     SelectStart(u16, u16),
     SelectExtend(u16, u16),
     SelectWord(u16, u16),
+    SelectAll,
     SelectClear,
     SelectionText(Sender<Option<String>>),
     RowsText(u64, u64, Sender<Option<String>>),
@@ -713,6 +714,11 @@ impl Session {
         self.send(Command::SelectWord(col, row));
     }
 
+    /// Select all of scrollback and the screen.
+    pub fn select_all(&self) {
+        self.send(Command::SelectAll);
+    }
+
     /// Clear the selection.
     pub fn selection_clear(&self) {
         self.send(Command::SelectClear);
@@ -1124,6 +1130,10 @@ impl SessionThread {
             }
             Command::SelectWord(col, row) => {
                 report(engine.select_word(col, row));
+                true
+            }
+            Command::SelectAll => {
+                report(engine.select_all());
                 true
             }
             Command::SelectClear => {

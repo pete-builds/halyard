@@ -80,7 +80,10 @@ Commands, one per line: `sleep <ms>`, `type <text>` and `key <keystroke>` (GPUI 
 through the window's real dispatch: key bindings first, then the focused pane, then text
 input), `action <name>` (a `[keybindings]` action by name), `mousedown <x> <y>`,
 `mousemove <x> <y>`, `mouseup <x> <y>` (left button, window coordinates from the top left,
-posted through AppKit so drags take the real mouse path; macOS only), `copy <from> <to>`
+posted through AppKit so drags take the real mouse path; macOS only), `rightdown <x> <y>`,
+`rightup <x> <y>` (the right button, posted as a Control-click, which GPUI maps to the same
+right-button event), with optional `shift` and `clicks=<n>` after any mouse position
+(`clicks=2` is the second press of a double click), `copy <from> <to>`
 (swap a config file mid-run), `select <c1> <r1> <c2> <r2>`, `resize <w> <h>`,
 `shot <file.png>` (macOS: captures the app's own window), `activate`, `dump` (focused pane's
 frame text to stderr), `quit`. GPUI stops drawing while the window is occluded, so `shot`

@@ -13,6 +13,13 @@
 //!   button events at window coordinates (logical px from the top left),
 //!   posted to the window through AppKit (macOS only), so they take the same
 //!   path as a real mouse and drags work.
+//! - `rightdown <x> <y>`, `rightup <x> <y>`: the same for the right button.
+//!   AppKit's event factory cannot set a button number, which GPUI reads,
+//!   so these post a Control-click: GPUI turns that into the same right
+//!   button event a mouse's right button gives (Control cleared).
+//! - Any mouse command takes optional words after the position: `shift`
+//!   holds Shift, and `clicks=<n>` sets the click count (`clicks=2` is the
+//!   second press of a double click).
 //! - `copy <from> <to>`: copy a file (for swapping a config file mid-run).
 //! - `shot <path.png>`: save a PNG of this window (macOS only; captures the
 //!   app's own window, so no screen recording permission is needed).
@@ -50,12 +57,8 @@ pub enum Step {
     Dump,
     /// Run a config action by name.
     Action(String),
-    /// Mouse button down at a window position.
-    MouseDown(f32, f32),
-    /// Mouse moved (left button held) to a window position.
-    MouseMove(f32, f32),
-    /// Mouse button up at a window position.
-    MouseUp(f32, f32),
+    /// A mouse event at a window position.
+    Mouse(Mouse),
     /// Copy a file.
     Copy(PathBuf, PathBuf),
     /// Bring the window to the front.
@@ -64,6 +67,56 @@ pub enum Step {
     CloseButton,
     /// Quit.
     Quit,
+}
+
+/// A mouse button a script can press.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    /// The left (primary) button.
+    Left,
+    /// The right (secondary) button.
+    Right,
+}
+
+/// One scripted mouse event.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mouse {
+    /// Which button.
+    pub button: Button,
+    /// Pressed, dragged or released.
+    pub kind: MouseKind,
+    /// Window position, logical px from the top left.
+    pub x: f32,
+    /// Window position, logical px from the top left.
+    pub y: f32,
+    /// Click count (2 for the second press of a double click).
+    pub clicks: u8,
+    /// Shift held.
+    pub shift: bool,
+}
+
+/// Parse `<x> <y> [shift] [clicks=<n>]`.
+fn mouse_args(
+    arg: &str,
+    n: usize,
+    what: &str,
+    button: Button,
+    kind: MouseKind,
+) -> Result<Mouse, String> {
+    let words: Vec<&str> = arg.split_whitespace().collect();
+    let (pos, rest) = words.split_at(words.len().min(2));
+    let (x, y) = two_numbers(&pos.join(" "), n, what)?;
+    let mut m = Mouse { button, kind, x, y, clicks: 1, shift: false };
+    for w in rest {
+        if *w == "shift" {
+            m.shift = true;
+        } else if let Some(c) = w.strip_prefix("clicks=") {
+            m.clicks = c.parse().map_err(|e| format!("line {}: clicks: {e}", n + 1))?;
+        } else {
+            return Err(format!("line {}: {what}: unknown option `{w}`", n + 1));
+        }
+    }
+    Ok(m)
 }
 
 fn two_numbers(arg: &str, n: usize, what: &str) -> Result<(f32, f32), String> {
@@ -109,18 +162,11 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
                 let (w, h) = two_numbers(arg, n, "resize")?;
                 Step::Resize(w, h)
             }
-            "mousedown" => {
-                let (x, y) = two_numbers(arg, n, "mousedown")?;
-                Step::MouseDown(x, y)
-            }
-            "mousemove" => {
-                let (x, y) = two_numbers(arg, n, "mousemove")?;
-                Step::MouseMove(x, y)
-            }
-            "mouseup" => {
-                let (x, y) = two_numbers(arg, n, "mouseup")?;
-                Step::MouseUp(x, y)
-            }
+            "mousedown" => Step::Mouse(mouse_args(arg, n, cmd, Button::Left, MouseKind::Down)?),
+            "mousemove" => Step::Mouse(mouse_args(arg, n, cmd, Button::Left, MouseKind::Dragged)?),
+            "mouseup" => Step::Mouse(mouse_args(arg, n, cmd, Button::Left, MouseKind::Up)?),
+            "rightdown" => Step::Mouse(mouse_args(arg, n, cmd, Button::Right, MouseKind::Down)?),
+            "rightup" => Step::Mouse(mouse_args(arg, n, cmd, Button::Right, MouseKind::Up)?),
             "action" => Step::Action(arg.trim().to_owned()),
             "copy" => {
                 let parts: Vec<&str> = arg.split_whitespace().collect();
@@ -142,7 +188,7 @@ pub fn parse(script: &str) -> Result<Vec<Step>, String> {
 /// What a scripted window must provide beyond GPUI's own dispatch.
 pub trait Host: Render + Sized {
     /// The focused pane's frame text and render count.
-    fn script_dump(&mut self, cx: &mut Context<Self>) -> String;
+    fn script_dump(&mut self, window: &mut Window, cx: &mut Context<Self>) -> String;
     /// Select between two cells in the focused pane.
     fn script_select(&mut self, c1: u16, r1: u16, c2: u16, r2: u16, cx: &mut Context<Self>);
     /// Run a config action by name.
@@ -203,12 +249,7 @@ pub fn start<H: Host + 'static>(window: &mut Window, cx: &mut Context<H>) {
                         .map_err(|e| e.to_string()),
                     Err(e) => Err(e.to_string()),
                 },
-                Step::MouseDown(x, y) | Step::MouseMove(x, y) | Step::MouseUp(x, y) => {
-                    let kind = match step {
-                        Step::MouseDown(..) => MouseKind::Down,
-                        Step::MouseMove(..) => MouseKind::Dragged,
-                        _ => MouseKind::Up,
-                    };
+                Step::Mouse(m) => {
                     let target = cx
                         .update(|window, _| {
                             native_view(window)
@@ -222,7 +263,7 @@ pub fn start<H: Host + 'static>(window: &mut Window, cx: &mut Context<H>) {
                     // drawing while the window is occluded.
                     target.and_then(|(view, height)| {
                         force_display(view);
-                        post_mouse(view, kind, x, height - y)
+                        post_mouse(view, Mouse { y: height - m.y, ..m })
                     })
                 }
                 Step::Action(name) => this
@@ -233,8 +274,14 @@ pub fn start<H: Host + 'static>(window: &mut Window, cx: &mut Context<H>) {
                     .map(|_| eprintln!("halyard: copied {} to {}", from.display(), to.display()))
                     .map_err(|e| e.to_string()),
                 Step::Shot(p) => {
+                    // Mark the window dirty so the forced draw below renders
+                    // and presents the current state: a frame drawn while the
+                    // window was hidden may never have reached the screen.
                     let view = cx
-                        .update(|window, _| native_view(window))
+                        .update(|window, _| {
+                            window.refresh();
+                            native_view(window)
+                        })
                         .map_err(|e| e.to_string())
                         .and_then(|v| v);
                     match view {
@@ -269,7 +316,9 @@ pub fn start<H: Host + 'static>(window: &mut Window, cx: &mut Context<H>) {
                     .update(|window, _| window.resize(size(px(w), px(h))))
                     .map_err(|e| e.to_string()),
                 Step::Dump => this
-                    .update(cx, |host, cx| eprintln!("halyard: {}", host.script_dump(cx)))
+                    .update_in(cx, |host, window, cx| {
+                        eprintln!("halyard: {}", host.script_dump(window, cx));
+                    })
                     .map_err(|e| e.to_string()),
                 Step::CloseButton => cx
                     .update(|window, _| native_view(window))
@@ -292,7 +341,7 @@ pub fn start<H: Host + 'static>(window: &mut Window, cx: &mut Context<H>) {
     .detach();
 }
 
-/// Left-button event kinds a script can post.
+/// Mouse event kinds a script can post.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseKind {
     /// Button pressed.
@@ -303,14 +352,14 @@ pub enum MouseKind {
     Up,
 }
 
-/// Post a left-button event to the window owning `view`, at `x`, `y` in
+/// Post a mouse event to the window owning `view`, at `m.x`, `m.y` in
 /// window coordinates with the origin at the bottom left (AppKit's), the
 /// way the window server delivers a real click. It goes through
 /// `-[NSWindow sendEvent:]`, so GPUI sees it exactly like a mouse event.
 #[cfg(target_os = "macos")]
 // objc's msg_send! checks a `cargo-clippy` cfg that this crate does not declare.
 #[allow(unexpected_cfgs)]
-pub fn post_mouse(view: usize, kind: MouseKind, x: f32, y: f32) -> Result<(), String> {
+pub fn post_mouse(view: usize, m: Mouse) -> Result<(), String> {
     use objc::runtime::{Class, Object};
     use objc::{msg_send, sel, sel_impl};
 
@@ -320,11 +369,20 @@ pub fn post_mouse(view: usize, kind: MouseKind, x: f32, y: f32) -> Result<(), St
         x: f64,
         y: f64,
     }
-    let event_type: u64 = match kind {
+    // NSEventType: left down 1, up 2, dragged 6.
+    let event_type: u64 = match m.kind {
         MouseKind::Down => 1,
         MouseKind::Up => 2,
         MouseKind::Dragged => 6,
     };
+    // NSEventModifierFlagShift, NSEventModifierFlagControl. `mouseEventWithType`
+    // leaves the button number 0 (left) even for the right-button types, and
+    // GPUI reads the button number; a Control-click is what GPUI maps to the
+    // right button on macOS, so a scripted right click is one.
+    let mut flags: u64 = if m.shift { 1 << 17 } else { 0 };
+    if m.button == Button::Right {
+        flags |= 1 << 18;
+    }
     let view = view as *mut Object;
     let nsevent = Class::get("NSEvent").ok_or("no NSEvent class")?;
     let process_info = Class::get("NSProcessInfo").ok_or("no NSProcessInfo class")?;
@@ -343,13 +401,13 @@ pub fn post_mouse(view: usize, kind: MouseKind, x: f32, y: f32) -> Result<(), St
         let nil: *mut Object = std::ptr::null_mut();
         let event: *mut Object = msg_send![nsevent,
             mouseEventWithType: event_type
-            location: NsPoint { x: f64::from(x), y: f64::from(y) }
-            modifierFlags: 0u64
+            location: NsPoint { x: f64::from(m.x), y: f64::from(m.y) }
+            modifierFlags: flags
             timestamp: now
             windowNumber: number
             context: nil
             eventNumber: 0isize
-            clickCount: 1isize
+            clickCount: isize::from(m.clicks)
             pressure: 1.0f32];
         if event.is_null() {
             return Err("AppKit returned no event".into());
@@ -389,7 +447,7 @@ pub fn press_close(_view: usize) -> Result<(), String> {
 
 /// Posting mouse events is only implemented on macOS.
 #[cfg(not(target_os = "macos"))]
-pub fn post_mouse(_view: usize, _kind: MouseKind, _x: f32, _y: f32) -> Result<(), String> {
+pub fn post_mouse(_view: usize, _m: Mouse) -> Result<(), String> {
     Err("posting mouse events is only implemented on macOS".into())
 }
 
@@ -503,7 +561,8 @@ mod tests {
 
     #[test]
     fn parses_every_command() {
-        let s = "# comment\n\nsleep 250\ntype ls -la\nkey ctrl-c\nshot /tmp/a.png\nselect 0 1 4 1\nresize 640 400\ndump\naction split_right\nmousedown 1 2\nmousemove 3 4\nmouseup 5 6\ncopy /a /b\nquit\n";
+        let s = "# comment\n\nsleep 250\ntype ls -la\nkey ctrl-c\nshot /tmp/a.png\nselect 0 1 4 1\nresize 640 400\ndump\naction split_right\nmousedown 1 2\nmousemove 3 4\nmouseup 5 6\nrightdown 7 8 shift\nrightup 7 8\nmousedown 9 10 clicks=2\ncopy /a /b\nquit\n";
+        let mouse = |button, kind, x, y| Mouse { button, kind, x, y, clicks: 1, shift: false };
         assert_eq!(
             parse(s).unwrap(),
             vec![
@@ -515,9 +574,15 @@ mod tests {
                 Step::Resize(640.0, 400.0),
                 Step::Dump,
                 Step::Action("split_right".into()),
-                Step::MouseDown(1.0, 2.0),
-                Step::MouseMove(3.0, 4.0),
-                Step::MouseUp(5.0, 6.0),
+                Step::Mouse(mouse(Button::Left, MouseKind::Down, 1.0, 2.0)),
+                Step::Mouse(mouse(Button::Left, MouseKind::Dragged, 3.0, 4.0)),
+                Step::Mouse(mouse(Button::Left, MouseKind::Up, 5.0, 6.0)),
+                Step::Mouse(Mouse {
+                    shift: true,
+                    ..mouse(Button::Right, MouseKind::Down, 7.0, 8.0)
+                }),
+                Step::Mouse(mouse(Button::Right, MouseKind::Up, 7.0, 8.0)),
+                Step::Mouse(Mouse { clicks: 2, ..mouse(Button::Left, MouseKind::Down, 9.0, 10.0) }),
                 Step::Copy(PathBuf::from("/a"), PathBuf::from("/b")),
                 Step::Quit,
             ]
@@ -530,6 +595,8 @@ mod tests {
         assert!(parse("sleep soon").is_err());
         assert!(parse("select 1 2 3").is_err());
         assert!(parse("mousedown 1").is_err());
+        assert!(parse("rightdown 1 2 ctrl").is_err(), "unknown modifier");
+        assert!(parse("mousedown 1 2 clicks=x").is_err());
         assert!(parse("copy /only-one").is_err());
     }
 }
