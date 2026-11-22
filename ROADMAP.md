@@ -65,7 +65,7 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 - [x] `flake.nix`: `nix develop`, `nix build`, offline build (Ghostty source and Zig packages
       pinned as inputs), on x86_64-linux, aarch64-linux, aarch64-darwin (`nix` workflow:
       `nix flake check` incl. `checks.*.ghostty-pin`, plus the sandbox network control).
-      x86_64-darwin evaluated only.
+      x86_64-darwin is not offered: the pinned nixpkgs dropped it.
 - [ ] `nix run`: wired (`apps.default`, RUNPATH for GPUI's dlopened libraries) but pending the
       app crate
 - [ ] NixOS VM test: launches under Wayland and X11, screenshots

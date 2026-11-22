@@ -57,16 +57,16 @@ jobs:
             in pkgs.runCommand "network-probe-${toString builtins.currentTime}" { nativeBuildInputs = [ pkgs.curl ]; } "curl -sSI https://github.com > $out"' 2>&1)"
           status=$?
           set -e
-          echo "$log" | tail -n 20
+          tail -n 20 <<<"$log"
           if [ "$status" -eq 0 ]; then
             echo "::error::a sandboxed build reached the network"
             exit 1
           fi
           # Fail for the right reason only: a name lookup that cannot work.
-          echo "$log" | grep -q "Could not resolve host"
+          grep -q "Could not resolve host" <<<"$log"
           echo "ok: a sandboxed build could not reach github.com"
 
-      - name: Every system evaluates (x86_64-darwin has no runner here)
+      - name: Every system evaluates without building (no import from derivation)
         if: matrix.os == 'ubuntu-24.04'
         run: nix flake check --all-systems --no-build --no-update-lock-file
 

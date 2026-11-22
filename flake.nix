@@ -41,7 +41,8 @@
         "x86_64-linux"
         "aarch64-linux"
         "aarch64-darwin"
-        "x86_64-darwin"
+        # No x86_64-darwin: nixpkgs 26.11 (the locked nixpkgs-unstable) dropped
+        # it, and evaluating anything for it throws.
       ];
 
       forAllSystems = f: lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});

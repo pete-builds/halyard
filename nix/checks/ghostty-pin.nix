@@ -5,8 +5,8 @@
 # the check cannot pass by being broken.
 {
   pkgs,
-  craneLib,
   src,
+  cargoVendorDir,
   ghosttyRev,
 }:
 let
@@ -17,11 +17,10 @@ let
       (builtins.head sysPackages).version
     else
       throw "ghostty-pin: expected exactly one libghostty-vt-sys in Cargo.lock, found ${toString (builtins.length sysPackages)}";
-  vendor = craneLib.vendorCargoDeps { inherit src; };
   script = ../check-ghostty-pin.sh;
 in
 pkgs.runCommand "halyard-ghostty-pin" { } ''
-  build_rs="$(find -L ${vendor} -path '*/libghostty-vt-sys-${sysVersion}/build.rs' -print -quit)"
+  build_rs="$(find -L ${cargoVendorDir} -path '*/libghostty-vt-sys-${sysVersion}/build.rs' -print -quit)"
   if [ -z "$build_rs" ]; then
     echo "error: libghostty-vt-sys-${sysVersion} is not in the vendored crates" >&2
     exit 1

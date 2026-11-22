@@ -1,6 +1,7 @@
 # Nix and NixOS
 
-Halyard ships a flake (`flake.nix`) for Linux (x86_64, aarch64) and macOS (aarch64, x86_64).
+Halyard ships a flake (`flake.nix`) for Linux (x86_64, aarch64) and Apple silicon macOS (aarch64). Intel macOS is not
+included: the pinned nixpkgs (26.11 unstable) dropped x86_64-darwin.
 It provides the package, a dev shell, a Home Manager module and a NixOS module.
 
 ## Commands
@@ -191,5 +192,5 @@ The `nix` workflow (`.github/workflows/nix.yml`) runs on `ubuntu-24.04` (x86_64-
 * On Linux, a control build first proves the sandbox has no network, so the package building
   in that sandbox shows the build is offline.
 
-x86_64-darwin has no runner: CI only evaluates it (`nix flake check --all-systems --no-build`
-on ubuntu-24.04), it is never built.
+On ubuntu-24.04, `nix flake check --all-systems --no-build` also evaluates every output for
+all three systems, which catches import from derivation and per-system evaluation errors.

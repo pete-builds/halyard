@@ -51,9 +51,15 @@ let
     (pkgs.libxrandr or pkgs.xorg.libXrandr)
   ];
 
+  # Vendored from the real source's Cargo.lock. Passed explicitly so crane
+  # never reads it out of the dummy source, which would be import from
+  # derivation and breaks evaluation without building
+  # (`nix flake check --no-build`).
+  cargoVendorDir = craneLib.vendorCargoDeps { inherit src; };
+
   commonArgs = {
     pname = "halyard";
-    inherit version src;
+    inherit version src cargoVendorDir;
     strictDeps = true;
     cargoExtraArgs = "--locked";
 
@@ -214,7 +220,7 @@ let
     };
 
     ghostty-pin = import ./checks/ghostty-pin.nix {
-      inherit pkgs craneLib src;
+      inherit pkgs src cargoVendorDir;
       ghosttyRev = ghosttySrc.rev;
     };
   };
