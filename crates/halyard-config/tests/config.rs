@@ -684,3 +684,136 @@ fn secret_looking_key_names_are_rejected_at_the_top_level_and_in_every_section()
     let ok = "[keybindings]\n\"cmd+k\" = \"find\"\n[ai]\nenabled = false\n";
     assert!(Config::parse(ok).is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// A documented name is exempt from the secret rule only in its own table.
+// v0.1.1 exempted `api_key_env` by name at any depth under `[ai]`, so a key pasted into
+// `[ai] api_key_env = "sk-..."` was kept with only an "unknown key" warning.
+// ---------------------------------------------------------------------------
+
+const PASTED: &str = "sk-ant-api03-PASTEDREALKEY0123456789";
+
+/// Assert `src` is a hard secret error at `section`, with no value and no unknown name shown.
+fn assert_misplaced(src: &str, section: &str, line: usize) {
+    let e = err(src);
+    assert_eq!(e.key.as_deref(), Some(section), "{src:?}: {e}");
+    assert_eq!(e.line, Some(line), "{src:?}: {e}");
+    assert!(e.message.contains("never stores API keys"), "{src:?}: {e}");
+    assert_secret_absent(src, PASTED);
+    assert_secret_absent(src, "sk-ant");
+    assert_secret_absent(src, "extra_tbl");
+}
+
+#[test]
+fn api_key_env_directly_under_ai_is_a_secret_not_an_ignored_key() {
+    assert_misplaced(&format!("[ai]\nenabled = false\napi_key_env = \"{PASTED}\"\n"), "ai", 3);
+    // Even a value shaped like a variable name: the field does not exist there.
+    assert_misplaced("[ai]\napi_key_env = \"ANTHROPIC_API_KEY\"\n", "ai", 2);
+    // Dotted and quoted spellings.
+    assert_misplaced(&format!("ai.api_key_env = \"{PASTED}\"\n"), "ai", 1);
+    assert_misplaced(&format!("[\"ai\"]\n\"api_key_env\" = \"{PASTED}\"\n"), "ai", 2);
+}
+
+#[test]
+fn api_key_env_in_a_nested_ai_table_is_a_secret() {
+    assert_misplaced(&format!("[ai.extra_tbl]\napi_key_env = \"{PASTED}\"\n"), "ai", 2);
+    assert_misplaced(&format!("[ai]\nextra_tbl = {{ api_key_env = \"{PASTED}\" }}\n"), "ai", 2);
+    assert_misplaced(&format!("[[ai.extra_tbl]]\napi_key_env = \"{PASTED}\"\n"), "ai", 2);
+    // Arrays nested in arrays are walked too.
+    assert_misplaced(&format!("[ai]\nextra_tbl = [[{{ api_key_env = \"{PASTED}\" }}]]\n"), "ai", 2);
+}
+
+#[test]
+fn api_key_env_nested_inside_a_provider_is_a_secret() {
+    let p = "[[ai.providers]]\nname = \"a\"\nkind = \"anthropic\"\nmodel = \"m\"\n";
+    // In a sub-table of a provider (e.g. headers), not on the provider itself.
+    assert_misplaced(
+        &format!("{p}[ai.providers.extra_tbl]\napi_key_env = \"{PASTED}\"\n"),
+        "ai.providers[0]",
+        6,
+    );
+    assert_misplaced(
+        &format!("{p}extra_tbl = {{ api_key_env = \"{PASTED}\" }}\n"),
+        "ai.providers[0]",
+        5,
+    );
+    // The second provider is named, not the first.
+    assert_misplaced(
+        &format!(
+            "{p}api_key_env = \"OK_VAR\"\n[[ai.providers]]\nname = \"b\"\nkind = \"anthropic\"\n\
+             model = \"m\"\nextra_tbl = {{ api_key_env = \"{PASTED}\" }}\n"
+        ),
+        "ai.providers[1]",
+        10,
+    );
+}
+
+#[test]
+fn misplaced_documented_name_error_says_where_it_belongs() {
+    let e = err(&format!("[ai]\napi_key_env = \"{PASTED}\"\n"));
+    assert!(
+        e.message.contains("`api_key_env` is only valid on an `[[ai.providers]]` entry"),
+        "{e}"
+    );
+    // Control: an undocumented secret-looking name gets no such hint (its name stays hidden).
+    let e = err(&format!("[ai]\napi_key = \"{PASTED}\"\n"));
+    assert!(!e.message.contains("only valid on"), "{e}");
+}
+
+#[test]
+fn api_key_env_outside_ai_is_rejected_with_its_path() {
+    for (src, key) in [
+        (format!("api_key_env = \"{PASTED}\"\n"), "api_key_env"),
+        (format!("[font]\napi_key_env = \"{PASTED}\"\n"), "font.api_key_env"),
+        (format!("[font.extra_tbl]\napi_key_env = \"{PASTED}\"\n"), "font.extra_tbl.api_key_env"),
+        // A secret-looking name inside arrays nested in arrays.
+        (format!("[font]\nlist = [[{{ token = \"{PASTED}\" }}]]\n"), "font.list.token"),
+        // `keybindings` is a documented name only at the top level.
+        (format!("[font.keybindings]\nx = \"{PASTED}\"\n"), "font.keybindings"),
+        (format!("[mystery.keybindings]\nx = \"{PASTED}\"\n"), "mystery.keybindings"),
+    ] {
+        let e = err(&src);
+        assert_eq!(e.key.as_deref(), Some(key), "{src:?}: {e}");
+        assert!(e.message.contains("never stores API keys"), "{e}");
+        assert_secret_absent(&src, PASTED);
+    }
+}
+
+#[test]
+fn api_key_env_value_that_looks_like_a_token_is_refused() {
+    // Each of these passes the variable-name syntax check, but is shaped like a credential.
+    // Prefixed fixtures are assembled at run time with a dummy body, so no token-shaped
+    // literal sits in the source for secret scanners (or readers) to mistake for a real one.
+    let prefixed = ["ghp_", "gho_", "github_pat_", "sk_live_", "sk_test_", "rk_live_"]
+        .map(|p| format!("{p}fixture_only"));
+    let shaped = [
+        "AbCdEf0123456789GhIjKlMnOpQrStUv", // random-looking mixed case and digits
+        "q8Xz3LmT0vRb7NcY2wKd5HsJ9pFg4",
+        "d41d8cd98f00b204e9800998ecf8427e", // a hex digest (MD5 of the empty string)
+    ]
+    .map(String::from);
+    for v in prefixed.iter().chain(&shaped) {
+        let src = format!("{PROV}kind = \"anthropic\"\napi_key_env = \"{v}\"\n");
+        let e = err(&src);
+        assert_eq!(e.key.as_deref(), Some("ai.providers[0].api_key_env"), "{v}: {e}");
+        assert!(e.message.contains("NAME"), "{v}: {e}");
+        assert_secret_absent(&src, v);
+    }
+    // Control: real variable names are accepted.
+    for v in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "MY_KEY",
+        "my_key_2",
+        "_PRIVATE",
+        "HALYARD_ANTHROPIC_API_KEY_FOR_WORK_LAPTOP",
+        "GITHUB_PAT",
+        "SK_LIVE",
+        "MyAnthropicApiKey2024Work",
+        "OPENAI_API_KEY_2024_11_22_PERSONAL_ACCOUNT",
+    ] {
+        let src = format!("{PROV}kind = \"anthropic\"\napi_key_env = \"{v}\"\n");
+        let l = Config::parse(&src).unwrap_or_else(|e| panic!("{v} must be accepted: {e}"));
+        assert_eq!(l.config.ai.providers[0].api_key_env.as_deref(), Some(v));
+    }
+}

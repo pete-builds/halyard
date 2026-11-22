@@ -58,7 +58,12 @@ Which key names can appear in a message:
   rejects it. The value is never shown.
 * Never an unknown or secret-looking key name under `[ai]`, at any depth. Those are reported as
   "unknown key in [ai]" (or "in [[ai.providers]]") with the section and the line, because a
-  pasted key can end up as a key name. Open that line to see it.
+  pasted key can end up as a key name. Open that line to see it. The one exception is a
+  documented name in the wrong table, such as `api_key_env` directly under `[ai]`: the error
+  names it, because the name comes from Halyard's own schema, not from your file.
+
+A documented key name is exempt from the secret-name check only in the table that defines it.
+The same name in any other table is checked like any other key.
 
 These checks read the parsed document, not the text lines, so quoted headers (`["ai"]`),
 dotted keys (`"ai".enabled = ...`) and multi-line strings cannot hide a section.
@@ -215,10 +220,21 @@ api_key_env = "ANTHROPIC_API_KEY"
 **Keys never go in this file.** Any key under `[ai]`, at any depth, whose name contains
 `key`, `token`, `secret`, `password`, `passwd` or `auth` (in any letter case, for example
 `API_KEY`, `Authorization`, `x-api-key`) is rejected with an error telling you to export the key and name the
-variable. `api_key_env` must look like a variable name, so pasting a key there is rejected
-too. A `base_url` with credentials in it (`https://user:KEY@host/`) is rejected. No error ever
+variable. The one documented name with such a fragment, `api_key_env`, is allowed only
+directly on an `[[ai.providers]]` entry. Anywhere else (directly under `[ai]`, in a table
+nested under `[ai]` or under a provider, or outside `[ai]`) it is treated as a pasted secret
+and rejected; the error names `api_key_env` and where it belongs, never the value. Its value
+must look like a variable name (letters, digits, underscore, not starting with a digit), so
+pasting a key there is rejected too, and so is a value that passes that check but is shaped
+like a credential: a well-known token prefix (`ghp_`, `github_pat_`, `sk_live_` and similar),
+24 or more characters of random-looking mixed case and digits, or 32 or more hex digits.
+A `base_url` with credentials in it (`https://user:KEY@host/`) is rejected. No error ever
 echoes a value back. If you pasted a real key into a config file
 at any point, revoke it.
+
+In 0.1.0 and 0.1.1, `api_key_env` was exempt by name at any depth under `[ai]`, so a key pasted as
+`[ai] api_key_env = "sk-..."` (or in a nested table) was kept in the file with only an
+"unknown key, ignored" warning. If that happened to you, revoke the key.
 
 ## `[agents]`
 
