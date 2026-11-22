@@ -103,13 +103,45 @@ fn shell_echo_reaches_the_screen() {
 }
 
 #[test]
+fn missing_home_starts_the_shell_in_root() {
+    // A HOME that does not exist (containers, service accounts, the Nix build
+    // sandbox) used to make the spawn fail with "No such file or directory".
+    let mut cfg = config(80, 24);
+    cfg.env.push(("HOME".to_owned(), "/nonexistent/halyard-home".to_owned()));
+    let s = Session::spawn(cfg).expect("spawn with a missing HOME");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    run(&s, "echo cwd:$(pwd)");
+    wait_for(&s, "the shell's cwd", |f| row_equal(f, "cwd:/").is_some());
+}
+
+#[test]
+fn existing_home_is_the_starting_directory() {
+    // The other half of the HOME fallback: with a real HOME and no cwd, the
+    // shell starts in HOME, not in "/".
+    let home = tempfile::tempdir().expect("temp HOME");
+    let home_path = home.path().canonicalize().expect("canonical HOME");
+    let mut cfg = config(200, 24);
+    cfg.env.push(("HOME".to_owned(), home_path.to_string_lossy().into_owned()));
+    let s = Session::spawn(cfg).expect("spawn with a temp HOME");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    run(&s, "echo cwd:$(pwd -P)");
+    let want = format!("cwd:{}", home_path.display());
+    wait_for(&s, "the shell's cwd", |f| row_equal(f, &want).is_some());
+}
+
+#[test]
 fn default_program_is_a_login_shell() {
     // No program: the user's shell from $SHELL or passwd, run as a login
     // shell (argv[0] starts with '-'). Its prompt is whatever the user has.
     let s = Session::spawn(SessionConfig::default()).expect("spawn login shell");
     s.write("echo login-check:$0\r");
+    // The line is typed before the first prompt appears, so the output can land
+    // after the prompt ("-bash-5.3$ login-check:-bash", seen in the Nix sandbox)
+    // and a long prompt can wrap it onto the next row (seen on macOS with a long
+    // hostname). Search the rows joined together. The typed command itself reads
+    // "login-check:$0" and cannot match.
     wait_for(&s, "login shell argv[0]", |f| {
-        (0..f.rows).any(|r| f.row_text(r).starts_with("login-check:-"))
+        (0..f.rows).map(|r| f.row_text(r)).collect::<String>().contains("login-check:-")
     });
 }
 

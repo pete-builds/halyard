@@ -41,6 +41,10 @@ cargo run -p halyard-app                            # launch the terminal
 ```
 
 CI (`.github/workflows/ci.yml`) runs exactly these on macOS and Ubuntu, plus `cargo deny`.
+`.github/workflows/nix.yml` runs `nix flake check` and the same cargo commands inside
+`nix develop` on x86_64-linux, aarch64-linux and aarch64-darwin (see `docs/nix.md`). When a
+`libghostty-vt` bump changes the Ghostty commit, update the `ghostty` input in `flake.nix` to
+match; `checks.<system>.ghostty-pin` fails until you do.
 Run them locally before opening a PR.
 
 ## Conventions

@@ -65,15 +65,25 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 - Known gaps in the session layer: underline style (double, curly) and underline color are
   reduced to a single underline flag; Kitty graphics are not rendered; Option-as-Alt on
   macOS is off by default and only configurable through `SessionConfig::option_as_alt`.
-- [ ] `flake.nix`: `nix develop`, `nix build`, `nix run`, offline build (Ghostty source and
-      Zig packages pinned as inputs)
+- [x] `flake.nix`: `nix develop`, `nix build`, offline build (Ghostty source and Zig packages
+      pinned as inputs), on x86_64-linux, aarch64-linux, aarch64-darwin (`nix` workflow:
+      `nix flake check` incl. `checks.*.ghostty-pin`, plus the sandbox network control).
+      x86_64-darwin is not offered: the pinned nixpkgs dropped it.
+- [x] `nix run`: `apps.default` runs the packaged `halyard`, whose RUNPATH resolves all 14
+      libraries GPUI dlopens (`checks.*.package-contents`, with a control). On real NixOS
+      hardware (x86_64, KDE Plasma 6 Wayland, RTX 4070 Ti) at 5936fd0: `nix flake check` passed
+      and `nix run` opened Halyard. Not covered: aarch64-linux and X11 sessions on hardware
 - [ ] NixOS VM test: launches under Wayland and X11, screenshots
 - [x] macOS app bundle: `packaging/macos/build-app.sh` builds a universal `Halyard.app` (ad-hoc
       signed, icon from `packaging/icon/`) and a zip. Verified by hand on macOS arm64: built from
       the app-window branch, launched with `open`, process ran, `lipo -info` shows x86_64 and arm64,
       `codesign --verify` passes on the app and on the unzipped copy. Not covered: no automated test,
       the Intel slice has not been run, and the app is NOT notarized (see `docs/INSTALL.md`)
-- [ ] Linux desktop entry and icon (in the Nix flake PR)
+- [x] Linux desktop entry and icon: `dist/linux/halyard.desktop` (`StartupWMClass=halyard`) and
+      `dist/icons/halyard.svg` plus PNG 16 to 512, installed by the Nix package and checked by
+      `checks.*.package-contents` on x86_64-linux and aarch64-linux (`desktop-file-validate`,
+      `StartupWMClass=halyard` matching the app id "halyard") and inspected in the package built on
+      the real NixOS box. Not yet seen in a desktop launcher menu
 - [x] Flatpak host shells: inside Flatpak each pane runs `flatpak-spawn --host --watch-bus` with
       the pane's directory and environment (`halyard_term::flatpak`; tests
       `login_shell_runs_on_the_host_with_cwd_and_env`, `inside_flatpak_the_login_shell_runs_on_the_host`,
@@ -141,7 +151,10 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       2-tab, 3-pane layout with a dragged divider, tab names and four directories came back
       after a relaunch (screenshots). Closing the last window saves an empty layout, so the
       next launch opens one new window.
-- [ ] Home Manager module: themes, fonts, keybindings, settings
+- [x] Home Manager module: themes, fonts, keybindings, settings (`checks.*.hm-module`
+      evaluates it with real Home Manager and compares the written TOML; NixOS module checked by
+      `checks.x86_64-linux.nixos-module`). The written files are loaded by halyard-config's own
+      parser in the check, and a key named like a secret in `settings` is an evaluation error.
 
 ## Phase 3: modern shell experience
 

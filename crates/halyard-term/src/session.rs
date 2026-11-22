@@ -457,9 +457,6 @@ fn build_command_for(
         cmd.env("SHELL", default_shell());
         cmd
     };
-    if let Some(cwd) = &config.cwd {
-        cmd.cwd(cwd);
-    }
     for (key, _) in std::env::vars_os() {
         if key.to_str().is_some_and(is_foreign_terminal_var) {
             cmd.env_remove(key);
@@ -470,6 +467,16 @@ fn build_command_for(
     }
     for (k, v) in &env {
         cmd.env(k, v);
+    }
+    if let Some(cwd) = &config.cwd {
+        cmd.cwd(cwd);
+    } else if let Some(home) = cmd.get_env("HOME").filter(|h| !Path::new(h).is_dir()) {
+        // Without a cwd, portable-pty starts the child in $HOME and the spawn fails
+        // outright when that directory does not exist (containers, service accounts,
+        // build sandboxes). A shell in "/" is better than no shell.
+        // Debug formatting escapes control characters in a hostile HOME.
+        eprintln!("halyard-term: HOME {home:?} is not a directory; starting in /");
+        cmd.cwd("/");
     }
     if let Some(lang) =
         default_locale(|k| cmd.get_env(k).map(OsString::from), cfg!(target_os = "macos"))

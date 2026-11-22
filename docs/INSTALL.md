@@ -59,8 +59,7 @@ For a quick run without a bundle: `cargo run --release -p halyard-app`.
 
 Use the flake. It pins every dependency, builds offline, wires up the runtime libraries
 and installs the desktop entry and icon. The flake, the NixOS module, the Home Manager
-module and the nix-darwin setup are documented in [docs/nix.md](nix.md) (added by the
-flake PR).
+module and the nix-darwin setup are documented in [docs/nix.md](nix.md).
 
 ```sh
 nix run github:pete-builds/halyard

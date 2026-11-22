@@ -1,0 +1,108 @@
+name: nix
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flake:
+    name: flake (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
+        with:
+          extra_nix_config: |
+            keep-going = true
+
+      - name: Nix settings
+        run: |
+          nix --version
+          nix config show | grep -E '^(sandbox|system|extra-platforms) '
+
+      - name: flake.lock is committed and complete
+        run: |
+          if ! git ls-files --error-unmatch flake.lock >/dev/null 2>&1; then
+            nix flake lock
+            echo "::group::generated flake.lock"
+            cat flake.lock
+            echo "::endgroup::"
+            echo "LOCK_MISSING=1" >> "$GITHUB_ENV"
+          else
+            nix flake metadata --no-update-lock-file
+          fi
+
+      - name: Sandbox has no network (control)
+        if: runner.os == 'Linux'
+        run: |
+          # The package builds below run in this same sandbox. Prove it blocks
+          # the network, so their success means the build is offline.
+          set +e
+          log="$(nix build --no-link -L --impure --expr '
+            let pkgs = (builtins.getFlake (toString ./.)).inputs.nixpkgs.legacyPackages.${builtins.currentSystem};
+            in pkgs.runCommand "network-probe-${toString builtins.currentTime}" { nativeBuildInputs = [ pkgs.curl ]; } "curl -sSI https://github.com > $out"' 2>&1)"
+          status=$?
+          set -e
+          tail -n 20 <<<"$log"
+          if [ "$status" -eq 0 ]; then
+            echo "::error::a sandboxed build reached the network"
+            exit 1
+          fi
+          # Fail for the right reason only: a name lookup that cannot work.
+          grep -q "Could not resolve host" <<<"$log"
+          echo "ok: a sandboxed build could not reach github.com"
+
+      - name: Every system evaluates without building (no import from derivation)
+        if: matrix.os == 'ubuntu-24.04'
+        run: nix flake check --all-systems --no-build --no-update-lock-file
+
+      - name: Home Manager refuses a key in settings without printing it
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          set +e
+          log="$(nix eval --impure --expr 'import ./nix/tests/secret-canary.nix ./.' 2>&1)"
+          status=$?
+          set -e
+          tail -n 15 <<<"$log"
+          if [ "$status" -eq 0 ]; then
+            echo "::error::a config with api_key evaluated"
+            exit 1
+          fi
+          grep -q "refusing to write ai.providers\[0\]" <<<"$log"
+          if grep -q "sk-halyard-canary-7f3a" <<<"$log"; then
+            echo "::error::the key's value appears in the error output"
+            exit 1
+          fi
+          echo "ok: refused, and the value was not printed"
+
+      - name: nix flake check
+        run: nix flake check -L --no-update-lock-file
+
+      - name: Package contents
+        run: |
+          nix build --no-update-lock-file -L .#default
+          find -L result -maxdepth 5 | sort
+          test -x result/bin/halyard
+
+      - name: nix develop runs the cargo suite
+        run: nix develop --no-update-lock-file -c bash -c 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo test --workspace --locked'
+
+      - name: Fail if flake.lock was generated here
+        if: env.LOCK_MISSING == '1'
+        run: |
+          echo "::error::flake.lock is not committed; copy it from the 'generated flake.lock' log group"
+          exit 1
