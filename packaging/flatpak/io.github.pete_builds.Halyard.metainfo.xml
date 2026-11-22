@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.pete_builds.Halyard</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>Halyard</name>
+  <summary>Fast terminal built to host coding agents</summary>
+  <developer id="io.github.pete_builds">
+    <name>pete-builds</name>
+  </developer>
+  <description>
+    <p>
+      Halyard is a GPU-accelerated terminal that uses Ghostty's VT engine for correct
+      emulation. Coding agents such as Claude Code, Codex CLI, OpenCode and Gemini CLI run in
+      it as ordinary terminal programs, and every AI-related feature can be switched off.
+    </p>
+    <p>
+      Halyard is early software. It has no account, no telemetry and makes no network calls.
+    </p>
+    <p>
+      In this package your shell runs on the host system, outside the Flatpak sandbox, as
+      it does in any other terminal. The sandbox does not confine the programs you run in
+      Halyard.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.pete_builds.Halyard.desktop</launchable>
+  <provides>
+    <binary>halyard</binary>
+  </provides>
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+  <url type="homepage">https://github.com/pete-builds/halyard</url>
+  <url type="bugtracker">https://github.com/pete-builds/halyard/issues</url>
+  <url type="vcs-browser">https://github.com/pete-builds/halyard</url>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <releases>
+    <release version="0.1.0~dev" date="2026-11-22" type="development">
+      <description>
+        <p>First Flatpak build. Development snapshot, not a release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

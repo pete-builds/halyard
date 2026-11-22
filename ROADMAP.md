@@ -74,6 +74,17 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
       `codesign --verify` passes on the app and on the unzipped copy. Not covered: no automated test,
       the Intel slice has not been run, and the app is NOT notarized (see `docs/INSTALL.md`)
 - [ ] Linux desktop entry and icon (in the Nix flake PR)
+- [x] Flatpak host shells: inside Flatpak each pane runs `flatpak-spawn --host --watch-bus` with
+      the pane's directory and environment (`halyard_term::flatpak`; tests
+      `login_shell_runs_on_the_host_with_cwd_and_env`, `inside_flatpak_the_login_shell_runs_on_the_host`,
+      `outside_flatpak_the_program_runs_directly` and the rest of `flatpak::tests`). Unit tested only:
+      no real host shell has been started through `flatpak-spawn` yet
+- [x] Flatpak package (`packaging/flatpak/`, `docs/flatpak.md`): offline build on Freedesktop 26.08 for
+      x86_64 and aarch64 in CI (`.github/workflows/flatpak.yml`), bundle uploaded as an artifact; CI checks
+      the source lists against `Cargo.lock` and the Ghostty pin (`check-sources.py`), the installed
+      permissions exactly (`check-permissions.sh`), and libraries inside the runtime (`smoke-test.sh`, with a
+      control). Not covered: no window opened and no host shell started from the Flatpak; not on Flathub
+- [ ] Flatpak on a real Linux desktop: open a window, start a host shell, close a pane (pending)
 - [ ] Real-hardware runs: macOS arm64 (cypher), NixOS on a real GPU (pending)
 
 ## Phase 2: modern UI
