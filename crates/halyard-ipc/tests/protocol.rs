@@ -150,6 +150,33 @@ fn handshake_timeout_closes_silent_connections() {
 }
 
 #[test]
+fn handshake_deadline_is_total_not_per_read() {
+    let limits = Limits { handshake_timeout: Duration::from_millis(1000), ..Limits::default() };
+    let h = start_with(limits);
+    let mut c = h.connect();
+    let started = std::time::Instant::now();
+    // A junk line every 200 ms would reset a per-read timeout forever.
+    let closed_after = loop {
+        if c.send_raw(b"{}\n").is_err() || c.read_message().is_err() {
+            break started.elapsed();
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "never dropped");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    assert!(closed_after >= Duration::from_millis(900), "{closed_after:?}");
+    assert!(closed_after < Duration::from_millis(2500), "{closed_after:?}");
+}
+
+#[test]
+fn hello_in_time_survives_the_handshake_deadline() {
+    let limits = Limits { handshake_timeout: Duration::from_millis(300), ..Limits::default() };
+    let h = start_with(limits);
+    let mut c = h.hello();
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(code_of(c.call("sessions.list", json!({}))), code::UNAUTHENTICATED);
+}
+
+#[test]
 fn connection_limit_closes_extra_connections() {
     let limits = Limits { max_connections: 2, ..Limits::default() };
     let h = start_with(limits);

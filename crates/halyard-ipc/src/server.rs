@@ -125,6 +125,38 @@ pub struct SendTextRequest {
     pub reason: SendTextReason,
     /// The connecting process, from the kernel.
     pub peer: PeerInfo,
+    /// Text already typed into this pane under a standing "always allow" permission since
+    /// the last request the user approved (by any client), oldest first. Approving a
+    /// newline runs this text, so the dialog must show it next to `display_text`. Empty when
+    /// nothing was typed that way.
+    pub typed_since_approval: String,
+    /// [`text::escape_for_display`] of `typed_since_approval`.
+    pub typed_since_approval_display: String,
+    /// True when `typed_since_approval` is only the last
+    /// [`text::MAX_TYPED_SINCE_APPROVAL_BYTES`] bytes of a longer run.
+    pub typed_since_approval_truncated: bool,
+}
+
+/// Text typed into one pane under standing permission since its last approved request.
+#[derive(Debug, Default, Clone)]
+struct Unapproved {
+    text: String,
+    truncated: bool,
+}
+
+impl Unapproved {
+    fn push(&mut self, more: &str) {
+        self.text.push_str(more);
+        let max = text::MAX_TYPED_SINCE_APPROVAL_BYTES;
+        if self.text.len() > max {
+            let mut cut = self.text.len() - max;
+            while !self.text.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.text.drain(..cut);
+            self.truncated = true;
+        }
+    }
 }
 
 /// Asks the user. The app shows dialogs; tests script the answers.
@@ -152,7 +184,8 @@ pub struct Limits {
     pub max_rate_violations: u32,
     /// Concurrent connections; further connections are closed at once.
     pub max_connections: usize,
-    /// Time allowed between connecting and a successful `halyard.hello`.
+    /// Total time allowed between accepting a connection and a successful `halyard.hello`,
+    /// however many bytes or lines the client sends meanwhile.
     pub handshake_timeout: Duration,
     /// A write to a client that is not reading fails after this long.
     pub write_timeout: Duration,
@@ -210,7 +243,7 @@ pub struct GrantsHandle(Arc<Mutex<GrantStore>>);
 impl GrantsHandle {
     /// A snapshot of all grants.
     pub fn list(&self) -> Vec<Grant> {
-        lock(&self.0).list().to_vec()
+        lock(&self.0).list()
     }
 
     /// Revokes a grant. Connections using it lose access on their next request.
@@ -236,6 +269,8 @@ struct Shared {
     next_conn: AtomicU64,
     /// Serializes approval dialogs so a client cannot stack them up.
     dialog: Mutex<()>,
+    /// Per session id: text typed under standing permission since the last approval.
+    unapproved: Mutex<HashMap<String, Unapproved>>,
 }
 
 /// The running session API server. Dropping it stops the server and removes the socket.
@@ -295,6 +330,7 @@ impl IpcServer {
             active: AtomicUsize::new(0),
             next_conn: AtomicU64::new(1),
             dialog: Mutex::new(()),
+            unapproved: Mutex::new(HashMap::new()),
         });
         let accept_shared = Arc::clone(&shared);
         let accept = thread::Builder::new()
@@ -504,6 +540,34 @@ struct Conn {
     identity: Identity,
     pair_attempts: u32,
     subscription: Option<u64>,
+    /// Set by a successful `halyard.hello`; the watchdog thread is unparked to notice.
+    handshake_done: Arc<AtomicBool>,
+    watchdog: thread::Thread,
+}
+
+/// Closes the connection when `deadline` passes without a successful `halyard.hello`.
+///
+/// A per-read timeout is not enough: a client sending a byte or a junk line just before
+/// each timeout would hold the connection forever. This bounds the whole handshake.
+fn spawn_handshake_watchdog(
+    stream: UnixStream,
+    done: Arc<AtomicBool>,
+    deadline: Instant,
+) -> io::Result<JoinHandle<()>> {
+    thread::Builder::new().name("halyard-ipc-handshake".into()).spawn(move || {
+        loop {
+            if done.load(Ordering::SeqCst) {
+                return;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                // Best effort: the client may already have gone.
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return;
+            }
+            thread::park_timeout(deadline - now);
+        }
+    })
 }
 
 impl Drop for Conn {
@@ -526,7 +590,18 @@ fn serve_connection(shared: &Arc<Shared>, stream: UnixStream) {
     {
         return;
     }
-    let (Ok(write_half), Ok(control)) = (stream.try_clone(), stream.try_clone()) else { return };
+    let (Ok(write_half), Ok(control), Ok(for_watchdog)) =
+        (stream.try_clone(), stream.try_clone(), stream.try_clone())
+    else {
+        return;
+    };
+    let handshake_done = Arc::new(AtomicBool::new(false));
+    let deadline = Instant::now() + limits.handshake_timeout;
+    let Ok(watchdog) =
+        spawn_handshake_watchdog(for_watchdog, Arc::clone(&handshake_done), deadline)
+    else {
+        return;
+    };
     let mut reader = BufReader::new(stream);
     let mut conn = Conn {
         shared: Arc::clone(shared),
@@ -537,6 +612,8 @@ fn serve_connection(shared: &Arc<Shared>, stream: UnixStream) {
         identity: Identity::None,
         pair_attempts: 0,
         subscription: None,
+        handshake_done,
+        watchdog: watchdog.thread().clone(),
     };
     let mut bucket = Bucket::new(limits);
     let mut violations = 0u32;
@@ -735,6 +812,8 @@ impl Conn {
                 .with_data(json!({ "supported": [PROTOCOL_VERSION] })));
         }
         self.initialized = true;
+        self.handshake_done.store(true, Ordering::SeqCst);
+        self.watchdog.unpark();
         // Handshake done: subscribers may legitimately sit idle for hours.
         if self.stream.set_read_timeout(None).is_err() {
             return Err(RpcError::new(code::INTERNAL_ERROR, "could not clear the read timeout"));
@@ -914,7 +993,6 @@ impl Conn {
         };
         let grant = lock(&self.shared.grants)
             .get(id)
-            .cloned()
             .ok_or_else(|| RpcError::new(code::UNAUTHENTICATED, "this grant was revoked"))?;
         if !grant.has(scope) {
             return Err(RpcError::new(code::FORBIDDEN, format!("missing scope {scope}"))
@@ -944,6 +1022,10 @@ impl Conn {
             None
         };
         if let Some(reason) = reason {
+            let _one_dialog = lock(&self.shared.dialog);
+            // Read inside the dialog lock so it matches what this approval will run.
+            let prior =
+                lock(&self.shared.unapproved).get(&p.session_id).cloned().unwrap_or_default();
             let request = SendTextRequest {
                 grant_id: grant.id.clone(),
                 client_name: grant.client_name.clone(),
@@ -952,18 +1034,24 @@ impl Conn {
                 text: p.text.clone(),
                 reason,
                 peer: self.peer.clone(),
+                typed_since_approval_display: text::escape_for_display(&prior.text),
+                typed_since_approval: prior.text,
+                typed_since_approval_truncated: prior.truncated,
             };
-            let approved = {
-                let _one_dialog = lock(&self.shared.dialog);
-                self.shared.approver.approve_send_text(&request)
-            };
-            if !approved {
+            if !self.shared.approver.approve_send_text(&request) {
                 return Err(RpcError::new(code::DENIED, "the user declined the input"));
             }
+            self.shared.directory.send_text(&p.session_id, &p.text).map_err(dir_err)?;
+            // The user has now seen and approved everything typed so far.
+            lock(&self.shared.unapproved).remove(&p.session_id);
+            return Ok(json!({ "sent": true, "approval": "user" }));
         }
+        // Standing sends also take the dialog lock, so nothing can be typed while a dialog
+        // is open and then be cleared, unseen, by that dialog's approval.
+        let _one_dialog = lock(&self.shared.dialog);
         self.shared.directory.send_text(&p.session_id, &p.text).map_err(dir_err)?;
-        let approval = if reason.is_some() { "user" } else { "standing" };
-        Ok(json!({ "sent": true, "approval": approval }))
+        lock(&self.shared.unapproved).entry(p.session_id.clone()).or_default().push(&p.text);
+        Ok(json!({ "sent": true, "approval": "standing" }))
     }
 
     fn subscribe(&mut self) -> Result<Value, RpcError> {
