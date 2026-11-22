@@ -46,7 +46,26 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 - [ ] Agent detection (Claude Code, Codex, OpenCode, Gemini CLI) and attention states
 - [ ] Session protocol over escape sequences (`HALYARD_SESSION_ID`)
 - [ ] Local session API: authenticated socket, scoped capabilities, user approval for
-      anything that writes to a pane
+      anything that writes to a pane ([docs/session-api.md](docs/session-api.md))
+  - [x] Library `halyard-ipc`: 0700 socket dir and 0600 socket, peer uid check, versioned
+        strict JSON-RPC, size and rate limits (tests in `crates/halyard-ipc/tests/protocol.rs`
+        and `setup.rs`, for example `a_0755_socket_directory_is_refused`,
+        `oversized_message_is_rejected_and_the_connection_closed`,
+        `rate_limit_rejects_bursts_then_disconnects_abusers`)
+  - [x] Session scope by process ancestry plus token, with real processes
+        (`a_process_in_another_pane_cannot_spoof_this_one`, `child_of_the_pane_process_is_accepted`)
+  - [x] Controller pairing, hashed grants file, scopes, revocation, events
+        (`pairing_approved_grants_only_the_approved_scopes`, `grants_file_holds_a_hash_not_the_token`,
+        `revocation_cuts_off_live_connections_and_the_token`, `events_stream_to_subscribers_until_revoked`)
+  - [x] `send_text` needs per-request approval for newlines and control characters even
+        with "always allow" (`always_allow_still_asks_for_newlines_and_controls`)
+  - [x] `halyard-msg` hook client with OSC 7717 fallback
+        (`unreachable_socket_falls_back_to_the_escape_sequence_on_the_tty`,
+        `outside_halyard_it_exits_0_silently_and_fast`)
+  - [ ] App wiring: start the server, implement `SessionDirectory` and the approval
+        dialogs, export the pane env vars, publish events, grants settings page
+  - [ ] Peer uid rejection tested with a second real user (code path is a uid compare;
+        not exercised by tests)
 - [ ] Agent dashboard with jump-to-pane and notifications
 
 ## Phase 5: optional assistant and MCP
