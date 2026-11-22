@@ -1,0 +1,27 @@
+[package]
+name = "halyard-agents"
+description = "Agent awareness for Halyard: agent detection, attention states from observable signals, and a dashboard model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Test helper only (see the file). Not part of the library.
+[[bin]]
+name = "halyard-test-sleeper"
+path = "tests/support/sleeper.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+halyard-shell = { path = "../halyard-shell" }
+libc = "0.2"
+
+[dev-dependencies]
+portable-pty = "0.9"
+
+[lints]
+workspace = true

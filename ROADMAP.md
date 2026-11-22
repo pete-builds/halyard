@@ -65,7 +65,12 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 - [ ] `flake.nix`: `nix develop`, `nix build`, `nix run`, offline build (Ghostty source and
       Zig packages pinned as inputs)
 - [ ] NixOS VM test: launches under Wayland and X11, screenshots
-- [ ] Desktop entry, icon, macOS app bundle
+- [x] macOS app bundle: `packaging/macos/build-app.sh` builds a universal `Halyard.app` (ad-hoc
+      signed, icon from `packaging/icon/`) and a zip. Verified by hand on macOS arm64: built from
+      the app-window branch, launched with `open`, process ran, `lipo -info` shows x86_64 and arm64,
+      `codesign --verify` passes on the app and on the unzipped copy. Not covered: no automated test,
+      the Intel slice has not been run, and the app is NOT notarized (see `docs/INSTALL.md`)
+- [ ] Linux desktop entry and icon (in the Nix flake PR)
 - [ ] Real-hardware runs: macOS arm64 (cypher), NixOS on a real GPU (pending)
 
 ## Phase 2: modern UI
@@ -101,17 +106,44 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 
 ## Phase 3: modern shell experience
 
-- [ ] Shell integration (OSC 133, OSC 7) for zsh, bash, fish
-- [ ] Command blocks: navigate, copy output, rerun
+- [x] Shell integration scripts (OSC 133 A/B/C/D, OSC 633;E, OSC 7) for zsh, bash and
+  fish, as a library (`halyard-shell`): run in real shells under a PTY by
+  `crates/halyard-shell/tests/shell_scripts.rs` (`zsh_integration`, `bash_integration`,
+  `fish_integration`, `bash_command_lines_with_long_history`,
+  `bash_keeps_dollar_underscore`, `bash_ignoreboth_repeats_are_marked`,
+  `scripts_are_inert_outside_halyard`, `scripts_are_inert_in_non_interactive_shells`).
+  Tested on macOS (zsh 5.9, bash 3.2, fish 4.9.3, whose own OSC 133 marks the script
+  leaves alone) and in CI on macOS and Ubuntu, where a missing shell fails the run
+  instead of skipping. The fish 3 code path runs only where CI's fish is 3.x.
+- [x] Escape sequence scanner (OSC 133, 633, 7, 9, 9;4, 777, 0/1/2, BEL, alternate
+  screen, Halyard protocol) over chunks split anywhere:
+  `scanner::tests::corpus_every_pair_of_split_points`, `overflow_drops_and_resyncs`
+- [x] Command block model as a library (missing marks, nested shells, alternate
+  screen, navigation, last failed, bounded history, nesting capped at 32 against
+  hostile output): `halyard-shell` `blocks::tests`, `hostile_nesting_is_bounded_and_linear`
+- [ ] Command blocks in the UI: wiring the scanner tap and engine rows into panes,
+  navigate, copy output, rerun (pending; needs `halyard-term` and `halyard-app`)
 - [ ] SQLite history and search
 
 ## Phase 4: agent awareness and the open protocol
 
-- [ ] Agent detection (Claude Code, Codex, OpenCode, Gemini CLI) and attention states
-- [ ] Session protocol over escape sequences (`HALYARD_SESSION_ID`)
+- [x] Agent detection (Claude Code, Codex, OpenCode, Gemini CLI, Aider, Goose, Amp) from
+  the foreground process, as a library (`halyard-agents`): `detect::tests::table`; real
+  PTY foreground lookup in `crates/halyard-agents/tests/foreground.rs` (macOS tested;
+  Linux path compiled and run by CI)
+- [x] Attention states from observable signals, as a library:
+  `attention::tests::state_machine_table`, `unread_rules`; rules in `docs/agents.md`
+- [x] Session protocol over escape sequences (OSC 7717 and the OSC 777;halyard carrier):
+  parsing and `docs/protocol.md`; Claude Code hook script tested in
+  `crates/halyard-agents/tests/claude_hook.rs` (not yet run inside a live Claude Code
+  session)
+- [ ] Setting `HALYARD_SESSION_ID` and `TERM_PROGRAM=Halyard` in each pane's environment
+  (pending: belongs to the PTY session code)
+- [x] Dashboard model (git branch without running git, attention sort order):
+  `dashboard::tests::sort_order`, `git::tests`
 - [ ] Local session API: authenticated socket, scoped capabilities, user approval for
       anything that writes to a pane
-- [ ] Agent dashboard with jump-to-pane and notifications
+- [ ] Agent dashboard with jump-to-pane and notifications: UI wiring pending
 
 ## Phase 5: optional assistant and MCP
 
@@ -121,5 +153,9 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 ## Phase 6: production readiness
 
 - [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane
-- [ ] Threat model, security review
-- [ ] Release automation (macOS bundle, Nix package)
+- [x] Threat model written: `docs/THREAT_MODEL.md` (cites code in PRs that were still open when it was written)
+- [ ] Security review (no outside review yet)
+- [ ] Release automation: `.github/workflows/release.yml` (macOS zip, Linux tarballs, SHA256SUMS, provenance,
+      draft release; `dry_run` dispatch builds artifacts only) is written and actionlint-clean, but has
+      NOT run on a runner yet, because it needs the app crate on main. The macOS bundle script was run
+      locally. The Nix package is the flake PR. Notarization is not done
