@@ -1,0 +1,32 @@
+# Halyard Day: the default light theme. Warm paper ground, ink text.
+name = "Halyard Day"
+appearance = "light"
+
+[terminal]
+foreground = "#1f2933"
+background = "#f6f3ec"
+cursor = "#1c5fb0"
+cursor_text = "#f6f3ec"
+selection_bg = "#c9d9ee"
+selection_fg = "#1f2933"
+ansi = [
+  "#2b3540", "#b3261e", "#1f7a3d", "#8a5a00", "#1c5fb0", "#7b3fa8", "#0f7a80", "#d9d4c7",
+  "#5c6773", "#c9362d", "#2b8a4b", "#9a6700", "#2a6fc4", "#8d4fbd", "#178a90", "#ffffff",
+]
+
+[ui]
+surface = "#f6f3ec"
+surface_raised = "#fffdf8"
+surface_sunken = "#ebe7dc"
+border = "#cfc9ba"
+border_focused = "#1c5fb0"
+text = "#1f2933"
+text_muted = "#5c6773"
+accent = "#1c5fb0"
+accent_text = "#ffffff"
+tab_active_bg = "#fffdf8"
+tab_inactive_bg = "#ebe7dc"
+warning = "#8a5a00"
+danger = "#b3261e"
+success = "#1f7a3d"
+attention = "#7b3fa8"
