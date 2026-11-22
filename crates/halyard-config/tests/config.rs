@@ -46,6 +46,7 @@ fn default_config_documents_every_key() {
         "cursor_blink",
         "copy_on_select",
         "confirm_close_running",
+        "confirm_multiline_paste",
         "light",
         "dark",
         "name",
@@ -102,6 +103,7 @@ cursor_style = "bar"
 cursor_blink = false
 copy_on_select = true
 confirm_close_running = false
+confirm_multiline_paste = false
 shell = { program = "/bin/fish", args = ["-l"] }
 
 [theme]
@@ -133,6 +135,8 @@ api_key_env = "ANTHROPIC_API_KEY"
     assert_eq!(c.window.decorations, Decorations::TransparentTitlebar);
     assert_eq!(c.window.initial_cols, 120);
     assert_eq!(c.terminal.cursor_style, CursorStyle::Bar);
+    assert!(!c.terminal.confirm_multiline_paste);
+    assert!(Config::default().terminal.confirm_multiline_paste);
     assert_eq!(c.terminal.working_directory, WorkingDirectory::Path(PathBuf::from("~/code")));
     let shell = c.terminal.shell.unwrap();
     assert_eq!(

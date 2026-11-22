@@ -235,6 +235,9 @@ pub struct TerminalConfig {
     pub copy_on_select: bool,
     /// Ask before closing a pane that is running a command.
     pub confirm_close_running: bool,
+    /// Ask before pasting text with a line break while the program has not
+    /// turned on bracketed paste (so the shell would run each line).
+    pub confirm_multiline_paste: bool,
 }
 
 impl Default for TerminalConfig {
@@ -247,6 +250,7 @@ impl Default for TerminalConfig {
             cursor_blink: true,
             copy_on_select: false,
             confirm_close_running: true,
+            confirm_multiline_paste: true,
         }
     }
 }
@@ -439,6 +443,7 @@ const TERMINAL: Schema = &[
     ("cursor_blink", Kind::Bool),
     ("copy_on_select", Kind::Bool),
     ("confirm_close_running", Kind::Bool),
+    ("confirm_multiline_paste", Kind::Bool),
 ];
 const SHELL: Schema = &[("program", Kind::Str), ("args", Kind::StrArray)];
 const THEME: Schema = &[("name", Kind::Str), ("light", Kind::Str), ("dark", Kind::Str)];
