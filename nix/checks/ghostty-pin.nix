@@ -5,12 +5,13 @@
 # the check cannot pass by being broken.
 {
   pkgs,
-  src,
   cargoVendorDir,
   ghosttyRev,
 }:
 let
-  lock = builtins.fromTOML (builtins.readFile (src + "/Cargo.lock"));
+  # Read from the working tree, not from `src` in the store, so evaluation
+  # never needs a store path to exist (`nix flake check --no-build`).
+  lock = builtins.fromTOML (builtins.readFile ../../Cargo.lock);
   sysPackages = builtins.filter (p: p.name == "libghostty-vt-sys") lock.package;
   sysVersion =
     if builtins.length sysPackages == 1 then

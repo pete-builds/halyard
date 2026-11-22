@@ -220,7 +220,7 @@ let
     };
 
     ghostty-pin = import ./checks/ghostty-pin.nix {
-      inherit pkgs src cargoVendorDir;
+      inherit pkgs cargoVendorDir;
       ghosttyRev = ghosttySrc.rev;
     };
   };
