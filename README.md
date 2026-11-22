@@ -41,6 +41,9 @@ nix develop
 cargo run --release -p halyard-app
 ```
 
+Install steps (macOS app, NixOS, Linux) are in [docs/INSTALL.md](docs/INSTALL.md); what Halyard
+defends and what it does not is in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
 See [AGENTS.md](AGENTS.md) for the full contributor guide and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
