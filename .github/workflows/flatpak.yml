@@ -1,0 +1,73 @@
+name: flatpak
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flatpak-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Cheap, no build: the generated source lists still match Cargo.lock and the
+  # Ghostty commit libghostty-vt-sys pins.
+  sources:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Generated sources match Cargo.lock and the Ghostty pin
+        run: python3 -I packaging/flatpak/check-sources.py
+      - name: Shell scripts
+        run: shellcheck packaging/flatpak/*.sh
+
+  bundle:
+    name: bundle (${{ matrix.arch }})
+    needs: sources
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container:
+      # ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08 (multi-arch index)
+      image: ghcr.io/flathub-infra/flatpak-github-actions@sha256:6ed6921bb5a9e1a916989971844f159b854b7b225880c381fa34f7a158863039
+      options: --privileged
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@79327416609af08178ad73b352877e51450790b3 # v6.8
+        with:
+          manifest-path: packaging/flatpak/io.github.pete_builds.Halyard.yml
+          bundle: halyard.flatpak
+          arch: ${{ matrix.arch }}
+          artifact-name: halyard-${{ matrix.arch }}.flatpak
+          cache-key: flatpak-builder-${{ hashFiles('packaging/flatpak/*.yml', 'packaging/flatpak/*.json') }}
+      - name: Install the bundle
+        run: |
+          flatpak install --user --noninteractive --assumeyes halyard.flatpak
+          flatpak info --user io.github.pete_builds.Halyard
+      - name: Permissions are the documented ones
+        run: |
+          perms="$(flatpak info --user --show-permissions io.github.pete_builds.Halyard)"
+          echo "$perms"
+          for want in 'devices=dri;' 'sockets=wayland;fallback-x11;' 'org.freedesktop.Flatpak=talk' 'filesystems=host;'; do
+            if ! printf '%s\n' "$perms" | grep -qF -- "$want"; then
+              echo "missing permission: $want" >&2
+              exit 1
+            fi
+          done
+          if printf '%s\n' "$perms" | grep -q 'network'; then
+            echo "the app must not have network access" >&2
+            exit 1
+          fi
+      - name: Smoke test inside the runtime
+        run: |
+          dbus-run-session -- flatpak run --user --command=sh io.github.pete_builds.Halyard \
+            -c "$(cat packaging/flatpak/smoke-test.sh)" sh /app/bin/halyard

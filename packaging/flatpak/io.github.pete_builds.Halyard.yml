@@ -1,0 +1,98 @@
+# Flatpak manifest for Halyard. Build and install steps, the host-shell design
+# and how to update the generated source lists: docs/flatpak.md.
+#
+# App ID: Flatpak IDs are reverse-DNS names whose segments may not contain a
+# hyphen, so the GitHub owner `pete-builds` becomes `pete_builds`, the form
+# Flathub uses for io.github.* IDs.
+id: io.github.pete_builds.Halyard
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: halyard
+
+finish-args:
+  # GPU rendering (Vulkan through Mesa or the vendor's driver).
+  - --device=dri
+  # Wayland first, X11 only when there is no Wayland session.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # Shells run on the host (see docs/flatpak.md), so they already see the
+  # whole host. The app itself gets the same view of the file system so the
+  # paths it checks and shows (working directories, restored panes) are the
+  # host's paths, not sandbox ones.
+  - --filesystem=host
+  # Lets Halyard start the user's shell outside the sandbox through
+  # `flatpak-spawn --host`. This is a sandbox escape by design: Flatpak is
+  # used here to distribute Halyard, not to confine the shell.
+  - --talk-name=org.freedesktop.Flatpak
+  # No --share=network: Halyard makes no network calls.
+
+modules:
+  # Zig 0.15.2, needed at build time only: libghostty-vt-sys builds Ghostty's
+  # VT library with it. Official tarballs, pinned by the sha256 in
+  # https://ziglang.org/download/index.json. Removed from the final app.
+  - name: zig
+    buildsystem: simple
+    cleanup:
+      - '*'
+    build-commands:
+      - mkdir -p ${FLATPAK_DEST}/zig
+      - cp -a ./. ${FLATPAK_DEST}/zig/
+      - ${FLATPAK_DEST}/zig/zig version
+    sources:
+      - type: archive
+        only-arches:
+          - x86_64
+        url: https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+        sha256: 02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239
+      - type: archive
+        only-arches:
+          - aarch64
+        url: https://ziglang.org/download/0.15.2/zig-aarch64-linux-0.15.2.tar.xz
+        sha256: 958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f
+
+  - name: halyard
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin:/app/zig
+      env:
+        # cargo-sources.json fills cargo/vendor and writes cargo/config, which
+        # points crates.io at that directory.
+        CARGO_HOME: /run/build/halyard/cargo
+        CARGO_NET_OFFLINE: 'true'
+        # libghostty-vt-sys: build the pinned Ghostty checkout with the
+        # prefetched Zig packages instead of cloning and downloading. Both come
+        # from ghostty-sources.json.
+        GHOSTTY_SOURCE_DIR: /run/build/halyard/ghostty
+        GHOSTTY_ZIG_SYSTEM_DIR: /run/build/halyard/ghostty-zig-packages
+        ZIG_GLOBAL_CACHE_DIR: /run/build/halyard/zig-global-cache
+        ZIG_LOCAL_CACHE_DIR: /run/build/halyard/zig-local-cache
+        XDG_CACHE_HOME: /run/build/halyard/xdg-cache
+    build-commands:
+      - cargo --offline build --release --locked -p halyard-app
+      - install -Dm755 target/release/halyard ${FLATPAK_DEST}/bin/halyard
+      - install -Dm644 packaging/flatpak/${FLATPAK_ID}.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - desktop-file-validate ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - install -Dm644 packaging/flatpak/${FLATPAK_ID}.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+      - appstreamcli validate --no-net --explain ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+      - install -Dm644 packaging/icon/halyard.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      - install -Dm644 -t ${FLATPAK_DEST}/share/licenses/${FLATPAK_ID} LICENSE-MIT LICENSE-APACHE
+      # Every library the binary links resolves (in the SDK; CI repeats this
+      # in the runtime after installing the bundle).
+      - sh packaging/flatpak/smoke-test.sh ${FLATPAK_DEST}/bin/halyard
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .git
+          - target
+          - result
+          - .flatpak-builder
+          - flatpak_app
+          - repo
+          - halyard.flatpak
+      - cargo-sources.json
+      - ghostty-sources.json

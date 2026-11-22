@@ -6,3 +6,9 @@
 .direnv/
 /vendor/*/target
 /vendor/*/Cargo.lock
+__pycache__/
+# flatpak-builder output (docs/flatpak.md)
+/.flatpak-builder
+/flatpak_app
+/repo
+/*.flatpak
