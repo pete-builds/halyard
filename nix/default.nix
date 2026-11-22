@@ -229,13 +229,24 @@ let
       commonArgs
       // {
         inherit cargoArtifacts;
-        cargoTestExtraArgs = "--workspace --no-fail-fast";
+        # Skipped in the Linux build sandbox only: halyard-shell's
+        # zsh_integration runs `cd /tmp`, and the sandbox has no /tmp, so zsh
+        # reports exit status 1 where the test expects 0. It runs in ci.yml
+        # and in the `nix develop` step of the nix workflow.
+        cargoTestExtraArgs =
+          "--workspace --no-fail-fast"
+          + lib.optionalString stdenv.hostPlatform.isLinux " -- --skip zsh_integration";
         nativeBuildInputs = commonArgs.nativeBuildInputs ++ ptyTestPrograms;
         # The sandbox's HOME (/homeless-shelter) does not exist. Tests that
         # start shells and programs which read $HOME get a real, empty one.
-        preConfigure = commonArgs.preConfigure + ''
-          export HOME="$(mktemp -d)"
-        '';
+        preConfigure =
+          commonArgs.preConfigure
+          + ''
+            export HOME="$(mktemp -d)"
+          ''
+          + lib.optionalString stdenv.hostPlatform.isLinux ''
+            echo "SKIPPED in the Nix sandbox: halyard-shell zsh_integration (the test runs 'cd /tmp' and the Linux build sandbox has no /tmp)"
+          '';
       }
     );
 
