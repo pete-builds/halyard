@@ -27,10 +27,19 @@ nix build -L .#vmTests.nixos-vm
 The screenshots land in `./result`. A run takes about a minute once
 Halyard is built.
 
+A failing `nix build` keeps no screenshots. To see what the screen showed
+when a step failed, run the driver directly; it writes into the directory
+you name, pass or fail:
+
+```sh
+nix build .#vmTests.nixos-vm.driver
+./result/bin/nixos-test-driver --output_directory shots
+```
+
 It is deliberately not part of `checks`, so `nix flake check` stays fast
-and runs on machines without KVM. CI runs it in
+and runs on machines without KVM. CI runs the driver this way in
 `.github/workflows/nixos-vm.yml` and uploads the screenshots as the
-`nixos-vm-screenshots` artifact.
+`nixos-vm-screenshots` artifact, on failure too.
 
 Not covered yet: mouse selection and copying out of Halyard, and wheel
 scrollback. Both need a pointer device in the VM.

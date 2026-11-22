@@ -27,9 +27,10 @@ let
   };
 
   # One shared script for both sessions. `m` is the machine, `tag` names the
-  # files and screenshots, `copy_cmd` puts text on that session's clipboard.
+  # files and screenshots, `copy_cmd` puts text on that session's clipboard and
+  # `read_cmd` succeeds once the clipboard serves exactly that text.
   steps = ''
-    def drive(m, tag, copy_cmd):
+    def drive(m, tag, copy_cmd, read_cmd):
         home = "/home/alice"
 
         def run(line):
@@ -38,13 +39,17 @@ let
         with subtest(f"{tag}: typing reaches the shell and is drawn"):
             run(f"echo halyard-ok-{tag} > {home}/typed")
             m.wait_until_succeeds(f"grep -qx halyard-ok-{tag} {home}/typed", timeout=timedelta(seconds=60))
-            run("echo HALYARD-RENDER-CHECK")
-            m.wait_for_text("HALYARD-RENDER-CHECK", timeout=timedelta(seconds=120))
+            # The command line never contains the marker, so only drawn output can match.
+            # Tesseract sometimes reads a hyphen as " - ", so allow spaces around them.
+            run("printf 'HALYARD-%s-CHECK\\n' RENDER")
+            m.wait_for_text(r"HALYARD\s*-\s*RENDER\s*-\s*CHECK", timeout=timedelta(seconds=120))
             m.screenshot(f"{tag}-1-typed")
 
         with subtest(f"{tag}: vim edits and saves a file"):
             run(f"vim {home}/fromvim.txt")
-            m.sleep(2)
+            # vim creates its swap file once the buffer is open. OCR on the file name
+            # would match the command line that is already on screen.
+            m.wait_until_succeeds(f"test -e {home}/.fromvim.txt.swp", timeout=timedelta(seconds=60))
             m.screenshot(f"{tag}-2-vim")
             m.send_chars("ihello-from-vim")
             m.send_key("esc")
@@ -52,15 +57,21 @@ let
             m.wait_until_succeeds(f"grep -qx hello-from-vim {home}/fromvim.txt", timeout=timedelta(seconds=60))
 
         with subtest(f"{tag}: Ctrl+C interrupts the foreground job"):
-            run(f"sleep 60; touch {home}/not-interrupted")
-            m.sleep(2)
+            run(f"touch {home}/started; sleep 60; touch {home}/not-interrupted")
+            # Send Ctrl+C only once sleep is the foreground job, so an early Ctrl+C
+            # cannot pass by cancelling a line that never ran.
+            m.wait_until_succeeds(f"test -e {home}/started", timeout=timedelta(seconds=60))
+            m.wait_until_succeeds("pgrep -fx 'sleep 60'", timeout=timedelta(seconds=60))
             m.send_key("ctrl-c")
             run(f"echo $? > {home}/rc")
             m.wait_until_succeeds(f"grep -qx 130 {home}/rc", timeout=timedelta(seconds=60))
             m.fail(f"test -e {home}/not-interrupted")
 
         with subtest(f"{tag}: paste from the session clipboard with Ctrl+Shift+V"):
-            m.succeed(copy_cmd(f"echo pasted-ok-{tag} > {home}/pasted"))
+            text = f"echo pasted-ok-{tag} > {home}/pasted"
+            m.succeed(copy_cmd(text))
+            # Paste only once the clipboard owner is serving the text.
+            m.wait_until_succeeds(read_cmd(text), timeout=timedelta(seconds=30))
             m.send_key("ctrl-shift-v")
             m.send_key("ret")
             m.wait_until_succeeds(f"grep -qx pasted-ok-{tag} {home}/pasted", timeout=timedelta(seconds=60))
@@ -118,6 +129,8 @@ pkgs.testers.runNixOSTest {
     def as_alice(env, cmd):
         return f"su - alice -c {shlex.quote(env + ' ' + cmd)}"
 
+    WL = "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0"
+
     try:
         wayland.wait_for_unit("graphical.target")
         wayland.wait_until_succeeds("pgrep -x halyard", timeout=timedelta(seconds=120))
@@ -125,10 +138,8 @@ pkgs.testers.runNixOSTest {
         drive(
             wayland,
             "wayland",
-            lambda text: as_alice(
-                "XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0",
-                f"wl-copy {shlex.quote(text)}",
-            ),
+            lambda text: as_alice(WL, f"wl-copy {shlex.quote(text)}"),
+            lambda text: as_alice(WL, f"wl-paste --no-newline | grep -qxF {shlex.quote(text)}"),
         )
     finally:
         wayland.screenshot("wayland-final")
@@ -147,9 +158,15 @@ pkgs.testers.runNixOSTest {
         drive(
             x11,
             "x11",
+            # No -loops: the readiness check reads the selection too, and xclip
+            # keeps serving until the VM stops.
             lambda text: as_alice(
                 "DISPLAY=:0",
-                f"printf %s {shlex.quote(text)} | xclip -selection clipboard -loops 1 >/dev/null 2>&1 &",
+                f"printf %s {shlex.quote(text)} | xclip -selection clipboard >/dev/null 2>&1 &",
+            ),
+            lambda text: as_alice(
+                "DISPLAY=:0",
+                f"xclip -o -selection clipboard | grep -qxF {shlex.quote(text)}",
             ),
         )
     finally:

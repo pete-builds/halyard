@@ -38,15 +38,20 @@ jobs:
           extra_nix_config: |
             system-features = nixos-test benchmark big-parallel kvm
 
-      - name: Run the VM test
-        run: nix build -L --no-update-lock-file --out-link result-vm .#vmTests.nixos-vm
+      # Build the test's driver, then run it outside the Nix sandbox so its
+      # screenshots (including the `finally` ones) survive a failing run. A
+      # failed `nix build` of the test keeps no output to upload.
+      - name: Build the VM test driver
+        run: nix build -L --no-update-lock-file --out-link result-driver .#vmTests.nixos-vm.driver
 
-      - name: Collect screenshots
-        if: always()
+      - name: Run the VM test
         run: |
           mkdir -p screenshots
-          if [ -d result-vm ]; then cp result-vm/*.png screenshots/; fi
-          ls -l screenshots
+          ./result-driver/bin/nixos-test-driver --output_directory screenshots
+
+      - name: List screenshots
+        if: always()
+        run: ls -l screenshots || true
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
