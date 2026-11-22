@@ -107,7 +107,8 @@ Fedora, Debian, Ubuntu and Arch are official targets. `.github/workflows/distros
 builds `halyard-app` and runs the workspace tests inside each distro's own container image,
 using the package lists below. **CI verifies the build and the headless tests only.** It
 does not start a desktop session or open a window. NixOS real-hardware verification is
-separate and is tracked in `ROADMAP.md`.
+separate and is tracked in `ROADMAP.md`. On Debian stable, the fish 4.0.2 shell
+integration tests currently fail; the build and every other test pass.
 
 Install these packages, then install Rust through rustup (`rust-toolchain.toml` picks the
 toolchain) and Zig 0.15.2 exactly from ziglang.org, which no distro package manager

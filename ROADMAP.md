@@ -13,6 +13,10 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 
 ## Phase 1: a fully functional terminal on macOS and NixOS
 
+- [ ] Fedora, Debian, Arch, Ubuntu CI targets (`.github/workflows/distros.yml`): Fedora, Arch and
+      Ubuntu containers are green; Debian stable is NOT passing yet, because `fish_integration` and
+      `fish_integration_without_native_marks` time out on its fish 4.0.2, so that job is
+      `continue-on-error` until diagnosed
 - [x] PTY sessions running the user's login shell (`halyard-term::Session`; tests
       `default_program_is_a_login_shell`, `shell_echo_reaches_the_screen`,
       `session_environment_is_set`, `shell_exit_reports_status`,
