@@ -6,6 +6,10 @@
 //!   `sysctl(KERN_PROCARGS2)`.
 //! * Linux: argv from `/proc/<pid>/cmdline`, the executable from `/proc/<pid>/exe`.
 //!
+//! The executable is read before and after argv; if the process exec'd in between
+//! (the shell's forked child becoming the command), the read is retried, so argv and
+//! executable always describe the same program image.
+//!
 //! Reading another user's process can fail; fields that cannot be read are left
 //! empty rather than failing the whole call, and callers treat a process they
 //! cannot read as "not an agent".
@@ -49,6 +53,41 @@ pub fn process_info(pid: i32) -> io::Result<ProcessInfo> {
     imp::process_info(pid)
 }
 
+/// How many times to retry a read that raced with an exec.
+const READ_ATTEMPTS: usize = 4;
+
+/// Reads the executable, then argv, then the executable again, and returns a pair
+/// only when both executable reads agree. An exec between the reads would otherwise
+/// pair the old argv with the new executable (seen on Linux under parallel tests).
+fn consistent_read<E: PartialEq>(
+    mut read_exe: impl FnMut() -> Option<E>,
+    mut read_argv: impl FnMut() -> io::Result<Vec<String>>,
+) -> io::Result<(Option<E>, Vec<String>)> {
+    for _ in 0..READ_ATTEMPTS {
+        let before = read_exe();
+        let argv = read_argv()?;
+        let after = read_exe();
+        if before == after {
+            return Ok((after, argv));
+        }
+    }
+    Err(io::Error::other("the process image kept changing while it was read"))
+}
+
+/// This machine's host name, for deciding whether an OSC 7 cwd is local.
+#[cfg(unix)]
+pub fn local_hostname() -> Option<String> {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for writes of the length passed.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+    if rc != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let name = String::from_utf8_lossy(&buf[..end]).into_owned();
+    (!name.is_empty()).then_some(name)
+}
+
 fn decode_args<'a>(args: impl Iterator<Item = &'a [u8]>) -> Vec<String> {
     args.take(MAX_ARGS)
         .map(|a| String::from_utf8_lossy(&a[..a.len().min(MAX_ARG_LEN)]).into_owned())
@@ -61,10 +100,11 @@ mod imp {
     use std::fs;
 
     pub(super) fn process_info(pid: i32) -> io::Result<ProcessInfo> {
-        let cmdline = fs::read(format!("/proc/{pid}/cmdline"))?;
-        let argv = parse_cmdline(&cmdline);
         // `exe` is unreadable for other users' processes; argv still identifies them.
-        let exe = fs::read_link(format!("/proc/{pid}/exe")).ok();
+        let (exe, argv) = consistent_read(
+            || fs::read_link(format!("/proc/{pid}/exe")).ok(),
+            || Ok(parse_cmdline(&fs::read(format!("/proc/{pid}/cmdline"))?)),
+        )?;
         Ok(ProcessInfo { pid, exe, argv })
     }
 
@@ -85,13 +125,15 @@ mod imp {
     use std::path::PathBuf;
 
     pub(super) fn process_info(pid: i32) -> io::Result<ProcessInfo> {
-        let exe = pidpath(pid);
-        let argv = match procargs(pid) {
-            Ok(argv) => argv,
-            // A process we may not inspect still has a readable path, usually.
-            Err(_) if exe.is_some() => Vec::new(),
-            Err(e) => return Err(e),
-        };
+        let (exe, argv) = consistent_read(
+            || pidpath(pid),
+            || match procargs(pid) {
+                Ok(argv) => Ok(argv),
+                // A process we may not inspect still has a readable path, usually.
+                Err(_) if pidpath(pid).is_some() => Ok(Vec::new()),
+                Err(e) => Err(e),
+            },
+        )?;
         Ok(ProcessInfo { pid, exe, argv })
     }
 
@@ -172,6 +214,53 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fake process that execs (switches from "old" to "new") after `flip_after`
+    /// reads of any kind.
+    fn racing_read(flip_after: usize) -> io::Result<(Option<String>, Vec<String>)> {
+        let reads = std::cell::Cell::new(0usize);
+        let image = || {
+            let n = reads.get();
+            reads.set(n + 1);
+            if n < flip_after { "old" } else { "new" }
+        };
+        consistent_read(|| Some(image().to_string()), || Ok(vec![format!("{}-argv", image())]))
+    }
+
+    #[test]
+    fn exec_between_reads_never_mixes_images() {
+        for flip in 0..8 {
+            let (exe, argv) = racing_read(flip).unwrap();
+            let exe = exe.unwrap();
+            assert_eq!(argv, vec![format!("{exe}-argv")], "exec after {flip} reads");
+        }
+    }
+
+    #[test]
+    fn a_process_that_keeps_changing_is_an_error() {
+        let n = std::cell::Cell::new(0);
+        let r = consistent_read(
+            || {
+                n.set(n.get() + 1);
+                Some(n.get())
+            },
+            || Ok(vec![]),
+        );
+        assert!(r.is_err());
+        // Unreadable exe on both reads is consistent (other users' processes).
+        let r = consistent_read(|| None::<String>, || Ok(vec!["x".to_string()])).unwrap();
+        assert_eq!(r, (None, vec!["x".to_string()]));
+        // An argv error is returned as is.
+        let e = consistent_read(|| Some(1), || Err(io::Error::other("gone"))).unwrap_err();
+        assert_eq!(e.to_string(), "gone");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hostname_is_readable() {
+        let h = local_hostname().expect("hostname");
+        assert!(!h.is_empty() && !h.contains('\0'));
+    }
 
     #[test]
     fn invalid_pid() {

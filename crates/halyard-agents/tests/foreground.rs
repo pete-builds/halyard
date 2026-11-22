@@ -107,7 +107,9 @@ fn identifies_sleep_as_the_foreground_process() {
     assert_eq!(info.argv, vec![sleep.to_str().unwrap().to_string(), "5".into()]);
     assert_eq!(detect_agent(&info), None);
     let exe = info.exe.expect("exe path readable for our own child");
-    assert_eq!(exe.file_name().unwrap(), "sleep");
+    // The executable is the resolved file: `sleep` itself on macOS, but a multicall
+    // binary (`coreutils`, `busybox`) on NixOS and some Linux systems.
+    assert_eq!(exe, std::fs::canonicalize(&sleep).unwrap(), "argv[0] {:?}", info.argv[0]);
 }
 
 #[test]
