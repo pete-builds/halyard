@@ -71,3 +71,10 @@ jobs:
         run: |
           dbus-run-session -- flatpak run --user --command=sh io.github.pete_builds.Halyard \
             -c "$(cat packaging/flatpak/smoke-test.sh)" sh /app/bin/halyard
+      - name: Control, the smoke test fails on a missing binary
+        run: |
+          if dbus-run-session -- flatpak run --user --command=sh io.github.pete_builds.Halyard \
+              -c "$(cat packaging/flatpak/smoke-test.sh)" sh /app/bin/no-such-binary; then
+            echo "smoke-test.sh passed on a missing binary, so it proves nothing" >&2
+            exit 1
+          fi
