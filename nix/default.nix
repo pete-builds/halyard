@@ -229,13 +229,7 @@ let
       commonArgs
       // {
         inherit cargoArtifacts;
-        # Skipped in the Linux build sandbox only: halyard-shell's
-        # zsh_integration runs `cd /tmp`, and the sandbox has no /tmp, so zsh
-        # reports exit status 1 where the test expects 0. It runs in ci.yml
-        # and in the `nix develop` step of the nix workflow.
-        cargoTestExtraArgs =
-          "--workspace --no-fail-fast"
-          + lib.optionalString stdenv.hostPlatform.isLinux " -- --skip zsh_integration";
+        cargoTestExtraArgs = "--workspace --no-fail-fast";
         nativeBuildInputs = commonArgs.nativeBuildInputs ++ ptyTestPrograms;
         # The sandbox's HOME (/homeless-shelter) does not exist. Tests that
         # start shells and programs which read $HOME get a real, empty one.
@@ -244,8 +238,12 @@ let
           + ''
             export HOME="$(mktemp -d)"
           ''
+          # The sandbox has no locale set, so shells run in the C locale, and
+          # zsh then fails to `cd` into halyard-shell's "dir with space é"
+          # (zsh_integration). glibc has C.UTF-8 built in, no locale archive
+          # needed. macOS builds see the runner's locale.
           + lib.optionalString stdenv.hostPlatform.isLinux ''
-            echo "SKIPPED in the Nix sandbox: halyard-shell zsh_integration (the test runs 'cd /tmp' and the Linux build sandbox has no /tmp)"
+            export LANG=C.UTF-8
           '';
       }
     );
