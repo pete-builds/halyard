@@ -1,0 +1,18 @@
+# Stand-in GPUI window for the NixOS VM test (nix/vm-test.nix): proves a GPUI
+# window renders inside a VM before the real app exists. Not part of the cargo
+# workspace; the empty [workspace] table makes this its own root.
+[package]
+name = "halyard-vm-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[workspace]
+
+[dependencies]
+gpui = "=0.2.2"
+
+# Same Linux fix the main workspace uses (vendor/README.md).
+[patch.crates-io]
+xattr = { path = "../../../vendor/xattr" }

@@ -97,6 +97,7 @@
             ;
           inherit (build.${pkgs.stdenv.hostPlatform.system}) configChecker;
         }
+        // lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") { nixos-vm = import ./nix/vm-test.nix { inherit pkgs; }; }
       );
 
       overlays.default = final: _prev: {
