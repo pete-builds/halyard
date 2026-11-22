@@ -16,6 +16,7 @@
 use std::ffi::{CStr, OsString};
 use std::fmt;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -243,6 +244,32 @@ fn new_session_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
+/// Inherited variables that describe the terminal Halyard was launched from
+/// (tmux, iTerm2, Ghostty, kitty, WezTerm, VTE, Windows Terminal, Alacritty)
+/// or a fixed size. Left in place they make programs believe they run there.
+const SCRUBBED_VARS: &[&str] = &[
+    "TMUX",
+    "TMUX_PANE",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "TERM_SESSION_ID",
+    "COLUMNS",
+    "LINES",
+    "VTE_VERSION",
+    "WT_SESSION",
+];
+
+/// Prefixes of inherited variables to remove, as for [`SCRUBBED_VARS`].
+const SCRUBBED_PREFIXES: &[&str] = &["GHOSTTY_", "KITTY_", "WEZTERM_", "ALACRITTY_"];
+
+/// True if an inherited variable belongs to another terminal and must not
+/// reach programs run by Halyard.
+fn is_foreign_terminal_var(name: &str) -> bool {
+    SCRUBBED_VARS.contains(&name) || SCRUBBED_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
 fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
     let mut cmd = if let Some(program) = &config.program {
         let mut cmd = CommandBuilder::new(program);
@@ -257,6 +284,11 @@ fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
     };
     if let Some(cwd) = &config.cwd {
         cmd.cwd(cwd);
+    }
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(is_foreign_terminal_var) {
+            cmd.env_remove(key);
+        }
     }
     for key in &config.env_remove {
         cmd.env_remove(key);
@@ -298,15 +330,22 @@ impl Session {
         let spawn_err = |e: &dyn fmt::Display| SessionError::Spawn(format!("{e:#}"));
         let size = pty_size(config.cols, config.rows, config.cell_width, config.cell_height);
         let pair = native_pty_system().openpty(size).map_err(|e| spawn_err(&e))?;
+        // Everything that can fail without side effects happens before the
+        // child starts.
+        let writer = pair.master.take_writer().map_err(|e| spawn_err(&e))?;
+        let master_fd =
+            pair.master.as_raw_fd().ok_or_else(|| SessionError::Spawn("PTY has no fd".into()))?;
+        let reader = dup_cloexec(master_fd).map_err(|e| spawn_err(&e))?;
+        let (wake_read, wake_write) = wake_pipe().map_err(|e| spawn_err(&e))?;
         let cmd = build_command(&config, &id);
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| spawn_err(&e))?;
         // The parent must not hold the slave open, or the reader never sees
         // end-of-file when the program exits.
         drop(pair.slave);
         let pid = child.process_id();
+        // From here on, a failure must not leave the program running.
+        let mut guard = KillOnDrop { pid };
         let killer = child.clone_killer();
-        let reader = pair.master.try_clone_reader().map_err(|e| spawn_err(&e))?;
-        let writer = pair.master.take_writer().map_err(|e| spawn_err(&e))?;
 
         let (out_tx, out_rx) = bounded::<Vec<u8>>(32);
         let (cmd_tx, cmd_rx) = unbounded::<Command>();
@@ -316,7 +355,7 @@ impl Session {
         let frame = Arc::new(Mutex::new(Arc::new(Frame::default())));
         let (ready_tx, ready_rx) = bounded::<Result<(), EngineError>>(1);
 
-        spawn_thread("halyard-pty-reader", move || read_loop(reader, &out_tx))?;
+        spawn_thread("halyard-pty-reader", move || read_loop(reader, &wake_read, &out_tx))?;
         spawn_thread("halyard-pty-writer", move || write_loop(writer, &write_rx))?;
         spawn_thread("halyard-child-wait", move || {
             let code = match child.wait() {
@@ -334,6 +373,8 @@ impl Session {
         let mut shared = SessionThread {
             master: pair.master,
             killer,
+            pid,
+            wake: Some(wake_write),
             out_rx,
             cmd_rx,
             write_tx,
@@ -363,11 +404,14 @@ impl Session {
                 }
                 Err(e) => {
                     ready_tx.send(Err(e)).ok();
-                    shared.shutdown();
+                    shared.shutdown(true);
                 }
             }
         })?;
-        match ready_rx.recv() {
+        let ready = ready_rx.recv();
+        // The session thread owns the child now and stops it on any failure.
+        guard.pid = None;
+        match ready {
             Ok(Ok(())) => {}
             Ok(Err(e)) => return Err(SessionError::Engine(e)),
             Err(_) => {
@@ -486,10 +530,82 @@ impl Drop for Session {
     }
 }
 
-fn read_loop(mut reader: Box<dyn Read + Send>, out: &Sender<Vec<u8>>) {
+/// Kills the child with SIGKILL when dropped, unless `pid` was cleared.
+struct KillOnDrop {
+    pid: Option<u32>,
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid.and_then(|p| libc::pid_t::try_from(p).ok()) {
+            // SAFETY: kill has no memory-safety preconditions.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+}
+
+fn last_os_error<T>() -> std::io::Result<T> {
+    Err(std::io::Error::last_os_error())
+}
+
+/// Duplicate `fd` with close-on-exec set, so later children do not inherit it.
+fn dup_cloexec(fd: RawFd) -> std::io::Result<OwnedFd> {
+    // SAFETY: fcntl(F_DUPFD_CLOEXEC) only reads `fd` and returns a new fd.
+    let new = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if new < 0 {
+        return last_os_error();
+    }
+    // SAFETY: `new` is a freshly created fd that nothing else owns.
+    Ok(unsafe { OwnedFd::from_raw_fd(new) })
+}
+
+/// A pipe used to wake the reader thread. Closing the write end (when the
+/// session thread stops) makes the read end readable with POLLHUP.
+fn wake_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` has room for the two descriptors pipe writes.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return last_os_error();
+    }
+    // SAFETY: both fds were just created by pipe and are owned here.
+    let (r, w) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+    for fd in [&r, &w] {
+        // SAFETY: setting FD_CLOEXEC on an fd we own.
+        if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            return last_os_error();
+        }
+    }
+    Ok((r, w))
+}
+
+/// Read PTY output until end-of-file, an error, or the session stops.
+///
+/// Waits with poll on the PTY and the wake pipe, so a session that is
+/// dropped while a background job keeps the PTY open (`nohup sleep 30 &`)
+/// still ends this thread and closes its descriptor.
+fn read_loop(pty: OwnedFd, wake: &OwnedFd, out: &Sender<Vec<u8>>) {
+    let mut file = std::fs::File::from(pty);
     let mut buf = vec![0u8; 64 * 1024];
     loop {
-        match reader.read(&mut buf) {
+        let mut fds = [
+            libc::pollfd { fd: file.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+            libc::pollfd { fd: wake.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        ];
+        // SAFETY: `fds` is a valid array of two pollfd structs.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+        if rc < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        if fds[1].revents != 0 || fds[0].revents & libc::POLLNVAL != 0 {
+            return;
+        }
+        if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
+            continue;
+        }
+        match file.read(&mut buf) {
             // End of file, or EIO once the program closed the PTY: done.
             Ok(0) => return,
             Ok(n) => {
@@ -497,7 +613,11 @@ fn read_loop(mut reader: Box<dyn Read + Send>, out: &Sender<Vec<u8>>) {
                     return;
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) => {}
             Err(_) => return,
         }
     }
@@ -515,6 +635,9 @@ fn write_loop(mut writer: Box<dyn Write + Send>, input: &Receiver<Vec<u8>>) {
 struct SessionThread {
     master: Box<dyn MasterPty + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
+    pid: Option<u32>,
+    /// Write end of the reader's wake pipe; dropping it stops the reader.
+    wake: Option<OwnedFd>,
     out_rx: Receiver<Vec<u8>>,
     cmd_rx: Receiver<Command>,
     write_tx: Sender<Vec<u8>>,
@@ -553,12 +676,33 @@ impl SessionThread {
         }
     }
 
-    fn shutdown(&mut self) {
-        if let Err(e) = self.killer.kill() {
-            // Already exited is the common case here.
-            if e.kind() != std::io::ErrorKind::InvalidInput {
-                eprintln!("halyard-term: stopping the child: {e}");
-            }
+    /// Stop the program the way closing a terminal does: SIGHUP to the
+    /// foreground process group and to the shell, stop the reader, then
+    /// SIGKILL the shell if it is still running after a grace period.
+    fn shutdown(&mut self, child_running: bool) {
+        if let Some(pgrp) = self.master.process_group_leader()
+            && pgrp > 0
+        {
+            // SAFETY: killpg has no memory-safety preconditions.
+            unsafe { libc::killpg(pgrp, libc::SIGHUP) };
+        }
+        if let Err(e) = self.killer.kill()
+            && e.raw_os_error() != Some(libc::ESRCH)
+        {
+            eprintln!("halyard-term: stopping the child: {e}");
+        }
+        // Stop the reader: close its wake pipe, and drop the output
+        // receiver in case it is blocked handing over a chunk.
+        self.wake = None;
+        self.out_rx = never();
+        if child_running
+            && self.exit_rx.recv_timeout(Duration::from_secs(2)).is_err()
+            && let Some(pid) = self.pid.and_then(|p| libc::pid_t::try_from(p).ok())
+        {
+            // Still not reaped (the waiter thread reaps it), so the pid is
+            // still ours: force it.
+            // SAFETY: kill has no memory-safety preconditions.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }
 
@@ -644,9 +788,7 @@ impl SessionThread {
                 self.emit(SessionEvent::Exited(code));
             }
         }
-        if !exit_reported {
-            self.shutdown();
-        }
+        self.shutdown(child_running);
     }
 
     /// Apply a command. Returns true if the screen may have changed.
@@ -781,6 +923,48 @@ mod tests {
         assert_eq!(get("FOO").as_deref(), Some("bar"));
         assert!(cmd.is_default_prog());
         assert_eq!(get("SHELL").map(PathBuf::from), Some(default_shell()));
+    }
+
+    #[test]
+    fn foreign_terminal_variables_are_scrubbed() {
+        for name in [
+            "TMUX",
+            "TMUX_PANE",
+            "ITERM_SESSION_ID",
+            "ITERM_PROFILE",
+            "GHOSTTY_RESOURCES_DIR",
+            "KITTY_WINDOW_ID",
+            "WEZTERM_PANE",
+            "LC_TERMINAL",
+            "LC_TERMINAL_VERSION",
+            "TERM_SESSION_ID",
+            "COLUMNS",
+            "LINES",
+            "VTE_VERSION",
+            "WT_SESSION",
+            "ALACRITTY_WINDOW_ID",
+        ] {
+            assert!(is_foreign_terminal_var(name), "{name}");
+        }
+        for name in ["HOME", "PATH", "TERM", "LANG", "TMUXINATOR_CONFIG", "KITTYX"] {
+            assert!(!is_foreign_terminal_var(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn kill_guard_kills_unless_defused() {
+        let mut armed = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        drop(KillOnDrop { pid: Some(armed.id()) });
+        let status = armed.wait().unwrap();
+        assert!(!status.success(), "the guard did not kill the child");
+
+        let mut defused = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut guard = KillOnDrop { pid: Some(defused.id()) };
+        guard.pid = None;
+        drop(guard);
+        assert!(defused.try_wait().unwrap().is_none(), "a defused guard killed the child");
+        defused.kill().unwrap();
+        defused.wait().unwrap();
     }
 
     #[test]

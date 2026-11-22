@@ -36,6 +36,12 @@ named; untested platforms are listed as such.
       `bracketed_paste_and_mouse_reach_the_program`. Window side pending.
 - [ ] Selection, copy, paste (bracketed). Session side done: `selection_highlights_and_copies`,
       `selection_copies_text`, `paste_is_bracketed_only_when_enabled`. Window side pending.
+- Security and lifecycle (review of PR #2): query replies pass an allowlist so title
+  reports cannot inject commands (`title_reports_are_never_sent_back`,
+  `title_report_cannot_inject_a_command`); dropping a session kills its program and frees
+  its threads and descriptors (`dropping_the_session_kills_the_program`,
+  `dropping_the_session_kills_a_program_that_ignores_hangup`, `tests/drop.rs`); other
+  terminals' identity variables are scrubbed (`tests/env.rs`).
 - Known gaps in the session layer: underline style (double, curly) and underline color are
   reduced to a single underline flag; Kitty graphics are not rendered; Option-as-Alt on
   macOS is off by default and only configurable through `SessionConfig::option_as_alt`.

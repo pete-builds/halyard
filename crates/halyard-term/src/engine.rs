@@ -191,7 +191,7 @@ impl Engine {
                 })
             })
             .map_err(err("registering the device attributes handler"))?
-            .on_xtversion(|_t| Some(concat!("Halyard ", env!("CARGO_PKG_VERSION"))))
+            .on_xtversion(|_t| Some(XTVERSION))
             .map_err(err("registering the XTVERSION handler"))?
             .on_color_scheme(|_t| None)
             .map_err(err("registering the color scheme handler"))?;
@@ -224,7 +224,7 @@ impl Engine {
     /// by the [`Engine::write`] calls since the last drain.
     pub fn take_effects(&mut self) -> EngineEffects {
         EngineEffects {
-            pty_reply: std::mem::take(&mut *self.effects.pty_out.borrow_mut()),
+            pty_reply: safe_replies(&std::mem::take(&mut *self.effects.pty_out.borrow_mut())),
             bell: self.effects.bell.replace(false),
             title_changed: self.effects.title_changed.replace(false),
         }
@@ -646,6 +646,105 @@ impl Engine {
     }
 }
 
+/// The XTVERSION reply text, the only DCS string Halyard sends unprompted.
+const XTVERSION: &str = concat!("Halyard ", env!("CARGO_PKG_VERSION"));
+
+/// Keep only replies that cannot carry application-controlled text.
+///
+/// A reply is written to the program's input as if typed. Any reply that
+/// echoes text the program (or a file it printed) chose, such as the window
+/// title report (`CSI 21 t` answered with `OSC l <title> ST`), lets output
+/// inject commands into the shell (CVE-2024-38396 for iTerm2). So this is an
+/// allowlist, applied per escape sequence:
+///
+/// - CSI replies whose parameters are digits and `; : < = > ?` with optional
+///   intermediates: DA1, DA2, DSR, CPR, DECRQM, Kitty keyboard flags, XTWINOPS
+///   size reports, color scheme reports.
+/// - OSC 4 and OSC 10 to 19 color reports in `rgb:` hex form.
+/// - DCS `>|` XTVERSION with Halyard's own string, and DCS `!|` DA3 (hex).
+///
+/// Everything else (title and icon reports, DECRQSS, XTGETTCAP, stray bytes)
+/// is dropped.
+pub(crate) fn safe_replies(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] != 0x1b || i + 1 >= data.len() {
+            i += 1;
+            continue;
+        }
+        let (end, safe) = match data[i + 1] {
+            b'[' => {
+                let mut j = i + 2;
+                while j < data.len() && (0x20..=0x3f).contains(&data[j]) {
+                    j += 1;
+                }
+                if j < data.len() && (0x40..=0x7e).contains(&data[j]) {
+                    (j + 1, true)
+                } else {
+                    (j, false)
+                }
+            }
+            kind @ (b']' | b'P') => {
+                let body_start = i + 2;
+                let mut j = body_start;
+                let mut found = None;
+                while j < data.len() {
+                    if kind == b']' && data[j] == 0x07 {
+                        found = Some((j, j + 1));
+                        break;
+                    }
+                    if data[j] == 0x1b && data.get(j + 1) == Some(&b'\\') {
+                        found = Some((j, j + 2));
+                        break;
+                    }
+                    j += 1;
+                }
+                match found {
+                    Some((body_end, end)) => {
+                        let body = &data[body_start..body_end];
+                        let ok =
+                            if kind == b']' { safe_osc_reply(body) } else { safe_dcs_reply(body) };
+                        (end, ok)
+                    }
+                    None => (data.len(), false),
+                }
+            }
+            _ => (i + 2, false),
+        };
+        if safe {
+            out.extend_from_slice(&data[i..end]);
+        }
+        i = end.max(i + 1);
+    }
+    out
+}
+
+fn safe_osc_reply(body: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(body);
+    let mut parts = text.splitn(2, ';');
+    let Some(Ok(code)) = parts.next().map(str::parse::<u16>) else { return false };
+    let Some(rest) = parts.next() else { return false };
+    let color = match code {
+        4 => match rest.split_once(';') {
+            Some((index, color)) if index.bytes().all(|b| b.is_ascii_digit()) => color,
+            _ => return false,
+        },
+        10..=19 => rest,
+        _ => return false,
+    };
+    color.strip_prefix("rgb:").is_some_and(|hex| {
+        !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit() || b == b'/')
+    })
+}
+
+fn safe_dcs_reply(body: &[u8]) -> bool {
+    if let Some(version) = body.strip_prefix(b">|") {
+        return version == XTVERSION.as_bytes();
+    }
+    body.strip_prefix(b"!|").is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+}
+
 /// True if `text` can be pasted without risk: it has no newline (which would
 /// run a command) and no bracketed-paste end marker.
 #[must_use]
@@ -877,6 +976,91 @@ mod tests {
         // DA1 must be answered or vim waits.
         e.write(b"\x1b[c");
         assert!(e.take_effects().pty_reply.starts_with(b"\x1b[?62"));
+    }
+
+    #[test]
+    fn title_reports_are_never_sent_back() {
+        let mut e = engine();
+        // The iTerm2 CVE-2024-38396 pattern: set a title holding a command,
+        // then ask for it back. The reply would be typed into the shell.
+        e.write(b"\x1b]2;;touch /tmp/pwned;\x07\x1b[21t");
+        assert_eq!(e.take_effects().pty_reply, b"");
+        e.write(b"\x1b]1;icon\x07\x1b[20t");
+        assert_eq!(e.take_effects().pty_reply, b"");
+    }
+
+    #[test]
+    fn safe_query_replies_still_flow() {
+        let mut e = engine();
+        e.write(b"\x1b[6n");
+        assert_eq!(e.take_effects().pty_reply, b"\x1b[1;1R");
+        e.write(b"\x1b[?2004$p");
+        assert_eq!(e.take_effects().pty_reply, b"\x1b[?2004;2$y");
+        e.write(b"\x1b[?u");
+        assert_eq!(e.take_effects().pty_reply, b"\x1b[?0u");
+        e.write(b"\x1b[>q");
+        let xt = e.take_effects().pty_reply;
+        assert_eq!(xt, format!("\x1bP>|{XTVERSION}\x1b\\").as_bytes());
+        e.write(b"\x1b]10;?\x1b\\");
+        let fg = String::from_utf8(e.take_effects().pty_reply).unwrap();
+        assert!(fg.starts_with("\x1b]10;rgb:"), "{fg:?}");
+        e.write(b"\x1b[18t");
+        assert_eq!(e.take_effects().pty_reply, b"\x1b[8;5;20t");
+    }
+
+    #[test]
+    fn reply_filter_allowlist() {
+        let keep: &[&[u8]] = &[
+            b"\x1b[?62;1;6;22c",
+            b"\x1b[>1;10;0c",
+            b"\x1b[12;40R",
+            b"\x1b[0n",
+            b"\x1b]4;1;rgb:ff/00/00\x07",
+            b"\x1b]11;rgb:1616/1818/1d1d\x1b\\",
+            b"\x1bP!|00000000\x1b\\",
+        ];
+        for r in keep {
+            assert_eq!(safe_replies(r), *r, "{}", r.escape_ascii());
+        }
+        let drop: &[&[u8]] = &[
+            b"\x1b]l;touch x;\x1b\\",
+            b"\x1b]L icon\x1b\\",
+            b"\x1b]2;title\x07",
+            b"\x1b]10;rgb:12/34/56;rm -rf\x07",
+            b"\x1bP1$r0m\x1b\\",
+            b"\x1bP1+r6b6273\x1b\\",
+            b"\x1bP>|Evil 1.0\x1b\\",
+            b"plain text\r",
+            b"\x1b[1;2",
+        ];
+        for r in drop {
+            assert_eq!(safe_replies(r), b"", "{}", r.escape_ascii());
+        }
+        // A mixed buffer keeps the safe parts only.
+        assert_eq!(safe_replies(b"\x1b[1;1R\x1b]l;x\x1b\\\x1b[0n"), b"\x1b[1;1R\x1b[0n");
+    }
+
+    #[test]
+    fn cursor_on_wide_tail_reports_the_glyph_column() {
+        let mut e = engine();
+        // Print a wide glyph, then step left once: the cursor sits on the
+        // glyph's spacer half and must be drawn over the glyph itself.
+        e.write("漢\x1b[D".as_bytes());
+        let f = e.frame().unwrap();
+        assert_eq!((f.cursor.col, f.cursor.row), (0, 0));
+    }
+
+    #[test]
+    fn control_characters_in_key_text_are_ignored() {
+        let mut e = engine();
+        // Some platforms report the C0 character as the key's text; the
+        // encoder must still produce exactly one byte.
+        let ctrl_c = KeyInput::with_text(KeyCode::Char('c'), "\u{3}", Modifiers::CTRL);
+        assert_eq!(e.encode_key(&ctrl_c).unwrap(), b"\x03");
+        let enter = KeyInput::with_text(KeyCode::Enter, "\r", Modifiers::NONE);
+        assert_eq!(e.encode_key(&enter).unwrap(), b"\r");
+        let tab = KeyInput::with_text(KeyCode::Tab, "\t", Modifiers::NONE);
+        assert_eq!(e.encode_key(&tab).unwrap(), b"\t");
     }
 
     #[test]

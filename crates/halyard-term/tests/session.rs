@@ -82,10 +82,13 @@ fn run(s: &Session, line: &str) {
     s.write(format!("{line}\r"));
 }
 
-/// Returns false (and says why) when `program` is not on PATH.
+/// Returns false (and says why) when `program` is not on PATH. In CI (the
+/// `CI` variable is set) a missing program is a failure, not a skip: CI
+/// installs vim, less and htop, and libtest hides the skip message.
 fn have(program: &str) -> bool {
     let found = std::env::var_os("PATH")
         .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(program).is_file()));
+    assert!(found || std::env::var_os("CI").is_none(), "`{program}` must be installed in CI");
     if !found {
         eprintln!("SKIPPED: `{program}` is not installed on this machine");
     }
@@ -189,6 +192,93 @@ fn shell_exit_reports_status() {
     let s = spawn(80, 24);
     run(&s, "exit 3");
     assert_eq!(wait_for_exit(&s), Some(3));
+}
+
+#[test]
+fn title_report_cannot_inject_a_command() {
+    // CVE-2024-38396 class: output sets a title holding a command and asks
+    // the terminal to report it back as input. Nothing may come back.
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("pwned");
+    let payload = dir.path().join("payload");
+    std::fs::write(
+        &payload,
+        format!(
+            "\x1b]2;;touch {};\x07\x1b[21t\x1b]1;;touch {};\x07\x1b[20t",
+            marker.display(),
+            marker.display()
+        ),
+    )
+    .unwrap();
+    let s = spawn(120, 24);
+    run(&s, &format!("cat {}; echo cat-done", payload.display()));
+    wait_for(&s, "cat finished", |f| row_equal(f, "cat-done").is_some() && prompt_count(f) == 2);
+    // Anything the terminal typed back would now sit on the prompt line;
+    // Enter would run it.
+    s.write("\r");
+    wait_for(&s, "prompt after Enter", |f| prompt_count(f) == 3);
+    run(&s, "echo after-enter");
+    let f = wait_for(&s, "shell still responsive", |f| row_equal(f, "after-enter").is_some());
+    assert!(!f.text().contains("touch"), "a reply reached the input line:\n{}", f.text());
+    assert!(!marker.exists(), "the injected command ran");
+}
+
+#[test]
+fn device_query_replies_reach_the_program() {
+    // A raw-mode program asks for the cursor position and prints what it
+    // read back, with ESC shown as E.
+    let s = spawn(80, 24);
+    run(
+        &s,
+        r"stty raw -echo min 0 time 20; printf '\033[6n'; r=$(dd bs=1 count=16 2>/dev/null | tr '\033' E); stty sane; echo; echo cpr:$r",
+    );
+    let f = wait_for(&s, "cursor position report", |f| {
+        (0..f.rows).any(|r| f.row_text(r).starts_with("cpr:E["))
+    });
+    let row = (0..f.rows).find(|&r| f.row_text(r).starts_with("cpr:E[")).unwrap();
+    let text = f.row_text(row);
+    let body = text.strip_prefix("cpr:E[").and_then(|t| t.strip_suffix('R'));
+    let ok = body.is_some_and(|b| {
+        b.split(';').count() == 2 && b.split(';').all(|n| n.parse::<u16>().is_ok_and(|n| n > 0))
+    });
+    assert!(ok, "not a CPR reply: {text:?}");
+}
+
+#[test]
+fn dropping_the_session_kills_the_program() {
+    let mut c = config(80, 24);
+    c.program = Some(PathBuf::from("sleep"));
+    c.args = vec!["30".into()];
+    let s = Session::spawn(c).unwrap();
+    let pid = libc::pid_t::try_from(s.pid().expect("child pid")).unwrap();
+    // SAFETY: signal 0 only checks that the process exists.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, 0, "sleep is not running");
+    drop(s);
+    let deadline = Instant::now() + TIMEOUT;
+    // SAFETY: as above.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "sleep {pid} still running after drop");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn dropping_the_session_kills_a_program_that_ignores_hangup() {
+    // Closing the PTY sends SIGHUP; a program that ignores it must still be
+    // stopped (the session escalates to SIGKILL).
+    let mut c = config(80, 24);
+    c.args = vec!["-c".into(), "trap '' HUP; while :; do sleep 1; done".into()];
+    let s = Session::spawn(c).unwrap();
+    let pid = libc::pid_t::try_from(s.pid().expect("child pid")).unwrap();
+    // Let the shell install its trap.
+    std::thread::sleep(Duration::from_millis(300));
+    drop(s);
+    let deadline = Instant::now() + TIMEOUT;
+    // SAFETY: signal 0 only checks that the process exists.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(Instant::now() < deadline, "shell {pid} still running after drop");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]
