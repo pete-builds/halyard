@@ -115,6 +115,21 @@ fn missing_home_starts_the_shell_in_root() {
 }
 
 #[test]
+fn existing_home_is_the_starting_directory() {
+    // The other half of the HOME fallback: with a real HOME and no cwd, the
+    // shell starts in HOME, not in "/".
+    let home = tempfile::tempdir().expect("temp HOME");
+    let home_path = home.path().canonicalize().expect("canonical HOME");
+    let mut cfg = config(200, 24);
+    cfg.env.push(("HOME".to_owned(), home_path.to_string_lossy().into_owned()));
+    let s = Session::spawn(cfg).expect("spawn with a temp HOME");
+    wait_for(&s, "the first prompt", |f| prompt_count(f) >= 1);
+    run(&s, "echo cwd:$(pwd -P)");
+    let want = format!("cwd:{}", home_path.display());
+    wait_for(&s, "the shell's cwd", |f| row_equal(f, &want).is_some());
+}
+
+#[test]
 fn default_program_is_a_login_shell() {
     // No program: the user's shell from $SHELL or passwd, run as a login
     // shell (argv[0] starts with '-'). Its prompt is whatever the user has.

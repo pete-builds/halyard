@@ -335,10 +335,8 @@ fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
         // Without a cwd, portable-pty starts the child in $HOME and the spawn fails
         // outright when that directory does not exist (containers, service accounts,
         // build sandboxes). A shell in "/" is better than no shell.
-        eprintln!(
-            "halyard-term: HOME ({}) is not a directory; starting in /",
-            Path::new(home).display()
-        );
+        // Debug formatting escapes control characters in a hostile HOME.
+        eprintln!("halyard-term: HOME {home:?} is not a directory; starting in /");
         cmd.cwd("/");
     }
     cmd
