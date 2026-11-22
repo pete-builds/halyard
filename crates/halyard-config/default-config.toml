@@ -45,6 +45,9 @@ cursor_blink = true
 copy_on_select = false
 # Ask before closing a pane that is running a command.
 confirm_close_running = true
+# Ask before pasting text with a line break into a program that has not turned on
+# bracketed paste, where each line would run as a command.
+confirm_multiline_paste = true
 # Shell to run. Unset means your login shell ($SHELL).
 # shell = { program = "/bin/zsh", args = ["-l"] }
 
@@ -64,7 +67,9 @@ dark = "Halyard Night"
 # Actions: new_tab, close_pane, split_right, split_down, focus_left, focus_right,
 # focus_up, focus_down, next_tab, prev_tab, command_palette, copy, paste, find,
 # zoom_pane, increase_font_size, decrease_font_size, reset_font_size,
-# agent_dashboard, new_window, quit.
+# agent_dashboard, new_window, quit, resize_pane_left, resize_pane_right,
+# resize_pane_up, resize_pane_down, move_tab_left, move_tab_right, rename_tab,
+# reload_config, open_config.
 # "primary+k" = "command_palette"
 # "cmd+q" = "none"
 
