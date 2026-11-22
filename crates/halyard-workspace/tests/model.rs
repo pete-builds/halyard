@@ -340,3 +340,34 @@ fn node_paths_round_trip() {
     assert_eq!(root.depth(), 2);
     assert_eq!(root.len(), 3);
 }
+
+#[test]
+fn splits_stop_at_the_restore_limits() {
+    use halyard_workspace::persist::{MAX_DEPTH, MAX_PANES_PER_TAB};
+    // Depth: always split the newest pane, nesting one level each time.
+    let (mut ws, _) = Workspace::new();
+    for _ in 0..MAX_DEPTH {
+        assert!(ws.split(Axis::Horizontal).is_some());
+    }
+    assert_eq!(ws.active().root.depth(), MAX_DEPTH);
+    assert!(ws.split_refusal().is_some());
+    assert_eq!(ws.split(Axis::Vertical), None, "a 17th level is refused");
+    assert_eq!(ws.active().root.depth(), MAX_DEPTH);
+    ok(&ws);
+    // Count: split the shallowest pane each time, so depth stays low.
+    let (mut ws, _) = Workspace::new();
+    while ws.active().root.len() < MAX_PANES_PER_TAB {
+        let root = ws.active().root.clone();
+        let shallow =
+            root.panes().into_iter().min_by_key(|p| root.path_to(*p).unwrap().len()).unwrap();
+        ws.focus_pane(shallow);
+        assert!(ws.split(Axis::Vertical).is_some());
+    }
+    assert!(ws.active().root.depth() < MAX_DEPTH);
+    assert_eq!(ws.split(Axis::Vertical), None, "a 33rd pane is refused");
+    assert_eq!(ws.active().root.len(), MAX_PANES_PER_TAB);
+    // Another tab is unaffected.
+    ws.new_tab();
+    assert!(ws.split(Axis::Vertical).is_some());
+    ok(&ws);
+}

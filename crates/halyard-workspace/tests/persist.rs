@@ -4,7 +4,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use halyard_workspace::persist::{
-    self, MAX_PANES_PER_TAB, SavedNode, SavedState, VERSION, osc7_local_path, state_dir_with,
+    self, MAX_DEPTH, MAX_PANES_PER_TAB, MAX_PANES_TOTAL, SavedNode, SavedState, SavedTab,
+    SavedWindow, VERSION, osc7_local_path, resolve_cwd, state_dir_with,
 };
 use halyard_workspace::{Axis, PaneId, Workspace};
 
@@ -245,15 +246,145 @@ fn osc7_is_used_only_when_local() {
     assert_eq!(osc7_local_path("file:///Users/p/src", h).as_deref(), Some("/Users/p/src"));
     assert_eq!(osc7_local_path("file://localhost/tmp", h).as_deref(), Some("/tmp"));
     assert_eq!(osc7_local_path("file://mybox.local/tmp", h).as_deref(), Some("/tmp"));
-    assert_eq!(osc7_local_path("file://mybox/tmp", h).as_deref(), Some("/tmp"));
+    assert_eq!(osc7_local_path("file://mybox/tmp", h), None, "first label only is not enough");
+    assert_eq!(osc7_local_path("file://MYBOX.LOCAL/tmp", h).as_deref(), Some("/tmp"));
+    assert_eq!(
+        osc7_local_path("file://mybox.local/tmp", Some("mybox")),
+        None,
+        "a longer name is another host"
+    );
     assert_eq!(osc7_local_path("file://other/tmp", h), None, "remote host");
     assert_eq!(osc7_local_path("file:///a%20b/c", h).as_deref(), Some("/a b/c"));
     assert_eq!(osc7_local_path("file:///a%1bb", h), None, "decoded control char");
     assert_eq!(osc7_local_path("file:///a%zz", h), None, "bad escape");
-    assert_eq!(osc7_local_path("kitty-shell-cwd://mybox/x%20y", h).as_deref(), Some("/x%20y"));
+    assert_eq!(
+        osc7_local_path("kitty-shell-cwd://mybox.local/x%20y", h).as_deref(),
+        Some("/x%20y")
+    );
     assert_eq!(osc7_local_path("/plain/path", h).as_deref(), Some("/plain/path"));
     assert_eq!(osc7_local_path("relative", h), None);
     assert_eq!(osc7_local_path("http://mybox/tmp", h), None);
     // Verbatim: never normalized.
     assert_eq!(osc7_local_path("file:///a/../b/", h).as_deref(), Some("/a/../b/"));
+}
+
+/// A chain of `n` panes: each split nests the previous one, depth `n - 1`.
+fn chain(n: usize) -> SavedNode {
+    let mut node = SavedNode::Pane { cwd: None };
+    for _ in 1..n {
+        node = SavedNode::Split {
+            axis: Axis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(SavedNode::Pane { cwd: None }),
+            second: Box::new(node),
+        };
+    }
+    node
+}
+
+fn tab(layout: SavedNode) -> SavedTab {
+    SavedTab { name: None, layout, focused: 0, zoomed: false }
+}
+
+#[test]
+fn restore_caps_the_total_number_of_panes() {
+    // Balanced 32-pane tabs (depth 5), 9 windows: 288 panes in the file.
+    fn balanced(n: usize) -> SavedNode {
+        if n == 1 {
+            return SavedNode::Pane { cwd: None };
+        }
+        SavedNode::Split {
+            axis: Axis::Vertical,
+            ratio: 0.5,
+            first: Box::new(balanced(n / 2)),
+            second: Box::new(balanced(n - n / 2)),
+        }
+    }
+    let windows: Vec<SavedWindow> = (0..9)
+        .map(|_| SavedWindow { tabs: vec![tab(balanced(MAX_PANES_PER_TAB))], active: 0 })
+        .collect();
+    let r = persist::restore(&SavedState { version: VERSION, windows });
+    let total: usize = r.windows.iter().map(|w| w.cwds.len()).sum();
+    assert_eq!(total, MAX_PANES_TOTAL, "8 full windows fit, the 9th is dropped");
+    assert_eq!(r.windows.len(), 8);
+    assert!(r.warnings.iter().any(|w| w.contains("too many panes in total")), "{:?}", r.warnings);
+}
+
+#[test]
+fn restore_drops_a_tab_nested_deeper_than_the_limit() {
+    let ok = chain(MAX_DEPTH + 1); // depth 16
+    let deep = chain(MAX_DEPTH + 2); // depth 17, only 18 panes
+    let state = SavedState {
+        version: VERSION,
+        windows: vec![SavedWindow { tabs: vec![tab(ok), tab(deep)], active: 0 }],
+    };
+    let r = persist::restore(&state);
+    assert_eq!(r.windows[0].workspace.tabs().len(), 1, "the depth-17 tab is dropped");
+    assert_eq!(r.windows[0].workspace.tabs()[0].root.depth(), MAX_DEPTH);
+    assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+}
+
+#[test]
+fn restored_directories_must_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let there = dir.path().join("there");
+    std::fs::create_dir(&there).unwrap();
+    let file = dir.path().join("file");
+    std::fs::write(&file, "x").unwrap();
+    assert_eq!(resolve_cwd(Some(&there), &home), there);
+    assert_eq!(resolve_cwd(Some(&dir.path().join("gone")), &home), home);
+    assert_eq!(resolve_cwd(Some(&file), &home), home, "not a directory");
+    assert_eq!(resolve_cwd(Some(Path::new("relative")), &home), home);
+    assert_eq!(resolve_cwd(None, &home), home);
+}
+
+#[cfg(unix)]
+#[test]
+fn load_does_not_block_on_a_fifo() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("workspace.json");
+    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = fifo.clone();
+    std::thread::spawn(move || tx.send(persist::load(&p)).ok());
+    let r = rx.recv_timeout(std::time::Duration::from_secs(5)).expect("load returned");
+    assert!(r.windows.is_empty());
+    assert!(r.warnings[0].contains("not a regular file"), "{:?}", r.warnings);
+}
+
+#[cfg(unix)]
+#[test]
+fn save_refuses_symlinks_and_tightens_the_folder() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = tempfile::tempdir().unwrap();
+    let (ws, ids) = sample();
+    let cwd = cwd_for(&ids);
+    let state = SavedState { version: VERSION, windows: vec![ws.to_saved(&cwd)] };
+
+    // A symlinked state directory is refused.
+    let real = dir.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = dir.path().join("link");
+    symlink(&real, &link).unwrap();
+    assert!(persist::save(&link.join("workspace.json"), &state).is_err());
+    assert!(std::fs::read_dir(&real).unwrap().next().is_none(), "nothing written through it");
+
+    // An existing folder is tightened to 0700.
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir(&state_dir).unwrap();
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A symlink planted at the temporary file's name is not followed.
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, "keep").unwrap();
+    let tmp = state_dir.join(format!(".workspace.json.{}.tmp", std::process::id()));
+    symlink(&victim, &tmp).unwrap();
+    persist::save(&state_dir.join("workspace.json"), &state).unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    let mode = std::fs::metadata(&state_dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    assert_eq!(persist::load(&state_dir.join("workspace.json")).windows.len(), 1);
 }

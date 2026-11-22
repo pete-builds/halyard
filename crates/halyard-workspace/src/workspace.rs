@@ -140,9 +140,30 @@ impl Workspace {
         id
     }
 
+    /// Why the focused pane cannot be split, if it cannot: a split that
+    /// would pass the limits a saved workspace is restored with
+    /// ([`crate::persist::MAX_PANES_PER_TAB`], [`crate::persist::MAX_DEPTH`])
+    /// is refused, so every layout can be saved and restored whole.
+    #[must_use]
+    pub fn split_refusal(&self) -> Option<&'static str> {
+        let tab = self.tabs.get(self.active)?;
+        if tab.root.len() >= crate::persist::MAX_PANES_PER_TAB {
+            return Some("this tab already has the most panes a tab can hold");
+        }
+        let depth = tab.root.path_to(tab.focused).map_or(0, |p| p.len());
+        if depth >= crate::persist::MAX_DEPTH {
+            return Some("this pane is already split as deeply as a tab allows");
+        }
+        None
+    }
+
     /// Split the focused pane: `Horizontal` puts the new pane to the right,
-    /// `Vertical` below. The new pane gets focus. Leaves focus mode.
+    /// `Vertical` below. The new pane gets focus. Leaves focus mode. Returns
+    /// `None` when [`Self::split_refusal`] says no.
     pub fn split(&mut self, axis: Axis) -> Option<PaneId> {
+        if self.split_refusal().is_some() {
+            return None;
+        }
         let id = self.alloc();
         let tab = self.tabs.get_mut(self.active)?;
         tab.zoomed = false;

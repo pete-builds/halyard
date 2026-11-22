@@ -34,6 +34,9 @@ pub const MAX_TABS: usize = 64;
 pub const MAX_PANES_PER_TAB: usize = 32;
 /// Deepest split nesting restored.
 pub const MAX_DEPTH: usize = 16;
+/// Most panes restored from one file, across all windows: each pane starts a
+/// shell, so a damaged or hostile file must not start thousands.
+pub const MAX_PANES_TOTAL: usize = 256;
 /// Longest working directory kept, in bytes.
 pub const MAX_PATH_BYTES: usize = 4096;
 
@@ -140,13 +143,11 @@ pub fn osc7_local_path(raw: &str, hostname: Option<&str>) -> Option<String> {
     };
     let slash = rest.find('/')?;
     let (host, path) = rest.split_at(slash);
+    // The full host name must match: `box` and `box.example.com` may be
+    // different machines.
     let local = host.is_empty()
         || host.eq_ignore_ascii_case("localhost")
-        || hostname.is_some_and(|h| {
-            h.eq_ignore_ascii_case(host)
-                || h.split('.').next().is_some_and(|s| s.eq_ignore_ascii_case(host))
-                || host.split('.').next().is_some_and(|s| s.eq_ignore_ascii_case(h))
-        });
+        || hostname.is_some_and(|h| h.eq_ignore_ascii_case(host));
     if !local {
         return None;
     }
@@ -169,6 +170,13 @@ fn percent_decode(s: &str) -> Option<String> {
         }
     }
     String::from_utf8(out).ok()
+}
+
+/// The directory a restored pane starts in: the saved one when it is an
+/// absolute path to an existing directory, else `home`.
+#[must_use]
+pub fn resolve_cwd(saved: Option<&Path>, home: &Path) -> PathBuf {
+    saved.filter(|p| p.is_absolute() && p.is_dir()).unwrap_or(home).to_path_buf()
 }
 
 /// This machine's host name.
@@ -305,7 +313,7 @@ fn restore_node(
     }
 }
 
-fn restore_window(w: &SavedWindow, issues: &mut Issues) -> Option<Restored> {
+fn restore_window(w: &SavedWindow, budget: &mut usize, issues: &mut Issues) -> Option<Restored> {
     let mut next = 1;
     let mut cwds = Vec::new();
     let mut tabs = Vec::new();
@@ -318,6 +326,11 @@ fn restore_window(w: &SavedWindow, issues: &mut Issues) -> Option<Restored> {
             issues.add("a saved tab had too many panes and was dropped");
             continue;
         }
+        if panes > *budget {
+            issues.add("the saved workspace has too many panes in total; extra tabs were dropped");
+            continue;
+        }
+        *budget -= panes;
         let first_id = next;
         let root = restore_node(&t.layout, &mut next, &mut cwds, issues);
         let ids = root.panes();
@@ -343,6 +356,7 @@ pub fn restore(state: &SavedState) -> LoadResult {
             )],
         };
     }
+    let mut budget = MAX_PANES_TOTAL;
     if state.windows.len() > MAX_WINDOWS {
         issues.add("too many saved windows; extra windows were dropped");
     }
@@ -350,7 +364,7 @@ pub fn restore(state: &SavedState) -> LoadResult {
         .windows
         .iter()
         .take(MAX_WINDOWS)
-        .filter_map(|w| restore_window(w, &mut issues))
+        .filter_map(|w| restore_window(w, &mut budget, &mut issues))
         .collect();
     LoadResult { windows, warnings: issues.0.into_iter().map(str::to_owned).collect() }
 }
@@ -382,7 +396,23 @@ pub fn parse(text: &str) -> LoadResult {
 pub fn load(path: &Path) -> LoadResult {
     let empty =
         |w: Option<String>| LoadResult { windows: Vec::new(), warnings: w.into_iter().collect() };
-    let file = match std::fs::File::open(path) {
+    // Check the type before opening: opening a FIFO with no writer blocks.
+    match std::fs::metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return empty(None),
+        Err(e) => {
+            return empty(Some(format!("saved workspace could not be read: {}", e.kind())));
+        }
+        Ok(m) if !m.is_file() => {
+            return empty(Some("saved workspace is not a regular file; ignored".into()));
+        }
+        Ok(_) => {}
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    // Non-blocking, so a FIFO swapped in after the check still cannot hang.
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut opts, libc::O_NONBLOCK);
+    let file = match opts.open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return empty(None),
         Err(e) => {
@@ -407,23 +437,43 @@ pub fn load(path: &Path) -> LoadResult {
 }
 
 /// Write the state atomically (temporary file, fsync, rename) with mode
-/// 0600, creating the directory with mode 0700 if needed.
+/// 0600 in a directory with mode 0700 (created, or tightened if it exists).
+/// A state directory that is a symlink is refused, and the temporary file
+/// is created fresh without following symlinks.
 ///
 /// # Errors
-/// Any I/O failure; the previous file is left in place.
+/// Any I/O failure, or a symlinked state directory; the previous file is
+/// left in place.
 pub fn save(path: &Path, state: &SavedState) -> std::io::Result<()> {
     let dir = path.parent().ok_or_else(|| std::io::Error::other("state file has no directory"))?;
+    if std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::other("the state directory is a symlink; not writing there"));
+    }
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
     builder.create(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
     let json = serde_json::to_vec_pretty(state).map_err(std::io::Error::other)?;
     let tmp = dir.join(format!(".{FILE_NAME}.{}.tmp", std::process::id()));
+    // A leftover from a crash (or anything planted there) is removed, not
+    // followed: removing a symlink removes the link only.
+    match std::fs::remove_file(&tmp) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
     let result = (|| {
         let mut f = opts.open(&tmp)?;
         #[cfg(unix)]
