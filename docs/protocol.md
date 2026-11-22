@@ -38,7 +38,7 @@ ESC ] 7717 ; key=value ; key=value ... ST
 | `state` | `working`, `waiting` (needs the user), `idle`, `done`, or `error`. Any other value is ignored. |
 | `agent` | The program's name for itself, for example `claude` or `codex`. Known names map to Halyard's agent kinds; anything else is shown as given. At most 64 characters. |
 | `msg` | A short message for the user. At most 1024 characters are kept; the dashboard shows 256. |
-| `session` | The `HALYARD_SESSION_ID` the program saw. When present and different from the pane's id, the whole report is ignored. |
+| `session` | The `HALYARD_SESSION_ID` the program saw. **Required by the app:** a report without it, or with another pane's id, is treated as plain output (no state, no agent name, no message, no notification). |
 | `exit` | A decimal exit status that goes with `state=done` or `state=error`. |
 | `v` | Protocol version. Optional; `1` is assumed. Reserved for later use. |
 
@@ -47,8 +47,8 @@ recognized field is dropped. Examples:
 
 ```sh
 printf '\033]7717;state=working;agent=mybot;session=%s\033\\' "$HALYARD_SESSION_ID"
-printf '\033]7717;state=waiting;msg=Approve%%20the%%20migration%%3F\033\\'
-printf '\033]7717;state=done;exit=0\033\\'
+printf '\033]7717;state=waiting;msg=Approve%%20the%%20migration%%3F;session=%s\033\\' "$HALYARD_SESSION_ID"
+printf '\033]7717;state=done;exit=0;session=%s\033\\' "$HALYARD_SESSION_ID"
 ```
 
 ### The OSC 777 carrier
@@ -84,7 +84,18 @@ pane, or a file that is `cat`ed, can print them. Halyard therefore:
   override characters from every value, and parses nothing beyond the fields above;
 * uses a report only to set the pane's displayed state, agent name and message. A
   report never runs anything, never focuses a pane, and never reaches a model;
-* does not treat `session=` as authentication. It only filters crossed wires.
+* in the app, acts on a report only when it carries `session=` with this pane's
+  `HALYARD_SESSION_ID`. A file that is `cat`ed cannot know the id (it is random per
+  pane), so its reports are plain output; a hook started in the pane gets the id
+  from its environment. This is a filter, not authentication: any program running
+  in the pane can read the id and report;
+* sends desktop notifications with text stripped of control characters, bidi
+  overrides and isolates, direction marks and zero-width characters, and capped;
+  on Linux the text is also markup-escaped (`&`, `<`, `>`), because notification
+  servers render markup such as `<a href>` and `<img>`. Tested in
+  `crates/halyard-agents/src/pane/tests.rs`
+  (`reports_without_this_panes_session_are_plain_output`) and
+  `crates/halyard-app/src/notify.rs` (`markup_is_escaped_for_the_notification_server`).
 
 A spoofed report can do two things, and both are bounded:
 

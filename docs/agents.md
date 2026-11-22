@@ -42,9 +42,21 @@ in `ui.attention` until the pane is focused.
 A pane that becomes WaitingForInput or Finished while its window is not active sends
 one desktop notification (`[agents] notify_on_waiting`, see `docs/configuration.md`).
 The title names the agent; the body is the agent's last notification text, or the tab
-title. Both come from the pane's output, so they are stripped of control and bidi
-characters and capped. Tests: `attention_ui::tests` (indicators, the tab mark, the
-decision, rate limits, sanitizing), `pane::tests` (the pipeline on a fake clock),
+title. Both come from the pane's output, so control characters, bidi overrides and
+isolates, direction marks and zero-width characters are removed, whitespace is
+collapsed, the text is capped (80 and 200 characters), and on Linux `&`, `<` and `>`
+are escaped because notification servers render markup. Nothing else is filtered:
+the text is shown as the program wrote it.
+
+Untrusted output cannot drive this by itself. The app counts a protocol report only
+when it carries `session=` with the pane's `HALYARD_SESSION_ID` (a `cat`ed file cannot
+know it), and counts OSC 9, OSC 777;notify and the bell only while an agent is active
+in the pane; before that their text is not even kept. Tests: `attention_ui::tests`
+(indicators, the tab mark, the decision, rate limits, text cleaning),
+`notify::tests::markup_is_escaped_for_the_notification_server`,
+`pane::tests::reports_without_this_panes_session_are_plain_output`,
+`notifications_and_bells_count_only_with_an_agent_in_the_foreground`,
+`focus_changes_never_swallow_another_change`, `pane::tests` (the pipeline on a fake clock),
 `signals::tests::fake_claude_notification_means_waiting` (a real program named
 `claude` printing OSC 9 in a real PTY).
 
@@ -95,7 +107,7 @@ not exited since.
 
 | # | Signal | Condition | Result | `Cause` |
 |---|--------|-----------|--------|---------|
-| 1 | Protocol report with `state=` (OSC 7717 or OSC 777;halyard) | `session=` absent or equal to the pane's id | `working` Working, `waiting` WaitingForInput, `idle` Idle, `done` Finished (with `exit=` if given), `error` Error. The agent becomes active and the protocol latch is set. | `ProtocolReport` |
+| 1 | Protocol report with `state=` (OSC 7717 or OSC 777;halyard) | `session=` equal to the pane's id (the library also accepts a report without `session=`; the app does not, see below) | `working` Working, `waiting` WaitingForInput, `idle` Idle, `done` Finished (with `exit=` if given), `error` Error. The agent becomes active and the protocol latch is set. | `ProtocolReport` |
 | 2 | OSC 9 or OSC 777;notify notification, or BEL | agent active, no protocol latch | WaitingForInput, waiting latch set | `Notification` / `Bell` |
 | 2b | The same | agent active, protocol latch set | state unchanged; the pane becomes unread if not focused | (unchanged) |
 | 3 | User input (keys, paste) | a latch is set | latch cleared; Working if output arrived within the idle period, else Idle | `UserInput` |

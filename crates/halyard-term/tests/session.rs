@@ -493,8 +493,11 @@ fn observer_sees_the_cursor_row_at_each_mark() {
     // 12 lines scroll a 5-row screen into scrollback; the mark after them must
     // count those rows, not the row on screen.
     run(&s, "printf 'm1\\033]0;x\\007\\n'; seq 1 12; printf 'm2\\033]0;y\\007\\n'; echo obs-done");
-    wait_for(&s, "the end", |f| (0..f.rows).any(|r| f.row_text(r) == "obs-done"));
+    let f = wait_for(&s, "the end", |f| (0..f.rows).any(|r| f.row_text(r) == "obs-done"));
     let rows = rows.lock().unwrap().clone();
+    // The row itself, not only the distance: the second mark was on the `m2` line.
+    let m2 = (0..f.rows).find(|&r| f.row_text(r) == "m2").expect("m2 on screen");
+    assert_eq!(rows.get(1).copied(), Some(f.scroll.offset + u64::from(m2)), "{rows:?}");
     assert_eq!(rows.len(), 2, "one row per mark: {rows:?}");
     assert_eq!(rows[1] - rows[0], 13, "12 lines of seq plus the m1 line: {rows:?}");
     assert!(*chunks.lock().unwrap() >= 1);

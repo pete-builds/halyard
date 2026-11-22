@@ -5,9 +5,15 @@
 //! * macOS: `NSUserNotificationCenter` through the Objective-C runtime (no
 //!   `osascript`). It needs a bundle identifier, so it works from `Halyard.app`;
 //!   a bare binary (`cargo run`) has none and reports that instead. GPUI 0.2.2 has
-//!   no notification API.
+//!   no notification API. macOS shows nothing while Halyard is the frontmost app
+//!   (the in-app unread pill covers that case; Halyard only notifies when its
+//!   window is not active anyway). The API is deprecated since macOS 11;
+//!   moving to `UNUserNotificationCenter` (which needs an authorization request
+//!   and a signed bundle) is a follow-up.
 //! * Linux: the freedesktop `org.freedesktop.Notifications.Notify` call over the
-//!   session D-Bus, on a background thread.
+//!   session D-Bus, from one worker thread with one reused connection. Title and
+//!   body are markup-escaped ([`escape_markup`]): notification servers render
+//!   markup in them, and the text comes from the pane.
 //! * Elsewhere: not supported, reported as such.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -81,31 +87,74 @@ pub fn send(note: &Note) -> Result<(), String> {
     Ok(())
 }
 
-/// Delivers `note` over D-Bus on a background thread.
+/// Escapes the characters freedesktop notification markup gives meaning to.
+/// The body (and, on some servers, the summary) is parsed as markup by KDE,
+/// dunst, mako and GNOME (`<a>`, `<b>`, `<img>`), so text that came from a
+/// pane must reach them as literal text.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn escape_markup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Queues `note` for the notification worker: one thread, one session-bus
+/// connection reused for every notification, and a queue of four. A full queue
+/// drops the note (the rate limit makes that rare); the pane's marks still show
+/// the state.
 #[cfg(target_os = "linux")]
 pub fn send(note: &Note) -> Result<(), String> {
-    let note = note.clone();
-    std::thread::Builder::new()
-        .name("halyard-notify".into())
-        .spawn(move || {
-            if let Err(e) = send_dbus(&note) {
-                eprintln!("halyard: desktop notification failed: {e}");
-            }
-        })
-        .map(|_| ())
-        .map_err(|e| format!("could not start the notification thread: {e}"))
+    use std::sync::OnceLock;
+    use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
+
+    static WORKER: OnceLock<Option<SyncSender<Note>>> = OnceLock::new();
+    let worker = WORKER.get_or_init(|| {
+        let (tx, rx) = sync_channel::<Note>(4);
+        std::thread::Builder::new()
+            .name("halyard-notify".into())
+            .spawn(move || {
+                let mut conn: Option<zbus::blocking::Connection> = None;
+                for note in rx {
+                    if let Err(e) = send_dbus(&mut conn, &note) {
+                        // The next note tries a fresh connection.
+                        conn = None;
+                        report_failure(&e.to_string());
+                    }
+                }
+            })
+            .ok()
+            .map(|_| tx)
+    });
+    let Some(tx) = worker else {
+        return Err("could not start the notification thread".into());
+    };
+    match tx.try_send(note.clone()) {
+        Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
+        Err(TrySendError::Disconnected(_)) => Err("the notification thread stopped".into()),
+    }
 }
 
 #[cfg(target_os = "linux")]
-fn send_dbus(note: &Note) -> zbus::Result<()> {
+fn send_dbus(conn: &mut Option<zbus::blocking::Connection>, note: &Note) -> zbus::Result<()> {
     use std::collections::HashMap;
 
     use zbus::zvariant::Value;
 
-    let conn = zbus::blocking::Connection::session()?;
+    if conn.is_none() {
+        *conn = Some(zbus::blocking::Connection::session()?);
+    }
+    let Some(c) = conn.as_ref() else { return Ok(()) };
     let actions: Vec<&str> = Vec::new();
     let hints: HashMap<&str, Value<'_>> = HashMap::new();
-    conn.call_method(
+    let (title, body) = (escape_markup(&note.title), escape_markup(&note.body));
+    c.call_method(
         Some("org.freedesktop.Notifications"),
         "/org/freedesktop/Notifications",
         Some("org.freedesktop.Notifications"),
@@ -114,8 +163,8 @@ fn send_dbus(note: &Note) -> zbus::Result<()> {
             "Halyard",
             0u32,
             "utilities-terminal",
-            note.title.as_str(),
-            note.body.as_str(),
+            title.as_str(),
+            body.as_str(),
             actions,
             hints,
             -1i32,
@@ -128,4 +177,22 @@ fn send_dbus(note: &Note) -> zbus::Result<()> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn send(_note: &Note) -> Result<(), String> {
     Err("desktop notifications are not supported on this platform".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markup_is_escaped_for_the_notification_server() {
+        let hostile =
+            r#"<a href="https://evil.example/login">Re-authenticate</a> <img src=x> & <b>"#;
+        let out = escape_markup(hostile);
+        assert_eq!(
+            out,
+            "&lt;a href=\"https://evil.example/login\"&gt;Re-authenticate&lt;/a&gt; &lt;img src=x&gt; &amp; &lt;b&gt;"
+        );
+        assert!(!out.contains('<') && !out.contains('>'));
+        assert_eq!(escape_markup("plain text"), "plain text");
+    }
 }

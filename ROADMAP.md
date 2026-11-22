@@ -182,9 +182,16 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
   `tab_mark_is_the_most_urgent_pane_and_unread_if_any_is`); verified by screenshots on
   macOS arm64
 - [x] Desktop notifications when a pane starts waiting or finishes in an inactive
-  window, rate limited, sanitized, `[agents] notify_on_waiting`
+  window, rate limited, `[agents] notify_on_waiting`
   (`attention_ui::tests::one_notification_when_waiting_in_an_inactive_window`,
-  `rate_limits_per_pane_and_per_burst`, `notification_text_is_sanitized_and_capped`).
+  `rate_limits_per_pane_and_per_burst`). Text: control, bidi, direction-mark and
+  zero-width characters removed and capped (`notification_text_is_sanitized_and_capped`),
+  markup-escaped on Linux (`markup_is_escaped_for_the_notification_server`). Protocol
+  reports count only with this pane's `session=`, notifications and bells only with an
+  agent active (`pane::tests::reports_without_this_panes_session_are_plain_output`,
+  `notifications_and_bells_count_only_with_an_agent_in_the_foreground`). macOS uses the
+  deprecated `NSUserNotificationCenter`, which shows nothing while Halyard is frontmost;
+  `UNUserNotificationCenter` is a follow-up.
   Not verified: a notification actually appearing. macOS delivers only from
   `Halyard.app` (a bare binary has no bundle id and logs that once, seen live); the
   Linux D-Bus call is compiled by CI but never run against a notification daemon.

@@ -93,18 +93,14 @@ impl WorkspaceView {
     }
 
     /// Tells each pane whether the user can see it (focused, in the shown tab,
-    /// in the active window). Returns the panes whose marks changed.
-    pub(super) fn sync_seen(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<PaneId> {
+    /// in the active window). The caller (`refresh_chrome`) redraws the marks.
+    pub(super) fn sync_seen(&mut self, window: &Window, cx: &mut Context<Self>) {
         let focused = self.model.focused();
         let active = window.is_window_active();
-        let mut changed = Vec::new();
         for (id, p) in &self.panes {
             let seen = active && Some(*id) == focused;
-            if p.view.update(cx, |v, _| v.set_seen(seen)) {
-                changed.push(*id);
-            }
+            p.view.update(cx, |v, _| v.set_seen(seen));
         }
-        changed
     }
 
     /// The attention state and unread flag of a pane.

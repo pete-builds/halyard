@@ -123,9 +123,25 @@ impl<C: Clock> PaneMonitor<C> {
         if let ShellEvent::Cwd(cwd) = event {
             self.cwd = Some(cwd.clone());
         }
-        if let Some(e) = AttentionEvent::from_shell_event(event) {
-            self.apply(e, at);
+        let Some(e) = AttentionEvent::from_shell_event(event) else { return };
+        let counts = match &e {
+            // A protocol report counts only when it names this pane's session:
+            // anything printed in the pane (a `cat` of a file) can carry a report,
+            // but only a program started in this pane can know the id, from
+            // `HALYARD_SESSION_ID`. Without it the report is plain output.
+            AttentionEvent::Report(r) => {
+                r.session.is_some() && r.session.as_deref() == self.attention.session_id()
+            }
+            // A notification or bell matters only while an agent runs, and its
+            // text is kept only then, so a `cat` before the agent starts cannot
+            // plant the message a later notification would show.
+            AttentionEvent::Notification(_) | AttentionEvent::Bell => self.attention.agent_active(),
+            _ => true,
+        };
+        if !counts {
+            return;
         }
+        self.apply(e, at);
     }
 
     /// The user typed or pasted into the pane.
@@ -134,11 +150,17 @@ impl<C: Clock> PaneMonitor<C> {
     }
 
     /// The pane gained or lost focus. Focus means the user can see the pane and
-    /// type into it: its tab is shown and its window is active.
-    pub fn set_focused(&mut self, focused: bool, at: SystemTime) {
-        if self.attention.focused() != focused {
-            self.apply(AttentionEvent::Focus(focused), at);
+    /// type into it: its tab is shown and its window is active. Returns true when
+    /// unread changed. It leaves [`PaneMonitor::take_changed`] alone: focus is
+    /// applied by the window, which redraws anyway, and consuming the flag here
+    /// would swallow a state change the session thread made at the same time.
+    pub fn set_focused(&mut self, focused: bool, at: SystemTime) -> bool {
+        if self.attention.focused() == focused {
+            return false;
         }
+        let before = self.attention.unread();
+        self.attention.handle(AttentionEvent::Focus(focused), at);
+        before != self.attention.unread()
     }
 
     /// The result of polling the pane's foreground process.

@@ -214,3 +214,77 @@ fn extra_detect_names_are_agents() {
     let empty = ProcessInfo { pid: 3, exe: None, argv: vec![String::new()] };
     assert_eq!(detect_with_extra(&empty, &[String::new()]), None);
 }
+
+#[test]
+fn reports_without_this_panes_session_are_plain_output() {
+    // What `cat hostile.txt` can print: a report with no session, or a wrong one.
+    let clock = FakeClock::new();
+    let mut scan = SignalScanner::new();
+    let mut m = monitor(&clock);
+    for chunk in [
+        &b"\x1b]7717;state=waiting;agent=Claude Code;msg=<a href=\"https://evil.example\">x</a>\x1b\\"[..],
+        b"\x1b]777;halyard;state=done;agent=claude;msg=hi\x07",
+        b"\x1b]7717;state=error;session=pane-2\x07",
+        b"\x1b]7717;msg=only a message\x07",
+    ] {
+        feed(&mut scan, &mut m, chunk, 0, clock.at());
+        assert_eq!(m.attention().state(), AttentionState::Unknown);
+        assert_eq!(m.attention().agent(), None);
+        assert_eq!(m.attention().last_notification(), None);
+        assert!(!m.take_changed());
+    }
+    // The same through the OSC 777 carrier with the right session counts.
+    feed(
+        &mut scan,
+        &mut m,
+        b"\x1b]777;halyard;state=waiting;agent=claude;session=pane-1\x07",
+        0,
+        clock.at(),
+    );
+    assert_eq!(m.attention().state(), AttentionState::WaitingForInput);
+}
+
+#[test]
+fn notifications_and_bells_count_only_with_an_agent_in_the_foreground() {
+    let clock = FakeClock::new();
+    let mut scan = SignalScanner::new();
+    let mut m = monitor(&clock);
+    for chunk in
+        [&b"\x1b]9;Re-authenticate now\x07"[..], b"\x1b]777;notify;Title;Body\x07", b"\x07"]
+    {
+        feed(&mut scan, &mut m, chunk, 0, clock.at());
+        assert_eq!(m.attention().state(), AttentionState::Unknown);
+        assert_eq!(m.attention().last_notification(), None, "no text is kept without an agent");
+    }
+    m.on_foreground(&claude(), clock.at());
+    feed(&mut scan, &mut m, b"\x1b]777;notify;Claude;Approve?\x07", 0, clock.at());
+    assert_eq!(m.attention().state(), AttentionState::WaitingForInput);
+    assert_eq!(m.attention().last_notification(), Some("Claude: Approve?"));
+    // After the agent leaves, a notification is plain output again.
+    m.on_foreground(&Foreground::Shell, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]9;later\x07", 0, clock.at());
+    assert_eq!(m.attention().last_notification(), Some("Claude: Approve?"));
+}
+
+#[test]
+fn focus_changes_never_swallow_another_change() {
+    // Two panes change in the same tick; the window then syncs focus on every
+    // pane before either pane's own event path runs. Both changes must survive.
+    let clock = FakeClock::new();
+    let mut scan_a = SignalScanner::new();
+    let mut scan_b = SignalScanner::new();
+    let mut a = monitor(&clock);
+    let mut b = monitor(&clock);
+    for m in [&mut a, &mut b] {
+        m.on_foreground(&claude(), clock.at());
+        assert!(m.take_changed());
+    }
+    feed(&mut scan_a, &mut a, b"\x1b]9;A needs you\x07", 0, clock.at());
+    feed(&mut scan_b, &mut b, b"\x1b]9;B needs you\x07", 0, clock.at());
+    // The window's focus sync touches both panes (A gains focus, B stays unfocused).
+    assert!(a.set_focused(true, clock.at()), "A's unread cleared");
+    assert!(!b.set_focused(false, clock.at()), "B already unfocused");
+    assert!(a.take_changed(), "A's waiting change is still pending");
+    assert!(b.take_changed(), "B's waiting change is still pending");
+    assert!(b.attention().unread());
+}

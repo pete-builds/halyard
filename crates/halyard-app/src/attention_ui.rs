@@ -147,11 +147,24 @@ pub struct Notifier {
     recent: VecDeque<Instant>,
 }
 
-/// Sanitizes untrusted text for a notification: control and bidi characters
-/// removed, runs of whitespace collapsed to one space, capped at `max`
-/// characters (an ellipsis marks a cut).
+/// Direction marks and zero-width characters, which `sanitize` keeps but which
+/// can reorder or hide text in a notification: U+200E, U+200F, U+061C, U+200B to
+/// U+200D, U+2060 and U+FEFF.
+fn is_invisible(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{061C}' | '\u{2060}' | '\u{FEFF}')
+}
+
+/// Sanitizes untrusted text for a notification: control characters, bidi
+/// overrides and isolates, direction marks and zero-width characters removed,
+/// runs of whitespace collapsed to one space, capped at `max` characters (an
+/// ellipsis marks a cut). Markup is not escaped here; the Linux sender does
+/// that (`notify::escape_markup`).
 pub fn clean(text: &str, max: usize) -> String {
-    let spaced: String = text.chars().map(|c| if c.is_whitespace() { ' ' } else { c }).collect();
+    let spaced: String = text
+        .chars()
+        .filter(|c| !is_invisible(*c))
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
     let s = sanitize(&spaced, usize::MAX);
     let words: Vec<&str> = s.split_whitespace().collect();
     let joined = words.join(" ");
@@ -343,6 +356,8 @@ mod tests {
         assert_eq!(note.body.chars().count(), MAX_BODY);
         assert!(note.body.ends_with('…'));
         assert!(!note.body.chars().any(char::is_control));
+        let marks = "a\u{200E}b\u{200F}c\u{061C}d\u{200B}e\u{200D}f\u{2060}g\u{FEFF}h";
+        assert_eq!(clean(marks, 80), "abcdefgh");
         // No message: the tab title, also cleaned. No agent: a generic name.
         let c =
             Change { agent: None, message: None, tab_title: "a\tb\u{0}c", ..change("b", WORK, W) };

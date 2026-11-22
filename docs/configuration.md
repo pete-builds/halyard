@@ -215,8 +215,10 @@ at any point, revoke it.
 Desktop notifications use `NSUserNotificationCenter` on macOS, which needs the app bundle
 (`Halyard.app`); a bare `cargo run` binary has no bundle identifier and says so once on
 stderr. On Linux they go to the freedesktop notification service over the session D-Bus.
-The text comes from the program in the pane, so it is stripped of control and bidi
-characters and capped (80 characters for the title, 200 for the body).
+The text comes from the program in the pane, so control characters, bidi overrides,
+direction marks and zero-width characters are removed and it is capped (80 characters
+for the title, 200 for the body); on Linux `&`, `<` and `>` are also escaped. macOS shows
+nothing while Halyard is the frontmost app; the unread pill on the tab covers that case.
 
 ## Saved workspaces
 

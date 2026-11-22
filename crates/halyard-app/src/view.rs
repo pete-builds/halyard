@@ -370,12 +370,11 @@ impl TerminalView {
     }
 
     /// Whether the user can see and type into this pane (its tab is shown and
-    /// its window is active). Gaining it clears unread. Returns true when what
-    /// the pane shows changed.
+    /// its window is active). Gaining it clears unread. Returns true when
+    /// unread changed. A pending state change stays pending for the pane's own
+    /// event path, so it still notifies.
     pub fn set_seen(&mut self, seen: bool) -> bool {
-        let mut m = signals::lock(&self.monitor);
-        m.set_focused(seen, SystemTime::now());
-        m.take_changed()
+        signals::lock(&self.monitor).set_focused(seen, SystemTime::now())
     }
 
     /// The user typed or pasted.
