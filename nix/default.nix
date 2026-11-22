@@ -232,6 +232,8 @@ let
       inherit version src;
     };
 
+    package-contents = import ./checks/package.nix { inherit pkgs halyard; };
+
     ghostty-pin = import ./checks/ghostty-pin.nix {
       inherit pkgs cargoVendorDir;
       ghosttyRev = ghosttySrc.rev;
