@@ -56,19 +56,19 @@ CVE-2024-38396 class). So the engine adapter filters replies through an allowlis
 
 | Answered | Reply | Why it is safe |
 |----------|-------|----------------|
-| DA1, DA2 (`CSI c`, `CSI > c`) | `CSI ? 62;... c`, `CSI > 1;10;0 c` | Fixed numbers |
+| DA1, DA2 (`CSI c`, `CSI > c`) | `CSI ? 62;... c`, `CSI > 1;1;0 c` | Fixed numbers |
 | DA3 (`CSI = c`) | `DCS ! \| hex ST` | Fixed hex |
 | DSR, CPR (`CSI 5 n`, `CSI 6 n`) | `CSI 0 n`, `CSI row;col R` | Numbers |
 | DECRQM (`CSI ? n $ p`) | `CSI ? n;v $ y` | Numbers |
 | Kitty keyboard flags (`CSI ? u`) | `CSI ? flags u` | Numbers |
 | XTWINOPS sizes (`CSI 14/16/18 t`) | `CSI 4/6/8;h;w t` | Numbers |
-| Color scheme (`CSI ? 996 n`) | `CSI ? 997;n n` | Numbers |
 | XTVERSION (`CSI > q`) | `DCS > \| Halyard <version> ST` | Our own string, matched exactly |
 | Color queries (OSC 4, OSC 10 to 19 with `?`) | `OSC n;rgb:hex/hex/hex ST` | Hex color only |
 
 Dropped: title and icon reports (`CSI 20 t`, `CSI 21 t`), DECRQSS, XTGETTCAP, the ENQ
-answerback, and any byte outside a recognized sequence. A CSI reply is kept only if its
-parameters are digits and `; : < = > ?`, so no application text can ride along. Tests:
+answerback, the color-scheme query (`CSI ? 996 n`, not answered today), and any byte outside a
+recognized sequence. A CSI reply is kept only if its parameter bytes are in 0x20 to 0x3f, the
+bytes the engine itself writes there, so no application text can ride along. Tests:
 `title_reports_are_never_sent_back`, `reply_filter_allowlist`,
 `safe_query_replies_still_flow`, and end to end `title_report_cannot_inject_a_command`.
 
@@ -76,7 +76,9 @@ parameters are digits and `; : < = > ?`, so no application text can ride along. 
 
 Dropping a `Session` stops its program the way closing a terminal window does: SIGHUP to
 the PTY's foreground process group and to the shell, then SIGKILL to the shell if it is
-still running two seconds later. The reader thread waits with `poll` on the PTY and on a
+still running two seconds later. A session whose program has already exited and been
+reaped sends no signal at all on close, because its pid and process group may have been
+reused (`a_reaped_child_is_never_signalled`). The reader thread waits with `poll` on the PTY and on a
 wake pipe; the session thread closes the pipe (and drops the output channel) on shutdown,
 so the reader exits even when a background job that ignores SIGHUP keeps the PTY open.
 Tests: `dropping_the_session_kills_the_program`,

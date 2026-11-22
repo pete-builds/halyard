@@ -250,6 +250,12 @@ fn new_session_id() -> String {
 const SCRUBBED_VARS: &[&str] = &[
     "TMUX",
     "TMUX_PANE",
+    "STY",
+    "ZELLIJ",
+    "ZELLIJ_SESSION_NAME",
+    "ZELLIJ_PANE_ID",
+    "TERM_FEATURES",
+    "TERMINAL_EMULATOR",
     "ITERM_SESSION_ID",
     "ITERM_PROFILE",
     "LC_TERMINAL",
@@ -262,12 +268,37 @@ const SCRUBBED_VARS: &[&str] = &[
 ];
 
 /// Prefixes of inherited variables to remove, as for [`SCRUBBED_VARS`].
-const SCRUBBED_PREFIXES: &[&str] = &["GHOSTTY_", "KITTY_", "WEZTERM_", "ALACRITTY_"];
+const SCRUBBED_PREFIXES: &[&str] = &["GHOSTTY_", "KITTY_", "WEZTERM_", "ALACRITTY_", "KONSOLE_"];
 
 /// True if an inherited variable belongs to another terminal and must not
 /// reach programs run by Halyard.
 fn is_foreign_terminal_var(name: &str) -> bool {
     SCRUBBED_VARS.contains(&name) || SCRUBBED_PREFIXES.iter().any(|p| name.starts_with(p))
+}
+
+/// Which signals closing a session sends.
+///
+/// Once the child has exited and been reaped, its pid and process group id can be reused by
+/// unrelated processes, so a pane left on "process exited" and closed later must not signal
+/// anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ShutdownPlan {
+    /// SIGHUP to the PTY's foreground process group.
+    hangup_group: bool,
+    /// SIGHUP to the child (the shell).
+    hangup_child: bool,
+    /// SIGKILL to the child if it is still running after the grace period.
+    force_kill_after_grace: bool,
+}
+
+impl ShutdownPlan {
+    const fn for_child(child_running: bool) -> Self {
+        Self {
+            hangup_group: child_running,
+            hangup_child: child_running,
+            force_kill_after_grace: child_running,
+        }
+    }
 }
 
 fn build_command(config: &SessionConfig, session_id: &str) -> CommandBuilder {
@@ -680,13 +711,16 @@ impl SessionThread {
     /// foreground process group and to the shell, stop the reader, then
     /// SIGKILL the shell if it is still running after a grace period.
     fn shutdown(&mut self, child_running: bool) {
-        if let Some(pgrp) = self.master.process_group_leader()
+        let plan = ShutdownPlan::for_child(child_running);
+        if plan.hangup_group
+            && let Some(pgrp) = self.master.process_group_leader()
             && pgrp > 0
         {
             // SAFETY: killpg has no memory-safety preconditions.
             unsafe { libc::killpg(pgrp, libc::SIGHUP) };
         }
-        if let Err(e) = self.killer.kill()
+        if plan.hangup_child
+            && let Err(e) = self.killer.kill()
             && e.raw_os_error() != Some(libc::ESRCH)
         {
             eprintln!("halyard-term: stopping the child: {e}");
@@ -695,7 +729,7 @@ impl SessionThread {
         // receiver in case it is blocked handing over a chunk.
         self.wake = None;
         self.out_rx = never();
-        if child_running
+        if plan.force_kill_after_grace
             && self.exit_rx.recv_timeout(Duration::from_secs(2)).is_err()
             && let Some(pid) = self.pid.and_then(|p| libc::pid_t::try_from(p).ok())
         {
@@ -943,12 +977,27 @@ mod tests {
             "VTE_VERSION",
             "WT_SESSION",
             "ALACRITTY_WINDOW_ID",
+            "STY",
+            "ZELLIJ",
+            "ZELLIJ_SESSION_NAME",
+            "TERM_FEATURES",
+            "TERMINAL_EMULATOR",
+            "KONSOLE_DBUS_SESSION",
         ] {
             assert!(is_foreign_terminal_var(name), "{name}");
         }
         for name in ["HOME", "PATH", "TERM", "LANG", "TMUXINATOR_CONFIG", "KITTYX"] {
             assert!(!is_foreign_terminal_var(name), "{name}");
         }
+    }
+
+    #[test]
+    fn a_reaped_child_is_never_signalled() {
+        // Its pid and process group may already belong to another process.
+        let plan = ShutdownPlan::for_child(false);
+        assert!(!plan.hangup_group && !plan.hangup_child && !plan.force_kill_after_grace);
+        let plan = ShutdownPlan::for_child(true);
+        assert!(plan.hangup_group && plan.hangup_child && plan.force_kill_after_grace);
     }
 
     #[test]
