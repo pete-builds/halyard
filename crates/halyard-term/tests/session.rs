@@ -120,8 +120,12 @@ fn default_program_is_a_login_shell() {
     // shell (argv[0] starts with '-'). Its prompt is whatever the user has.
     let s = Session::spawn(SessionConfig::default()).expect("spawn login shell");
     s.write("echo login-check:$0\r");
+    // The line is typed before the first prompt appears, so the output can land
+    // after a prompt on the same row ("-bash-5.3$ login-check:-bash", seen in
+    // the Nix sandbox): look for it anywhere in the row. The typed command
+    // itself reads "login-check:$0" and cannot match.
     wait_for(&s, "login shell argv[0]", |f| {
-        (0..f.rows).any(|r| f.row_text(r).starts_with("login-check:-"))
+        (0..f.rows).any(|r| f.row_text(r).contains("login-check:-"))
     });
 }
 
