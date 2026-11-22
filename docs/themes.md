@@ -92,11 +92,15 @@ equal theme (a test round-trips all bundled themes). User themes are `*.toml` fi
 replaces it. A file that fails to parse is reported with its path, line and key, and does not
 stop the others from loading.
 
-**Ghostty format.** `Theme::from_ghostty(name, text)` reads `key = value` lines: `palette =
-N=#rrggbb` (N 0 to 15, higher indexes ignored), `background`, `foreground`, `cursor-color`,
-`cursor-text`, `selection-background`, `selection-foreground`. Comments and other keys are
-ignored. `background` and `foreground` are required. Palette slots the file omits take the
-classic xterm colors. The appearance is guessed from the background.
+**Ghostty format.** `Theme::from_ghostty_with_warnings(name, text)` (and `from_ghostty`, which drops the
+warnings) reads `key = value` lines: `palette = N=color` (N 0 to 15, higher indexes ignored),
+`background`, `foreground`, `cursor-color`, `cursor-text`, `selection-background`,
+`selection-foreground`. Colors are hex with or without `#`, or a common X11 name. For the
+selection and cursor keys, `cell-foreground` and `cell-background` mean "unset", so the
+value is derived. A color Halyard cannot read on any key except `background` and `foreground`
+is reported as a warning and skipped. Comments and other keys are ignored. `background` and
+`foreground` are required. Palette slots the file omits take the classic xterm colors. The
+appearance is guessed from the background.
 
 ### Derivation of `ui` tokens
 

@@ -1,4 +1,5 @@
-# Paper Chart: high-contrast light theme. Every ANSI color reaches 4.5:1.
+# Paper Chart: high-contrast light theme. Every ANSI color reaches 4.5:1 on the background except slots 7 and 15 (the light-theme
+# white and bright white), which are exempt because they exist to be light.
 name = "Paper Chart"
 appearance = "light"
 high_contrast = true

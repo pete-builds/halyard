@@ -271,6 +271,102 @@ fn api_key_env_must_be_a_variable_name_not_a_key() {
     assert!(!e.to_string().contains("sk-ant"), "the pasted key must not be echoed back");
 }
 
+/// Parse `src`, assert it fails or warns, and assert `secret` is in none of the text.
+fn assert_secret_absent(src: &str, secret: &str) {
+    match Config::parse(src) {
+        Err(e) => {
+            assert!(!e.to_string().contains(secret), "error echoed the secret: {e}");
+            assert!(!format!("{e:?}").contains(secret), "error debug echoed the secret: {e:?}");
+        }
+        Ok(l) => {
+            for w in &l.warnings {
+                assert!(!w.to_string().contains(secret), "warning echoed the secret: {w}");
+            }
+            panic!("expected an error for {src}");
+        }
+    }
+}
+
+const SECRET: &str = "sk-ant-api03-SUPERSECRET";
+const PROV: &str = "[[ai.providers]]\nname = \"a\"\nmodel = \"m\"\n";
+
+#[test]
+fn secret_in_kind_is_not_echoed() {
+    assert_secret_absent(&format!("{PROV}kind = \"{SECRET}\"\n"), SECRET);
+}
+
+#[test]
+fn secret_as_integer_api_key_env_is_not_echoed() {
+    let src = format!("{PROV}kind = \"anthropic\"\napi_key_env = 12345678\n");
+    assert_secret_absent(&src, "12345678");
+}
+
+#[test]
+fn secret_in_base_url_is_not_echoed() {
+    let src = format!("{PROV}kind = \"ollama\"\nbase_url = \"{SECRET}\"\n");
+    assert_secret_absent(&src, SECRET);
+}
+
+#[test]
+fn base_url_with_userinfo_is_rejected_without_echo() {
+    let src =
+        format!("{PROV}kind = \"ollama\"\nbase_url = \"https://u:{SECRET}@host.example/v1\"\n");
+    let e = err(&src);
+    assert_eq!(e.key.as_deref(), Some("ai.providers[0].base_url"));
+    assert!(e.message.contains("credentials"), "{e}");
+    assert_secret_absent(&src, SECRET);
+    assert_secret_absent(&src, "u:");
+    // Control: the same URL without userinfo is fine, and an `@` in the path is not userinfo.
+    let ok = format!("{PROV}kind = \"ollama\"\nbase_url = \"https://host.example/@v1\"\n");
+    assert!(Config::parse(&ok).is_ok());
+}
+
+#[test]
+fn secret_in_duplicate_provider_name_is_not_echoed() {
+    let one =
+        format!("[[ai.providers]]\nname = \"{SECRET}\"\nkind = \"anthropic\"\nmodel = \"m\"\n");
+    assert_secret_absent(&format!("{one}{one}"), SECRET);
+}
+
+#[test]
+fn secret_in_wrongly_typed_ai_value_is_not_echoed() {
+    assert_secret_absent(&format!("[ai]\nenabled = \"{SECRET}\"\n"), SECRET);
+    assert_secret_absent(
+        &format!("{PROV}kind = \"anthropic\"\nmodel = 7\nname = \"{SECRET}\"\n"),
+        SECRET,
+    );
+}
+
+#[test]
+fn secret_in_ai_syntax_error_is_not_echoed() {
+    assert_secret_absent(&format!("{PROV}kind = \"anthropic\"\napi_key_env = {SECRET}\n"), SECRET);
+}
+
+#[test]
+fn secret_like_key_names_are_rejected_case_insensitively_anywhere_under_ai() {
+    for k in ["API_KEY", "Authorization", "x-api-key", "Bearer_Token", "DB_PASSWD", "ApiSecret"] {
+        let provider = format!("{PROV}kind = \"anthropic\"\n\"{k}\" = \"{SECRET}\"\n");
+        let e = err(&provider);
+        assert!(e.message.contains("never stores API keys"), "{k}: {e}");
+        assert_secret_absent(&provider, SECRET);
+        // Directly under [ai], not only in a provider.
+        let top = format!("[ai]\n\"{k}\" = \"{SECRET}\"\n");
+        let e = err(&top);
+        assert_eq!(e.key.as_deref(), Some(format!("ai.{k}").as_str()));
+        assert!(e.message.contains("never stores API keys"), "{k}: {e}");
+        assert_secret_absent(&top, SECRET);
+        // Nested in a table inside a provider, e.g. headers.
+        let nested =
+            format!("{PROV}kind = \"anthropic\"\n[ai.providers.headers]\n\"{k}\" = \"{SECRET}\"\n");
+        assert!(err(&nested).message.contains("never stores API keys"), "{k}");
+        assert_secret_absent(&nested, SECRET);
+    }
+    // Control: the documented `api_key_env` is not mistaken for a secret.
+    assert!(
+        Config::parse(&format!("{PROV}kind = \"anthropic\"\napi_key_env = \"MY_KEY\"\n")).is_ok()
+    );
+}
+
 #[test]
 fn provider_validation() {
     let base = "[[ai.providers]]\nname = \"a\"\nkind = \"ollama\"\nmodel = \"m\"\n";
@@ -283,7 +379,8 @@ fn provider_validation() {
     assert_eq!(e.key.as_deref(), Some("ai.providers[1].name"));
     assert_eq!(e.line, Some(7));
     let e = err("[[ai.providers]]\nname = \"a\"\nkind = \"carrier-pigeon\"\nmodel = \"m\"\n");
-    assert!(e.message.contains("carrier-pigeon"), "{e}");
+    assert_eq!(e.key.as_deref(), Some("ai.providers.kind"));
+    assert!(!e.to_string().contains("carrier-pigeon"), "[ai] values are never echoed: {e}");
     let ok = Config::parse("[[ai.providers]]\nname = \"c\"\nkind = \"anthropic\"\nmodel = \"m\"\n")
         .unwrap();
     assert_eq!(ok.config.ai.providers[0].base_url, None);

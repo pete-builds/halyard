@@ -23,6 +23,7 @@ pub use config::{
 pub use keys::{Action, ChordError, Key, KeyChord, Keymap, Mods, NamedKey, Platform};
 pub use theme::{
     Appearance, ContrastFailure, Entry, Origin, TerminalColors, TerminalPalette, Theme, ThemeError,
-    ThemeRegistry, UiColors, check_contrast, contrast_ratio, derive_ui, relative_luminance,
+    ThemeRegistry, ThemeWarning, UiColors, check_contrast, contrast_ratio, derive_ui,
+    relative_luminance,
 };
 pub use watcher::{ConfigEvent, ConfigWatcher};

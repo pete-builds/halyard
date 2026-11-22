@@ -164,6 +164,26 @@ impl fmt::Display for ThemeError {
 
 impl std::error::Error for ThemeError {}
 
+/// A non-fatal problem while importing a theme: something was skipped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThemeWarning {
+    /// The key the warning is about.
+    pub key: String,
+    /// 1-based source line.
+    pub line: Option<usize>,
+    /// What was skipped and why.
+    pub message: String,
+}
+
+impl fmt::Display for ThemeWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.line {
+            Some(l) => write!(f, "line {l}: key `{}`: {}", self.key, self.message),
+            None => write!(f, "key `{}`: {}", self.key, self.message),
+        }
+    }
+}
+
 impl ThemeError {
     fn new(message: impl Into<String>) -> Self {
         Self { file: None, key: None, line: None, message: message.into() }
@@ -183,12 +203,13 @@ impl ThemeError {
 // Contrast (WCAG 2.x)
 // ---------------------------------------------------------------------------
 
-/// WCAG relative luminance of an sRGB color, in `0.0..=1.0`.
+/// WCAG 2.1 relative luminance of an sRGB color, in `0.0..=1.0`. The linearization
+/// threshold is 0.04045 (the sRGB standard's value; WCAG 2.0 printed 0.03928).
 #[must_use]
 pub fn relative_luminance(c: Rgb) -> f64 {
     fn lin(v: u8) -> f64 {
         let s = f64::from(v) / 255.0;
-        if s <= 0.03928 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+        if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
     }
     0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
 }
@@ -631,18 +652,47 @@ impl Theme {
         toml::to_string_pretty(&export).expect("a struct of strings always serializes to TOML")
     }
 
+    /// Import a Ghostty-format theme file, discarding warnings. See
+    /// [`Theme::from_ghostty_with_warnings`], which reports what was skipped.
+    ///
+    /// # Errors
+    /// Same as [`Theme::from_ghostty_with_warnings`].
+    pub fn from_ghostty(name: &str, src: &str) -> Result<Theme, ThemeError> {
+        Self::from_ghostty_with_warnings(name, src).map(|(t, _)| t)
+    }
+
     /// Import a Ghostty-format theme file: `key = value` lines with
-    /// `palette = N=#rrggbb`, `background`, `foreground`, `cursor-color`,
+    /// `palette = N=color`, `background`, `foreground`, `cursor-color`,
     /// `cursor-text`, `selection-background` and `selection-foreground`.
     /// Other keys and `#` comment lines are ignored. Palette slots 0 to 15 that
     /// the file leaves out take the classic xterm defaults. The appearance is
     /// guessed from the background and the `ui` tokens come from [`derive_ui`].
     ///
+    /// Color syntax. Ghostty's reference (<https://ghostty.org/docs/config/reference>,
+    /// read 2026-11-22) says `background` and `foreground` take "either hex (`#RRGGBB` or
+    /// `RRGGBB`) or a named X11 color", that `palette` takes `N=COLOR` with the same
+    /// color forms, and that since 1.2.0 `selection-foreground` and `selection-background`
+    /// "can also be set to `cell-foreground` ... or `cell-background`". So this importer
+    /// accepts hex with or without `#`, a built-in subset of the X11 names (see
+    /// `x11_color`; the full X11 table is not bundled), and treats the two `cell-*`
+    /// words as "unset", which derives the selection colors. The reference does not
+    /// list the names themselves, so the subset is the common ones, with X11 values
+    /// (for example X11 `green` is `#00ff00` and `gray` is `#bebebe`).
+    ///
+    /// A color this importer cannot read on any key other than `background` and
+    /// `foreground` becomes a [`ThemeWarning`] and the key is treated as unset, so one
+    /// exotic value does not discard a whole theme file.
+    ///
     /// # Errors
-    /// Returns a [`ThemeError`] with the line number for a malformed color or
-    /// palette entry, or when `background` or `foreground` is missing.
-    pub fn from_ghostty(name: &str, src: &str) -> Result<Theme, ThemeError> {
+    /// Returns a [`ThemeError`] with the line number for an unreadable `background` or
+    /// `foreground`, a `palette` entry that is not in `N=color` form, or when `background`
+    /// or `foreground` is missing.
+    pub fn from_ghostty_with_warnings(
+        name: &str,
+        src: &str,
+    ) -> Result<(Theme, Vec<ThemeWarning>), ThemeError> {
         let mut ansi: [Option<Rgb>; 16] = [None; 16];
+        let mut warnings = Vec::new();
         let (mut fg, mut bg, mut cursor, mut cursor_text, mut sel_bg, mut sel_fg) =
             (None, None, None, None, None, None);
         for (i, line) in src.lines().enumerate() {
@@ -653,10 +703,24 @@ impl Theme {
             }
             let Some((k, v)) = l.split_once('=') else { continue };
             let (k, v) = (k.trim(), v.trim().trim_matches('"'));
-            let color = |what: &str, v: &str| {
-                Rgb::from_hex(v).ok_or_else(|| {
-                    ThemeError::at(what, Some(n), format!("`{v}` is not a color; expected #rrggbb"))
+            let essential = |v: &str| {
+                ghostty_color(v).ok_or_else(|| {
+                    ThemeError::at(k, Some(n), format!("`{v}` is not a color Halyard can read"))
                 })
+            };
+            let mut optional = |v: &str, cell_is_unset: bool| -> Option<Rgb> {
+                if cell_is_unset && matches!(v, "cell-background" | "cell-foreground") {
+                    return None;
+                }
+                let c = ghostty_color(v);
+                if c.is_none() {
+                    warnings.push(ThemeWarning {
+                        key: k.to_string(),
+                        line: Some(n),
+                        message: format!("`{v}` is not a color Halyard can read; ignored"),
+                    });
+                }
+                c
             };
             match k {
                 "palette" => {
@@ -664,7 +728,7 @@ impl Theme {
                         return Err(ThemeError::at(
                             "palette",
                             Some(n),
-                            format!("`{v}` is not in N=#rrggbb form"),
+                            format!("`{v}` is not in N=color form"),
                         ));
                     };
                     let idx: usize = idx.trim().parse().map_err(|_| {
@@ -674,17 +738,17 @@ impl Theme {
                             format!("`{}` is not a palette index", idx.trim()),
                         )
                     })?;
-                    let c = color("palette", c.trim())?;
-                    if let Some(slot) = ansi.get_mut(idx) {
+                    let c = optional(c.trim(), false);
+                    if let (Some(slot), Some(c)) = (ansi.get_mut(idx), c) {
                         *slot = Some(c);
                     }
                 }
-                "background" => bg = Some(color(k, v)?),
-                "foreground" => fg = Some(color(k, v)?),
-                "cursor-color" => cursor = Some(color(k, v)?),
-                "cursor-text" => cursor_text = Some(color(k, v)?),
-                "selection-background" => sel_bg = Some(color(k, v)?),
-                "selection-foreground" => sel_fg = Some(color(k, v)?),
+                "background" => bg = Some(essential(v)?),
+                "foreground" => fg = Some(essential(v)?),
+                "cursor-color" => cursor = optional(v, true),
+                "cursor-text" => cursor_text = optional(v, true),
+                "selection-background" => sel_bg = optional(v, true),
+                "selection-foreground" => sel_fg = optional(v, true),
                 _ => {}
             }
         }
@@ -709,13 +773,14 @@ impl Theme {
             ansi: full,
         };
         let ui = derive_ui(&terminal);
-        Ok(Theme {
+        let theme = Theme {
             name: name.to_string(),
             appearance: appearance_of_background(background),
             high_contrast: false,
             terminal,
             ui,
-        })
+        };
+        Ok((theme, warnings))
     }
 
     /// The engine-facing palette as plain data.
@@ -732,6 +797,36 @@ impl Theme {
             selection_fg: t.selection_fg,
         }
     }
+}
+
+/// A color in Ghostty syntax: hex with or without `#`, or a common X11 name
+/// (case-insensitive, spaces ignored). Not the full X11 table; see
+/// [`Theme::from_ghostty_with_warnings`].
+fn ghostty_color(v: &str) -> Option<Rgb> {
+    if let Some(c) = Rgb::from_hex(v) {
+        return Some(c);
+    }
+    let name: String =
+        v.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    let (r, g, b) = match name.as_str() {
+        "black" => (0x00, 0x00, 0x00),
+        "white" => (0xff, 0xff, 0xff),
+        "red" => (0xff, 0x00, 0x00),
+        "green" => (0x00, 0xff, 0x00),
+        "blue" => (0x00, 0x00, 0xff),
+        "yellow" => (0xff, 0xff, 0x00),
+        "cyan" | "aqua" => (0x00, 0xff, 0xff),
+        "magenta" | "fuchsia" => (0xff, 0x00, 0xff),
+        "gray" | "grey" => (0xbe, 0xbe, 0xbe),
+        "darkgray" | "darkgrey" => (0xa9, 0xa9, 0xa9),
+        "lightgray" | "lightgrey" => (0xd3, 0xd3, 0xd3),
+        "orange" => (0xff, 0xa5, 0x00),
+        "purple" => (0xa0, 0x20, 0xf0),
+        "pink" => (0xff, 0xc0, 0xcb),
+        "brown" => (0xa5, 0x2a, 0x2a),
+        _ => return None,
+    };
+    Some(Rgb::new(r, g, b))
 }
 
 /// Classic xterm colors, used for palette slots a Ghostty file leaves out.
@@ -754,6 +849,16 @@ const XTERM_DEFAULT_ANSI: [Rgb; 16] = [
     Rgb::new(0xff, 0xff, 0xff),
 ];
 
+/// Line of the `index`-th entry of `terminal.ansi`, from the TOML parser's own spans.
+fn ansi_entry_line(src: &str, index: usize) -> Option<usize> {
+    let doc = toml::de::DeTable::parse(src).ok()?;
+    let (_, terminal) = doc.get_ref().iter().find(|(k, _)| k.get_ref().as_ref() == "terminal")?;
+    let (_, ansi) =
+        terminal.get_ref().as_table()?.iter().find(|(k, _)| k.get_ref().as_ref() == "ansi")?;
+    let item = ansi.get_ref().as_array()?.get(index)?;
+    Some(line_of_offset(src, item.span().start))
+}
+
 fn parse_ansi(cx: &Ctx<'_>, raw: &RawAnsi) -> Result<[Rgb; 16], ThemeError> {
     let mut out = [Rgb::default(); 16];
     match raw {
@@ -767,10 +872,9 @@ fn parse_ansi(cx: &Ctx<'_>, raw: &RawAnsi) -> Result<[Rgb; 16], ThemeError> {
             }
             for (i, s) in list.iter().enumerate() {
                 out[i] = Rgb::from_hex(s.trim()).ok_or_else(|| {
-                    let off = cx.src.find(s.as_str()).unwrap_or(0);
                     ThemeError::at(
                         &format!("terminal.ansi[{i}]"),
-                        Some(line_of_offset(cx.src, off)),
+                        ansi_entry_line(cx.src, i),
                         format!("`{s}` is not a color; expected #rrggbb"),
                     )
                 })?;
@@ -940,10 +1044,12 @@ impl ThemeRegistry {
 
     /// The default theme for an appearance: Halyard Night for dark, Halyard Day for light.
     ///
+    /// If a user theme with the same name replaced the bundled default, the
+    /// replacement is returned, whatever its appearance.
+    ///
     /// # Panics
-    /// Only if a user theme replaced it with a different appearance and then
-    /// the bundled one is gone too; the bundled themes cannot be removed, so a
-    /// replacement always still exists.
+    /// Never in practice: bundled themes cannot be removed, only replaced, so
+    /// the default name always resolves.
     #[must_use]
     pub fn default_for(&self, appearance: Appearance) -> &Theme {
         let name = match appearance {

@@ -1,4 +1,5 @@
-# Signal Flare: high-contrast dark theme. Every ANSI color reaches 4.5:1.
+# Signal Flare: high-contrast dark theme. Every ANSI color reaches 4.5:1 on the background except slots 0 and 8 (the dark-theme
+# black and bright black), which are exempt because they exist to be dark.
 name = "Signal Flare"
 appearance = "dark"
 high_contrast = true

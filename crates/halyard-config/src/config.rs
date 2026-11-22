@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::keys::{Action, KeyChord, Keymap, Platform, UNBIND};
-use crate::locate::{find_header_line, find_key_line, key_at_offset, line_of_offset};
+use crate::locate::{
+    find_header_line, find_key_line, key_at_offset, line_of_offset, section_at_offset,
+};
 use crate::theme::{Appearance, DEFAULT_DARK, DEFAULT_LIGHT};
 
 /// The commented default configuration, as printed by `halyard config --print-default`.
@@ -380,9 +382,34 @@ const THEME_KEYS: &[&str] = &["name", "light", "dark"];
 const AI_KEYS: &[&str] = &["enabled", "providers"];
 const PROVIDER_KEYS: &[&str] = &["name", "kind", "base_url", "model", "api_key_env"];
 const AGENTS_KEYS: &[&str] = &["notify_on_waiting", "detect"];
-/// Names a user might give a secret. Rejected in provider entries.
-const SECRET_KEYS: &[&str] =
-    &["api_key", "apikey", "api-key", "key", "token", "secret", "password", "access_token"];
+/// Substrings that make a key name look like it holds a secret (matched case-insensitively).
+/// Applies to every key under `[ai]`, except the documented names such as `api_key_env`.
+const SECRET_FRAGMENTS: &[&str] = &["key", "token", "secret", "password", "passwd", "auth"];
+
+/// Shown instead of serde's or toml's own message for anything wrong inside `[ai]`, because
+/// those messages quote the offending value and a user may have pasted a key there.
+const AI_REDACTED: &str = "invalid value or syntax; details withheld because the value of an \
+     `[ai]` key could be a secret and is never echoed. See docs/configuration.md for the \
+     expected type, and if you pasted a key here, revoke it";
+
+/// Whether `key` is a documented `[ai]` or `[[ai.providers]]` key.
+fn is_known_ai_key(key: &str) -> bool {
+    AI_KEYS.contains(&key) || PROVIDER_KEYS.contains(&key)
+}
+
+/// Whether an undocumented `[ai]` key looks like it holds a secret.
+fn is_secret_key(key: &str) -> bool {
+    if is_known_ai_key(key) {
+        return false;
+    }
+    let lower = key.to_ascii_lowercase();
+    SECRET_FRAGMENTS.iter().any(|f| lower.contains(f))
+}
+
+/// Whether the section name is `ai` or inside it.
+fn is_ai_section(section: &str) -> bool {
+    section == "ai" || section.starts_with("ai.")
+}
 
 /// Best-effort line of `key` in `section`, falling back to the table header, then to
 /// the key that holds an inline table (`shell = { ... }`).
@@ -464,10 +491,7 @@ fn collect_warnings(src: &str, root: &toml::Table) -> Vec<ConfigWarning> {
         unknown_in(&mut w, src, shell, "terminal.shell", SHELL_KEYS);
     }
     for (i, t) in providers(root).enumerate() {
-        for k in t
-            .keys()
-            .filter(|k| !PROVIDER_KEYS.contains(&k.as_str()) && !SECRET_KEYS.contains(&k.as_str()))
-        {
+        for k in t.keys().filter(|k| !PROVIDER_KEYS.contains(&k.as_str()) && !is_secret_key(k)) {
             w.push(ConfigWarning {
                 key: format!("ai.providers[{i}].{k}"),
                 line: line_for(src, "ai.providers", i, k),
@@ -488,19 +512,52 @@ fn providers(root: &toml::Table) -> impl Iterator<Item = &toml::Table> {
         .filter_map(toml::Value::as_table)
 }
 
+fn secret_error(key: &str, line: Option<usize>) -> ConfigError {
+    ConfigError::at(
+        key,
+        line,
+        "Halyard never stores API keys in the config file. Export the key in an environment \
+         variable (or keep it in your keychain or secret manager and export it from there) \
+         and set `api_key_env = \"NAME_OF_VARIABLE\"` instead",
+    )
+}
+
+/// Reject any secret-looking key anywhere under `[ai]`, including keys nested in tables
+/// such as `headers`. Only key NAMES are reported, never values.
 fn reject_secrets(src: &str, root: &toml::Table) -> Result<(), ConfigError> {
+    let Some(ai) = root.get("ai").and_then(toml::Value::as_table) else {
+        return Ok(());
+    };
+    if let Some(k) = ai.keys().find(|k| is_secret_key(k)) {
+        return Err(secret_error(&format!("ai.{k}"), line_for(src, "ai", 0, k)));
+    }
     for (i, t) in providers(root).enumerate() {
-        if let Some(k) = t.keys().find(|k| SECRET_KEYS.contains(&k.as_str())) {
-            return Err(ConfigError::at(
+        if let Some(k) = t.keys().find(|k| is_secret_key(k)) {
+            return Err(secret_error(
                 &format!("ai.providers[{i}].{k}"),
                 line_for(src, "ai.providers", i, k),
-                "Halyard never stores API keys in the config file. Export the key in an environment \
-                 variable (or keep it in your keychain or secret manager and export it from there) \
-                 and set `api_key_env = \"NAME_OF_VARIABLE\"` instead",
             ));
+        }
+        for (outer, v) in t {
+            if let Some(inner) = v.as_table()
+                && let Some(k) = inner.keys().find(|k| is_secret_key(k))
+            {
+                let section = format!("ai.providers.{outer}");
+                return Err(secret_error(
+                    &format!("ai.providers[{i}].{outer}.{k}"),
+                    line_for(src, &section, 0, k),
+                ));
+            }
         }
     }
     Ok(())
+}
+
+/// Whether an `http(s)` URL carries `userinfo@` in its authority.
+fn has_userinfo(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    authority.contains('@')
 }
 
 fn valid_env_name(s: &str) -> bool {
@@ -520,11 +577,14 @@ impl Config {
     /// enum values, out-of-range numbers, bad key chords, a key stored in the
     /// config, and similar.
     pub fn parse(src: &str) -> Result<Loaded, ConfigError> {
-        let root: toml::Table = toml::from_str(src).map_err(|e| ConfigError {
-            path: None,
-            key: None,
-            line: e.span().map(|s| line_of_offset(src, s.start)),
-            message: e.message().to_string(),
+        let root: toml::Table = toml::from_str(src).map_err(|e| {
+            let in_ai = e.span().is_some_and(|s| is_ai_section(&section_at_offset(src, s.start)));
+            ConfigError {
+                path: None,
+                key: None,
+                line: e.span().map(|s| line_of_offset(src, s.start)),
+                message: if in_ai { AI_REDACTED.to_string() } else { e.message().to_string() },
+            }
         })?;
         reject_secrets(src, &root)?;
         let warnings = collect_warnings(src, &root);
@@ -533,7 +593,10 @@ impl Config {
                 Some(s) => key_at_offset(src, s.start),
                 None => (None, 1),
             };
-            ConfigError { path: None, key, line: Some(line), message: e.message().to_string() }
+            let in_ai = key.as_deref().is_some_and(|k| k == "ai" || k.starts_with("ai."))
+                || e.span().is_some_and(|s| is_ai_section(&section_at_offset(src, s.start)));
+            let message = if in_ai { AI_REDACTED.to_string() } else { e.message().to_string() };
+            ConfigError { path: None, key, line: Some(line), message }
         })?;
         config.validate(src)?;
         Ok(Loaded { config, warnings })
@@ -645,7 +708,7 @@ impl Config {
             return Err(ConfigError::at(
                 &key("name"),
                 l("name"),
-                format!("duplicate provider name `{}`", p.name),
+                "duplicate provider name (the name is not shown)",
             ));
         }
         if p.model.trim().is_empty() {
@@ -663,7 +726,17 @@ impl Config {
                 return Err(ConfigError::at(
                     &key("base_url"),
                     l("base_url"),
-                    format!("`{u}` must start with http:// or https://"),
+                    "must start with http:// or https:// (the value is not shown; if you pasted \
+                     a key here, revoke it)",
+                ));
+            }
+            (Some(u), _) if has_userinfo(u) => {
+                return Err(ConfigError::at(
+                    &key("base_url"),
+                    l("base_url"),
+                    "must not contain credentials (`user:password@host`); the value is not \
+                     shown. Put the key in an environment variable and name it with \
+                     `api_key_env`; if you pasted a key here, revoke it",
                 ));
             }
             _ => {}

@@ -53,6 +53,19 @@ pub(crate) fn key_at_offset(src: &str, offset: usize) -> (Option<String>, usize)
     }
 }
 
+/// The table header (`ai.providers` for both `[ai.providers]` and `[[ai.providers]]`)
+/// that is in force at a byte offset. Empty at the top level.
+pub(crate) fn section_at_offset(src: &str, offset: usize) -> String {
+    let target = line_of_offset(src, offset);
+    let mut section = String::new();
+    for line in src.lines().take(target) {
+        if let Some(h) = header_name(line) {
+            section = h.to_string();
+        }
+    }
+    section
+}
+
 /// Find the 1-based line of `key` inside the `occurrence`-th table named
 /// `section` (use 0 for ordinary tables; for `[[array]]` tables it picks the
 /// element). An empty `section` means the top level.

@@ -303,11 +303,8 @@ fn ghostty_import_light_background_is_light_and_missing_slots_use_xterm() {
 
 #[test]
 fn ghostty_import_errors_carry_line_numbers() {
-    let e = Theme::from_ghostty(
-        "x",
-        "background = #000000\nforeground = #ffffff\npalette = 3=#12345\n",
-    )
-    .unwrap_err();
+    let e = Theme::from_ghostty("x", "background = #000000\nforeground = #ffffff\npalette = 3\n")
+        .unwrap_err();
     assert_eq!((e.key.as_deref(), e.line), (Some("palette"), Some(3)));
     let e = Theme::from_ghostty("x", "background = #000000\nforeground = oops\n").unwrap_err();
     assert_eq!((e.key.as_deref(), e.line), (Some("foreground"), Some(2)));
@@ -315,7 +312,7 @@ fn ghostty_import_errors_carry_line_numbers() {
     assert_eq!(e.key.as_deref(), Some("foreground"));
     let e = Theme::from_ghostty("x", "background = #000000\nforeground = #fff000\npalette = 7\n")
         .unwrap_err();
-    assert!(e.message.contains("N=#rrggbb"), "{e}");
+    assert!(e.message.contains("N=color"), "{e}");
 }
 
 fn theme_toml(name: &str, bg: &str) -> String {
@@ -379,4 +376,95 @@ fn lookup_is_case_insensitive_and_falls_back_to_the_default() {
     let (t, fell_back) = reg.get_or_default("kelp", Appearance::Light);
     assert!(!fell_back);
     assert_eq!(t.name, "Kelp");
+}
+
+/// A theme file in the shape Ghostty's own bundled themes take, using the forms the
+/// reference documents: bare `RRGGBB`, X11 names, `cell-*` selection values, and one
+/// color syntax Halyard cannot read on a non-essential key.
+const GHOSTTY_REALISTIC: &str = "\
+# A realistic Ghostty theme
+palette = 0=black
+palette = 1=#cc6666
+palette = 2=b5bd68
+palette = 3=Yellow
+palette = 4=rgb:81/a2/be
+palette = 8=gray
+background = 1d1f21
+foreground = \"#c5c8c6\"
+cursor-color = cell-foreground
+cursor-text = cell-background
+selection-background = cell-foreground
+selection-foreground = cell-background
+";
+
+#[test]
+fn ghostty_import_accepts_cell_values_x11_names_and_bare_hex() {
+    let (t, warnings) = Theme::from_ghostty_with_warnings("Real", GHOSTTY_REALISTIC).unwrap();
+    assert_eq!(t.terminal.background, Rgb::new(0x1d, 0x1f, 0x21), "bare RRGGBB");
+    assert_eq!(t.terminal.foreground, Rgb::new(0xc5, 0xc8, 0xc6), "quoted hex");
+    assert_eq!(t.terminal.ansi[0], Rgb::new(0, 0, 0), "X11 black");
+    assert_eq!(t.terminal.ansi[2], Rgb::new(0xb5, 0xbd, 0x68), "bare hex palette");
+    assert_eq!(t.terminal.ansi[3], Rgb::new(0xff, 0xff, 0x00), "X11 name, any case");
+    assert_eq!(t.terminal.ansi[8], Rgb::new(0xbe, 0xbe, 0xbe), "X11 gray");
+    // cell-* means unset, so the documented derivation applies.
+    let (bg, fg) = (t.terminal.background, t.terminal.foreground);
+    assert_eq!(t.terminal.selection_bg, mix(bg, fg, 0.25));
+    assert_eq!(t.terminal.selection_fg, fg);
+    assert_eq!(t.terminal.cursor, fg);
+    assert_eq!(t.terminal.cursor_text, bg);
+    // `rgb:81/a2/be` is not read: one warning, with its line, and the slot keeps xterm blue.
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!((warnings[0].key.as_str(), warnings[0].line), ("palette", Some(6)));
+    assert_eq!(t.terminal.ansi[4], Rgb::new(0x00, 0x00, 0xee));
+    // The plain entry point accepts the same file.
+    assert_eq!(Theme::from_ghostty("Real", GHOSTTY_REALISTIC).unwrap(), t);
+}
+
+#[test]
+fn ghostty_unreadable_essential_color_still_fails_but_optional_only_warns() {
+    let e = Theme::from_ghostty("x", "background = #000000\nforeground = chartreuse-ish\n")
+        .unwrap_err();
+    assert_eq!((e.key.as_deref(), e.line), (Some("foreground"), Some(2)));
+    let (_, w) = Theme::from_ghostty_with_warnings(
+        "x",
+        "background = #000000\nforeground = #ffffff\ncursor-color = oops\nselection-background = 12\n",
+    )
+    .unwrap();
+    assert_eq!(w.len(), 2, "{w:?}");
+    assert!(w.iter().all(|x| !x.message.is_empty()));
+}
+
+#[test]
+fn bad_ansi_entry_reports_its_own_line_not_the_first_matching_text() {
+    // The bad entry `#zzzzzz` is on line 6. A first-occurrence text search would find the
+    // earlier `name = "#zzzzzz"` on line 1 instead.
+    let src = "name = \"#zzzzzz\"\n[terminal]\nforeground = \"#ffffff\"\nbackground = \"#000000\"\nansi = [\n  \"#000000\", \"#zzzzzz\", \"#33cc33\", \"#cccc33\", \"#3366cc\", \"#cc33cc\", \"#33cccc\", \"#cccccc\",\n  \"#555555\", \"#ff5555\", \"#55ff55\", \"#ffff55\", \"#5588ff\", \"#ff55ff\", \"#55ffff\", \"#ffffff\",\n]\n";
+    let e = Theme::from_toml(src).unwrap_err();
+    assert_eq!(e.key.as_deref(), Some("terminal.ansi[1]"));
+    assert_eq!(e.line, Some(6), "{e}");
+}
+
+#[test]
+fn luminance_matches_wcag_known_values_including_the_dark_linear_branch() {
+    // Mid-dark grey on the power-law branch: ((0x33/255 + 0.055) / 1.055)^2.4 = 0.03311.
+    // Treating 0.2 as "dark" (threshold 0.3928 instead of 0.04045) would give 0.01548.
+    let l = relative_luminance(Rgb::new(0x33, 0x33, 0x33));
+    assert!((l - 0.0331).abs() < 0.0002, "{l}");
+    assert!((relative_luminance(Rgb::new(255, 255, 255)) - 1.0).abs() < 1e-9);
+    assert!(relative_luminance(Rgb::new(0, 0, 0)).abs() < 1e-12);
+    // Linear branch: 5/255 / 12.92.
+    assert!((relative_luminance(Rgb::new(5, 5, 5)) - (5.0 / 255.0) / 12.92).abs() < 1e-9);
+}
+
+#[test]
+fn a_theme_fails_on_foreground_contrast_alone() {
+    let mut t = base_dark();
+    // Mid grey on the dark background: between 2.0 and 4.5, so only the 4.5 rule rejects it.
+    t.terminal.foreground = Rgb::new(0x6a, 0x7a, 0x88);
+    let ratio = contrast_ratio(t.terminal.foreground, t.terminal.background);
+    assert!((2.5..4.4).contains(&ratio), "test setup: {ratio}");
+    let f = check_contrast(&t);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].what, "terminal.foreground");
+    assert!((f[0].required - 4.5).abs() < f64::EPSILON);
 }
