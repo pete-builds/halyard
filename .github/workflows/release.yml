@@ -5,10 +5,21 @@ name: release
 # reviews the draft and publishes it. Nothing is published automatically.
 #
 # workflow_dispatch is a dry run: it builds the same files and uploads them as workflow
-# artifacts only. It never creates a release, a tag, or an attestation.
+# artifacts only. It never creates a release, a tag, or an attestation. A pull request that
+# touches the release path runs the same dry run, so a packaging break shows up before a tag.
+#
+# Build jobs stage their output in $RUNNER_TEMP/out, never in the checkout: the repo has its
+# own tracked dist/ (desktop entry, icons), and staging there once shipped those folders into
+# the release files (v0.1.0, run 45061752966).
 on:
   push:
     tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - packaging/**
+      - dist/**
+      - nix/default.nix
   workflow_dispatch:
     inputs:
       dry_run:
@@ -87,12 +98,15 @@ jobs:
         run: packaging/macos/build-app.sh --out "$RUNNER_TEMP/macos"
       - name: Stage
         run: |
-          mkdir -p dist
-          cp "$RUNNER_TEMP"/macos/Halyard-*-macos-universal.zip dist/
+          mkdir -p "$RUNNER_TEMP/out"
+          cp "$RUNNER_TEMP"/macos/Halyard-*-macos-universal.zip "$RUNNER_TEMP/out/"
+          ls -l "$RUNNER_TEMP/out"
+          test "$(find "$RUNNER_TEMP/out" -mindepth 1 | wc -l)" -eq 1 \
+            || { echo "expected exactly one staged file" >&2; exit 1; }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: halyard-macos-universal
-          path: dist/*
+          path: ${{ runner.temp }}/out/*
           if-no-files-found: error
 
   linux:
@@ -133,19 +147,22 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           name="halyard-${VERSION}-linux-${ARCH}"
-          mkdir -p "dist/$name"
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$out/$name"
           # The release profile keeps line tables (debug = "line-tables-only"), which makes
           # the binary about 93 MB. Strip it for the tarball.
-          install -m 755 target/release/halyard "dist/$name/halyard"
-          strip "dist/$name/halyard"
-          cp packaging/linux/README.txt LICENSE-MIT LICENSE-APACHE "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          rm -rf "dist/${name:?}"
-          ls -l dist
+          install -m 755 target/release/halyard "$out/$name/halyard"
+          strip "$out/$name/halyard"
+          cp packaging/linux/README.txt LICENSE-MIT LICENSE-APACHE "$out/$name/"
+          tar -C "$out" -czf "$out/$name.tar.gz" "$name"
+          rm -rf "${out:?}/${name:?}"
+          ls -l "$out"
+          test "$(find "$out" -mindepth 1 | wc -l)" -eq 1 \
+            || { echo "expected exactly one staged file" >&2; exit 1; }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: halyard-linux-${{ matrix.arch }}
-          path: dist/*
+          path: ${{ runner.temp }}/out/*
           if-no-files-found: error
 
   checksums:
@@ -165,6 +182,13 @@ jobs:
       - name: SHA256SUMS
         run: |
           cd dist
+          # Only regular files belong in a release; a directory here means a build job
+          # staged the wrong thing.
+          if [ -n "$(find . -mindepth 1 ! -type f)" ]; then
+            find . -mindepth 1 ! -type f >&2
+            echo "release files must be regular files" >&2
+            exit 1
+          fi
           sha256sum -- * > ../SHA256SUMS
           mv ../SHA256SUMS SHA256SUMS
           cat SHA256SUMS
