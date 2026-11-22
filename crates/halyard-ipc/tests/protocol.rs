@@ -182,7 +182,14 @@ fn connection_limit_closes_extra_connections() {
     let h = start_with(limits);
     let _a = h.hello();
     let _b = h.hello();
-    let mut c = h.connect();
-    let _ = c.send_raw(b"{}\n");
-    assert!(c.read_message().is_err(), "third connection is closed");
+    // Over the limit the server either refuses the connection outright (macOS can report this
+    // at connect time) or accepts and immediately closes it. Both enforce the limit; a third
+    // connection that is served is the failure.
+    match h.try_connect() {
+        Err(_) => {}
+        Ok(mut c) => {
+            let _ = c.send_raw(b"{}\n");
+            assert!(c.read_message().is_err(), "third connection is closed");
+        }
+    }
 }
