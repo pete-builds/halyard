@@ -472,7 +472,7 @@ impl halyard_term::OutputObserver for RowAtOsc {
     fn at_mark(&mut self, _index: usize, row: u64) {
         self.rows.lock().unwrap().push(row);
     }
-    fn chunk_done(&mut self) {
+    fn chunk_done(&mut self, _history_rows: Option<u64>) {
         *self.chunks.lock().unwrap() += 1;
     }
 }
@@ -511,4 +511,29 @@ fn an_invalid_session_id_is_replaced() {
         assert_ne!(s.id(), bad);
         assert_eq!(s.id().len(), 32, "a fresh id");
     }
+}
+
+/// Finds the absolute row of the line reading `text`, from the viewport.
+fn absolute_row_of(f: &Frame, text: &str) -> Option<u64> {
+    row_equal(f, text).map(|r| f.scroll.offset + u64::from(r))
+}
+
+#[test]
+fn rows_text_and_scroll_to_row_use_screen_rows() {
+    let s = spawn(40, 6);
+    run(&s, "printf 'first\\nsecond\\n'; seq 1 30; echo rows-done");
+    let f = wait_for(&s, "the end", |f| row_equal(f, "rows-done").is_some());
+    let done = absolute_row_of(&f, "rows-done").unwrap();
+    // `seq 1 30` ends on the row above `rows-done`; `first` is 32 rows up.
+    assert_eq!(s.screen_rows_text(done - 1, done - 1).as_deref(), Some("30"));
+    let first = done - 32;
+    assert_eq!(s.screen_rows_text(first, first + 2).as_deref(), Some("first\nsecond\n1"));
+    assert_eq!(s.screen_rows_text(5, 4), None);
+    assert_eq!(s.screen_rows_text(1_000_000, 1_000_001), None);
+    // Scrolling to a row puts it at the top of the viewport.
+    s.scroll(ScrollRequest::Row(first));
+    let f = wait_for(&s, "scrolled to `first`", |f| f.row_text(0) == "first");
+    assert_eq!(f.scroll.offset, first);
+    s.scroll(ScrollRequest::Row(u64::MAX));
+    wait_for(&s, "clamped at the bottom", |f| f.scroll.at_bottom());
 }

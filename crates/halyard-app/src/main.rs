@@ -13,6 +13,8 @@
 
 mod app_state;
 mod attention_ui;
+mod blocks_ui;
+mod dashboard_ui;
 #[cfg(feature = "debug-script")]
 mod debug_script;
 mod decide;

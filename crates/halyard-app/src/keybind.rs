@@ -39,12 +39,15 @@ actions!(
         ReloadConfig,
         OpenConfig,
         SwitchTheme,
+        AgentDashboard,
+        PrevPrompt,
+        NextPrompt,
+        CopyLastOutput,
     ]
 );
 
 /// The GPUI action for a config action, or `None` for actions that are not
-/// built yet (`find`, `agent_dashboard`), whose chords then stay with the
-/// terminal.
+/// built yet (`find`), whose chords then stay with the terminal.
 #[must_use]
 pub fn gpui_action(a: Action) -> Option<Box<dyn gpui::Action>> {
     Some(match a {
@@ -76,7 +79,11 @@ pub fn gpui_action(a: Action) -> Option<Box<dyn gpui::Action>> {
         Action::RenameTab => Box::new(RenameTab),
         Action::ReloadConfig => Box::new(ReloadConfig),
         Action::OpenConfig => Box::new(OpenConfig),
-        Action::Find | Action::AgentDashboard => return None,
+        Action::AgentDashboard => Box::new(AgentDashboard),
+        Action::PrevPrompt => Box::new(PrevPrompt),
+        Action::NextPrompt => Box::new(NextPrompt),
+        Action::CopyLastOutput => Box::new(CopyLastOutput),
+        Action::Find => return None,
     })
 }
 
@@ -262,7 +269,8 @@ mod tests {
             assert!(b.len() >= built, "{} bindings for {built} chords", b.len());
         }
         assert!(gpui_action(Action::Find).is_none());
-        assert!(gpui_action(Action::AgentDashboard).is_none());
+        assert!(gpui_action(Action::AgentDashboard).is_some());
+        assert!(gpui_action(Action::PrevPrompt).is_some());
         assert!(gpui_action(Action::SplitRight).is_some());
     }
 

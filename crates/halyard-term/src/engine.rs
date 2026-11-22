@@ -242,6 +242,16 @@ impl Engine {
         u64::try_from(history).unwrap_or(u64::MAX).saturating_add(u64::from(y))
     }
 
+    /// Scrollback rows of the primary screen, or `None` while the alternate
+    /// screen is active (it has no scrollback of its own to compare).
+    #[must_use]
+    pub fn primary_history_rows(&self) -> Option<u64> {
+        if matches!(self.terminal.active_screen(), Ok(Screen::Alternate)) {
+            return None;
+        }
+        self.terminal.scrollback_rows().ok().and_then(|n| u64::try_from(n).ok())
+    }
+
     /// The current window title (empty if none was set).
     #[must_use]
     pub fn title(&self) -> String {
@@ -288,6 +298,15 @@ impl Engine {
             ScrollRequest::Pages(n) => ScrollViewport::Delta(n.saturating_mul(rows)),
             ScrollRequest::Top => ScrollViewport::Top,
             ScrollRequest::Bottom => ScrollViewport::Bottom,
+            ScrollRequest::Row(row) => {
+                let Ok(bar) = self.terminal.scrollbar() else { return };
+                let delta = i128::from(row) - i128::from(bar.offset);
+                ScrollViewport::Delta(isize::try_from(delta).unwrap_or(if delta < 0 {
+                    isize::MIN
+                } else {
+                    isize::MAX
+                }))
+            }
         };
         self.terminal.scroll_viewport(target);
     }
@@ -506,6 +525,40 @@ impl Engine {
             .terminal
             .format_selection_alloc(None, options)
             .map_err(err("formatting the selection"))?;
+        Ok(bytes.map(|b| String::from_utf8_lossy(&b).into_owned()))
+    }
+
+    /// The text of rows `first..=last` (counted from the top of scrollback, as
+    /// [`Engine::cursor_screen_row`] counts) as plain text: soft wraps joined,
+    /// trailing blanks trimmed. `None` when the range is empty or out of range.
+    /// The user's selection is left alone.
+    pub fn screen_rows_text(&self, first: u64, last: u64) -> Result<Option<String>, EngineError> {
+        if first > last {
+            return Ok(None);
+        }
+        let total = u64::try_from(self.terminal.total_rows().map_err(err("reading rows"))?)
+            .unwrap_or(u64::MAX);
+        if first >= total {
+            return Ok(None);
+        }
+        let last = last.min(total - 1);
+        let point = |x: u16, y: u64| {
+            Point::Screen(PointCoordinate { x, y: u32::try_from(y).unwrap_or(u32::MAX) })
+        };
+        let start =
+            self.terminal.grid_ref(point(0, first)).map_err(err("resolving the first row"))?;
+        let end = self
+            .terminal
+            .grid_ref(point(self.cols().saturating_sub(1), last))
+            .map_err(err("resolving the last row"))?;
+        let selection = Selection::new(start, end, false);
+        let options = FormatOptions::new()
+            .with_emit_format(Format::Plain)
+            .with_unwrap(true)
+            .with_trim(true)
+            .with_selection(&selection);
+        let bytes =
+            self.terminal.format_selection_alloc(None, options).map_err(err("formatting rows"))?;
         Ok(bytes.map(|b| String::from_utf8_lossy(&b).into_owned()))
     }
 

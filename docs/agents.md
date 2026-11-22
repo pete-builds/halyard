@@ -2,8 +2,8 @@
 
 Status: the model is implemented and tested as a library (`crates/halyard-agents`) and
 wired into the app: every pane scans its output, polls its foreground process, and
-shows its state on its tab and in a badge, with desktop notifications. The dashboard
-is not built yet; see `ROADMAP.md`.
+shows its state on its tab and in a badge, with desktop notifications and a dashboard;
+see `ROADMAP.md` for what is verified.
 
 ## In the app
 
@@ -42,6 +42,7 @@ in `ui.attention` until the pane is focused.
 A pane that becomes WaitingForInput or Finished while its window is not active sends
 one desktop notification (`[agents] notify_on_waiting`, see `docs/configuration.md`).
 The title names the agent; the body is the agent's last notification text, or the tab
+<<<<<<< HEAD
 title. Both come from the pane's output, so control characters, bidi overrides and
 isolates, direction marks and zero-width characters are removed, whitespace is
 collapsed, the text is capped (80 and 200 characters), and on Linux `&`, `<` and `>`
@@ -57,6 +58,18 @@ in the pane; before that their text is not even kept. Tests: `attention_ui::test
 `pane::tests::reports_without_this_panes_session_are_plain_output`,
 `notifications_and_bells_count_only_with_an_agent_in_the_foreground`,
 `focus_changes_never_swallow_another_change`, `pane::tests` (the pipeline on a fake clock),
+=======
+title. Both come from the pane's output, so they are stripped of control and bidi
+characters and capped.
+
+The dashboard (`agent_dashboard`, `cmd+shift+a` on macOS, or "Agent Dashboard" in the
+command palette) lists every pane of every window in the order below, one row each:
+state and how long ago it began, `new` when unread, agent, tab title, then the working
+directory, git branch and last notification. Type to filter, Enter focuses the pane
+with its tab and window, Escape closes it. The git branch is read only for a local,
+verbatim working directory, as below. Tests: `attention_ui::tests` (indicators, the tab mark, the
+decision, rate limits, sanitizing), `pane::tests` (the pipeline on a fake clock),
+>>>>>>> bfd265c (feat(app): agent dashboard, prompt navigation, copy last output)
 `signals::tests::fake_claude_notification_means_waiting` (a real program named
 `claude` printing OSC 9 in a real PTY).
 

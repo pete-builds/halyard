@@ -59,6 +59,8 @@ pub struct PaneMonitor<C: Clock> {
     /// Blocks changed (a block opened or closed) since the last
     /// [`PaneMonitor::take_blocks_changed`].
     blocks_changed: bool,
+    /// Scrollback rows of the primary screen after the last chunk.
+    history_rows: Option<u64>,
 }
 
 impl<C: Clock> std::fmt::Debug for PaneMonitor<C> {
@@ -87,6 +89,7 @@ impl<C: Clock> PaneMonitor<C> {
             detected: None,
             changed: false,
             blocks_changed: false,
+            history_rows: None,
         }
     }
 
@@ -115,7 +118,18 @@ impl<C: Clock> PaneMonitor<C> {
     /// One scanner event that occurred with the cursor on absolute row `row`.
     pub fn on_shell_event(&mut self, event: &ShellEvent, row: u64, at: SystemTime) {
         let before = (self.blocks.running().map(|b| b.id), self.blocks.history().len());
+        // A mark above the start of the newest block means the screen was erased
+        // and written again from there (`clear` homes the cursor and erases):
+        // blocks reaching those rows now point at other text.
+        let newest_start = self
+            .blocks
+            .running()
+            .or_else(|| self.blocks.history().last())
+            .and_then(halyard_shell::Block::start_row);
         self.blocks.on_event(event, row);
+        if newest_start.is_some_and(|start| row < start) {
+            self.blocks.forget_from(row);
+        }
         let after = (self.blocks.running().map(|b| b.id), self.blocks.history().len());
         if before != after {
             self.blocks_changed = true;
@@ -142,6 +156,18 @@ impl<C: Clock> PaneMonitor<C> {
             return;
         }
         self.apply(e, at);
+    }
+
+    /// The primary screen's scrollback row count after a chunk. When it shrank,
+    /// scrollback was cleared (`clear` sends `CSI 3 J`; a reset does too) and the
+    /// rows of closed blocks point at other text now, so they are forgotten.
+    /// Running blocks and the prompt being typed are kept.
+    pub fn on_history(&mut self, rows: u64) {
+        if self.history_rows.is_some_and(|before| rows < before) {
+            self.blocks.prune_before(u64::MAX);
+            self.blocks_changed = true;
+        }
+        self.history_rows = Some(rows);
     }
 
     /// The user typed or pasted into the pane.

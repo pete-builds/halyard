@@ -288,3 +288,41 @@ fn focus_changes_never_swallow_another_change() {
     assert!(b.take_changed(), "B's waiting change is still pending");
     assert!(b.attention().unread());
 }
+
+#[test]
+fn cleared_scrollback_forgets_closed_blocks() {
+    let clock = FakeClock::new();
+    let mut scan = SignalScanner::new();
+    let mut m = monitor(&clock);
+    m.on_history(40);
+    feed(&mut scan, &mut m, b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07", 45, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]133;D;0\x07\x1b]133;A\x07", 47, clock.at());
+    m.on_history(42);
+    assert_eq!(m.blocks().history().len(), 1, "growing scrollback keeps blocks");
+    let _ = m.take_blocks_changed();
+    // `clear`: scrollback dropped to 0. The old block's rows mean nothing now.
+    m.on_history(0);
+    assert_eq!(m.blocks().history().len(), 0);
+    assert!(m.take_blocks_changed());
+    assert!(m.blocks().pending_prompt_row().is_some(), "the prompt being typed stays");
+}
+
+#[test]
+fn a_mark_above_the_newest_block_forgets_the_erased_blocks() {
+    // `clear` at rows 4..5 homes the cursor: its D lands on row 0.
+    let clock = FakeClock::new();
+    let mut scan = SignalScanner::new();
+    let mut m = monitor(&clock);
+    feed(&mut scan, &mut m, b"\x1b]133;A\x07\x1b]133;B\x07\x1b]133;C\x07", 2, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07", 4, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]133;C\x07", 5, clock.at());
+    assert_eq!(m.blocks().history().len(), 1);
+    feed(&mut scan, &mut m, b"\x1b]133;D;0\x07\x1b]133;A\x07", 0, clock.at());
+    assert_eq!(m.blocks().history().len(), 0, "both blocks sat on erased rows");
+    assert_eq!(m.blocks().pending_prompt_row(), Some(0));
+    // A prompt drawn again one row up (a two-line prompt redraw) keeps blocks.
+    feed(&mut scan, &mut m, b"\x1b]133;B\x07\x1b]133;C\x07", 1, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]133;D;0\x07\x1b]133;A\x07", 9, clock.at());
+    feed(&mut scan, &mut m, b"\x1b]133;A\x07", 8, clock.at());
+    assert_eq!(m.blocks().history().len(), 1);
+}

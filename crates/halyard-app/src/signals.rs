@@ -65,9 +65,13 @@ impl OutputObserver for SignalObserver {
         self.scan.at_mark(row);
     }
 
-    fn chunk_done(&mut self) {
+    fn chunk_done(&mut self, history_rows: Option<u64>) {
         let now = SystemTime::now();
-        self.scan.finish(&mut lock(&self.monitor), now);
+        let mut m = lock(&self.monitor);
+        self.scan.finish(&mut m, now);
+        if let Some(rows) = history_rows {
+            m.on_history(rows);
+        }
     }
 }
 
@@ -144,6 +148,10 @@ mod tests {
         wait_for("a prompt mark", || lock(&monitor).blocks().pending_prompt_row().is_some());
         session.write("echo one; echo two\n");
         wait_for("the first block", || lock(&monitor).blocks().history().len() >= 1);
+        // Copy last output: the rows between C and D, read back from the engine.
+        let rows = crate::blocks_ui::last_output_rows(lock(&monitor).blocks()).expect("rows");
+        let text = session.screen_rows_text(rows.0, rows.1).expect("text");
+        assert_eq!(crate::blocks_ui::tidy_output(&text), "one\ntwo");
         session.write("false\n");
         wait_for("the failed block", || lock(&monitor).blocks().last_failed().is_some());
         let m = lock(&monitor);
@@ -161,6 +169,26 @@ mod tests {
         assert_eq!(m.attention().state(), AttentionState::Unknown);
         let cwd = m.cwd().expect("OSC 7 from the script");
         assert!(cwd.verbatim);
+        drop(m);
+        // Previous prompt from below the last block, once there is scrollback:
+        // the view's top row becomes that command's prompt.
+        session.write("seq 1 60\n");
+        wait_for("the seq block", || lock(&monitor).blocks().history().len() >= 3);
+        let m = lock(&monitor);
+        let below = m.blocks().history().last().unwrap().output_end_row.unwrap() + 1;
+        let jump = crate::blocks_ui::Jump::Previous;
+        let target = crate::blocks_ui::prompt_target(m.blocks(), below, jump).expect("a prompt");
+        drop(m);
+        session.scroll(halyard_term::ScrollRequest::Row(target));
+        wait_for("the view on the prompt", || {
+            let f = session.latest_frame();
+            f.scroll.offset == target && f.row_text(0).contains("seq 1 60")
+        });
+        // Clearing scrollback (what `clear` sends) forgets the old blocks, whose
+        // rows would now point at other text.
+        session.scroll(halyard_term::ScrollRequest::Bottom);
+        session.write("printf '\\033[H\\033[2J\\033[3J'\n");
+        wait_for("old blocks forgotten", || lock(&monitor).blocks().history().len() <= 1);
     }
 
     /// A program named `claude` that prints an OSC 9 notification moves its pane

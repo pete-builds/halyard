@@ -64,8 +64,12 @@ pub trait OutputObserver: Send {
     /// pushed by `scan`); `row` is the cursor's row counted from the top of
     /// scrollback (see [`Engine::cursor_screen_row`]).
     fn at_mark(&mut self, index: usize, row: u64);
-    /// The whole chunk has been consumed.
-    fn chunk_done(&mut self);
+    /// The whole chunk has been consumed. `history_rows` is the number of
+    /// scrollback rows of the primary screen now (`None` while the alternate
+    /// screen is shown). When it shrinks, scrollback was cleared (`CSI 3 J`, as
+    /// `clear` sends, or a reset) and rows recorded before no longer hold the
+    /// same text.
+    fn chunk_done(&mut self, history_rows: Option<u64>);
 }
 
 /// How to start a session.
@@ -203,6 +207,7 @@ enum Command {
     SelectWord(u16, u16),
     SelectClear,
     SelectionText(Sender<Option<String>>),
+    RowsText(u64, u64, Sender<Option<String>>),
     SetPalette(Palette),
     Shutdown,
 }
@@ -618,6 +623,17 @@ impl Session {
         rx.recv_timeout(Duration::from_secs(1)).ok().flatten()
     }
 
+    /// The text of rows `first..=last`, counted from the top of scrollback as
+    /// [`Engine::cursor_screen_row`] counts (the rows the shell integration
+    /// marks carry), or `None` when out of range. Blocks until the session
+    /// thread answers (at most one second).
+    #[must_use]
+    pub fn screen_rows_text(&self, first: u64, last: u64) -> Option<String> {
+        let (tx, rx) = bounded(1);
+        self.send(Command::RowsText(first, last, tx));
+        rx.recv_timeout(Duration::from_secs(1)).ok().flatten()
+    }
+
     /// Change the colors.
     pub fn set_palette(&self, palette: Palette) {
         self.send(Command::SetPalette(palette));
@@ -831,7 +847,7 @@ impl SessionThread {
             observer.at_mark(index, engine.cursor_screen_row());
         }
         engine.write(&chunk[done..]);
-        observer.chunk_done();
+        observer.chunk_done(engine.primary_history_rows());
     }
 
     fn run(mut self, mut engine: Engine) {
@@ -987,6 +1003,15 @@ impl SessionThread {
             }
             Command::SelectionText(reply) => {
                 let text = engine.selection_text().unwrap_or_else(|e| {
+                    eprintln!("halyard-term: {e}");
+                    None
+                });
+                // The caller may have timed out and gone away.
+                reply.send(text).ok();
+                false
+            }
+            Command::RowsText(first, last, reply) => {
+                let text = engine.screen_rows_text(first, last).unwrap_or_else(|e| {
                     eprintln!("halyard-term: {e}");
                     None
                 });
