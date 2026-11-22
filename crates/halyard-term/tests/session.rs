@@ -208,6 +208,38 @@ fn output_flood_keeps_up() {
     assert!(f.generation < 20_000, "published {} frames", f.generation);
 }
 
+// The reader pauses after small reads on macOS only (see `PAUSE_AFTER_SMALL_READ`
+// in session.rs); Linux is not measured yet.
+#[cfg(target_os = "macos")]
+#[test]
+fn trickling_output_is_read_in_batches() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // `head` writing to a terminal is line buffered: one 2-byte `write` per
+    // line. Read the moment it arrived, that reached the session as about 8
+    // bytes per chunk on macOS, each with its own poll, read, channel send and
+    // wakeup (`docs/PERFORMANCE.md`). The reader now pauses briefly after a
+    // small read so the output collects in the PTY first.
+    let bytes = Arc::new(AtomicUsize::new(0));
+    let chunks = Arc::new(AtomicUsize::new(0));
+    let (b, c) = (Arc::clone(&bytes), Arc::clone(&chunks));
+    let s = Session::spawn(SessionConfig {
+        program: Some(PathBuf::from("/bin/sh")),
+        args: vec!["-c".into(), "yes | head -c 400000; echo trickle-done".into()],
+        output_tap: Some(Box::new(move |chunk: &[u8]| {
+            b.fetch_add(chunk.len(), Ordering::Relaxed);
+            c.fetch_add(1, Ordering::Relaxed);
+        })),
+        ..config(80, 24)
+    })
+    .expect("spawn /bin/sh");
+    wait_for(&s, "end of output", |f| row_equal(f, "trickle-done").is_some());
+    let (bytes, chunks) = (bytes.load(Ordering::Relaxed), chunks.load(Ordering::Relaxed));
+    assert!(bytes > 400_000, "only {bytes} bytes arrived");
+    let average = bytes / chunks.max(1);
+    assert!(average >= 32, "{average} bytes per chunk ({chunks} chunks)");
+}
+
 #[test]
 fn typed_keys_run_a_command() {
     let s = spawn(80, 24);

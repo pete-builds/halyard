@@ -282,7 +282,16 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 ## Phase 6: production readiness
 
 - [ ] Flatpak package (see `docs/adr/0005-linux-distribution.md`)
-- [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane
+- [ ] Benchmarks: startup, memory, input latency, throughput, multi-pane. Throughput is measured:
+      `crates/halyard-term/examples/throughput.rs` (engine parse, frame build, real PTY sessions,
+      headless key echo), results in `docs/PERFORMANCE.md`, and a `--quick` floor runs in CI. Line
+      buffered output (`yes | head`) went from 4.6 to 6.1 MB/s and from 33 s to 3.4 s of CPU per
+      100 MB on macOS (`trickling_output_is_read_in_batches`). The reader pause is macOS only
+      until a Linux A/B on the NixOS box is run. Not yet: startup, memory, end to end input
+      latency, GPU render time, multi-pane, Linux numbers
+- [ ] Scrollback is far shorter than configured: `scrollback_lines` reaches libghostty-vt's
+      `max_scrollback`, which Ghostty treats as bytes (247 rows kept at 200 columns for 10,000;
+      see `docs/PERFORMANCE.md`)
 - [x] Threat model written: `docs/THREAT_MODEL.md` (cites code in PRs that were still open when it was written)
 - [ ] Security review (no outside review yet)
 - [ ] Release automation: `.github/workflows/release.yml` (macOS zip, Linux tarballs, SHA256SUMS, provenance,
