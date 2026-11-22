@@ -24,6 +24,8 @@ let
       ../Cargo.lock
       ../rustfmt.toml
       ../crates
+      # Crates patched in through [patch.crates-io] (see vendor/README.md).
+      (lib.fileset.maybeMissing ../vendor)
     ];
   };
 
