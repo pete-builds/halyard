@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use futures::StreamExt;
 use futures::channel::mpsc;
@@ -30,6 +31,7 @@ use crate::keybind::{Copy, Paste};
 use crate::keys::{KeyRoute, route_keystroke};
 use crate::selection::{self, MiddleClick};
 use crate::settings;
+use crate::signals::{self, SharedMonitor, SignalObserver};
 
 /// Treat Option as Alt on macOS. Off, so Option composes characters as in
 /// other macOS apps. Not a config key yet.
@@ -88,12 +90,28 @@ pub struct PaneStyle {
 }
 
 /// Decoration the window draws on a pane: a dimming veil for inactive
-/// panes and an outline for the focused one.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// panes, an outline for the focused one (or one that needs the user), and
+/// the agent badge.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PaneChrome {
     /// Color laid over the whole pane, if dimmed.
     pub dim: Option<Hsla>,
     /// Outline color, if outlined.
+    pub border: Option<Hsla>,
+    /// Agent state badge in the top right corner.
+    pub badge: Option<PaneBadge>,
+}
+
+/// The small label a pane with an agent shows: what it is and its state.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaneBadge {
+    /// For example "● Claude Code · waiting".
+    pub text: SharedString,
+    /// Text color (the state's theme token).
+    pub fg: Hsla,
+    /// Background.
+    pub bg: Hsla,
+    /// Outline, drawn when the news is unread.
     pub border: Option<Hsla>,
 }
 
@@ -121,6 +139,8 @@ pub enum PaneEvent {
     TitleChanged,
     /// The pane got keyboard focus.
     Focused,
+    /// The agent attention state or its unread flag changed.
+    AttentionChanged,
 }
 
 /// Pick the first candidate family that is installed, else the first one
@@ -153,6 +173,7 @@ struct Layout {
 /// A terminal session drawn in a window.
 pub struct TerminalView {
     session: Arc<Session>,
+    monitor: SharedMonitor,
     focus: FocusHandle,
     font: Font,
     font_size: Pixels,
@@ -211,6 +232,7 @@ fn px_u32(v: f32) -> u32 {
 /// view entity exists so a failure can be shown instead.
 pub struct Prepared {
     session: Arc<Session>,
+    monitor: SharedMonitor,
     wakeups: mpsc::UnboundedReceiver<()>,
     font: Font,
     font_size: Pixels,
@@ -246,6 +268,10 @@ impl TerminalView {
 
         let (tx, wakeups) = mpsc::unbounded::<()>();
         let (program, args) = spawn.command.map_or((None, Vec::new()), |(p, a)| (Some(p), a));
+        // The monitor needs the pane's id before the session starts, to drop
+        // protocol reports addressed to other panes.
+        let session_id = halyard_term::new_session_id();
+        let monitor = signals::new_monitor(&session_id);
         let config = SessionConfig {
             program,
             args,
@@ -262,15 +288,18 @@ impl TerminalView {
             notify: Some(Arc::new(move || {
                 tx.unbounded_send(()).ok();
             })),
+            observer: Some(Box::new(SignalObserver::new(Arc::clone(&monitor)))),
+            session_id: Some(session_id),
             ..SessionConfig::default()
         };
         let session = Arc::new(Session::spawn(config)?);
-        Ok(Prepared { session, wakeups, font, font_size, cell, style, cols, rows })
+        Ok(Prepared { session, monitor, wakeups, font, font_size, cell, style, cols, rows })
     }
 
     /// Build the view around a prepared session.
     pub fn new(prepared: Prepared, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let Prepared { session, mut wakeups, font, font_size, cell, style, cols, rows } = prepared;
+        let Prepared { session, monitor, mut wakeups, font, font_size, cell, style, cols, rows } =
+            prepared;
         let pump = cx.spawn_in(window, async move |this, cx| {
             while wakeups.next().await.is_some() {
                 // Coalesce a burst of wakeups into one update.
@@ -285,6 +314,7 @@ impl TerminalView {
         cx.on_focus(&focus, window, |_, _, cx| cx.emit(PaneEvent::Focused)).detach();
         Self {
             session,
+            monitor,
             focus,
             font,
             font_size,
@@ -309,6 +339,48 @@ impl TerminalView {
     #[must_use]
     pub fn session(&self) -> &Arc<Session> {
         &self.session
+    }
+
+    /// The pane's agent and shell signals.
+    #[must_use]
+    pub fn monitor(&self) -> &SharedMonitor {
+        &self.monitor
+    }
+
+    /// The pane's `HALYARD_SESSION_ID`.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        self.session.id()
+    }
+
+    /// Polls the foreground process and advances the attention clock. Returns
+    /// true when what the pane shows changed.
+    pub fn poll_agent(&mut self, extra: &[String]) -> bool {
+        if self.exited.is_some() {
+            return false;
+        }
+        let fg = self.session.pid().and_then(|pid| signals::poll_foreground(pid, extra));
+        let now = SystemTime::now();
+        let mut m = signals::lock(&self.monitor);
+        if let Some(fg) = fg {
+            m.on_foreground(&fg, now);
+        }
+        m.tick(now);
+        m.take_changed()
+    }
+
+    /// Whether the user can see and type into this pane (its tab is shown and
+    /// its window is active). Gaining it clears unread. Returns true when what
+    /// the pane shows changed.
+    pub fn set_seen(&mut self, seen: bool) -> bool {
+        let mut m = signals::lock(&self.monitor);
+        m.set_focused(seen, SystemTime::now());
+        m.take_changed()
+    }
+
+    /// The user typed or pasted.
+    fn note_input(&self) {
+        signals::lock(&self.monitor).on_user_input(SystemTime::now());
     }
 
     /// The shell's working directory: the OSC 7 report when it names this
@@ -405,7 +477,12 @@ impl TerminalView {
         let mut redraw = false;
         while let Ok(event) = self.session.events().try_recv() {
             match event {
-                SessionEvent::FrameReady => redraw = true,
+                SessionEvent::FrameReady => {
+                    redraw = true;
+                    if signals::lock(&self.monitor).take_changed() {
+                        cx.emit(PaneEvent::AttentionChanged);
+                    }
+                }
                 SessionEvent::TitleChanged(title) => {
                     self.title = title;
                     cx.emit(PaneEvent::TitleChanged);
@@ -482,6 +559,7 @@ impl TerminalView {
         match route_keystroke(keystroke, OPTION_AS_ALT) {
             KeyRoute::Terminal(key) => {
                 self.session.send_key(key);
+                self.note_input();
                 true
             }
             KeyRoute::Text { mods, .. } => {
@@ -495,6 +573,9 @@ impl TerminalView {
     }
 
     fn type_text(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.note_input();
+        }
         let mods = std::mem::replace(&mut self.text_mods, Modifiers::NONE);
         let mut chars = text.chars();
         match (chars.next(), chars.next()) {
@@ -697,6 +778,7 @@ impl TerminalView {
     /// brackets when the program asked), asking first when the text holds a
     /// line break and the program has not enabled bracketed paste.
     fn paste_text(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.note_input();
         let bracketed = self.session.latest_frame().bracketed_paste;
         if !decide::paste_needs_confirmation(self.style.confirm_multiline_paste, bracketed, &text) {
             self.session.paste(text);
@@ -1065,7 +1147,7 @@ impl Render for TerminalView {
             cursor_text: self.style.cursor_text,
             cursor_on: self.blink_on || !self.style.blink,
             marked: self.marked.clone(),
-            chrome: self.chrome,
+            chrome: self.chrome.clone(),
         };
         let (pad_x, pad_y) = (self.style.padding_x, self.style.padding_y);
         let layout = Rc::clone(&self.layout);
@@ -1074,6 +1156,7 @@ impl Render for TerminalView {
         let focus = self.focus.clone();
         let entity = cx.entity();
         let exited = self.exited;
+        let badge = self.chrome.badge.clone();
 
         div()
             .key_context("Terminal")
@@ -1129,6 +1212,22 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
+            .when_some(badge, |el, b| {
+                el.child(
+                    div()
+                        .absolute()
+                        .top(px(4.0))
+                        .right(px(6.0))
+                        .px_2()
+                        .rounded_sm()
+                        .bg(b.bg)
+                        .when_some(b.border, |d, c| d.border_1().border_color(c))
+                        .text_color(b.fg)
+                        .text_xs()
+                        .font_family(".SystemUIFont")
+                        .child(b.text),
+                )
+            })
             .when_some(exited, |el, code| {
                 let text = match code {
                     Some(c) => format!("Process exited with code {c}. Press any key to close."),

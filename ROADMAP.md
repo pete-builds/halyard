@@ -146,8 +146,13 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 - [x] Command block model as a library (missing marks, nested shells, alternate
   screen, navigation, last failed, bounded history, nesting capped at 32 against
   hostile output): `halyard-shell` `blocks::tests`, `hostile_nesting_is_bounded_and_linear`
-- [ ] Command blocks in the UI: wiring the scanner tap and engine rows into panes,
-  navigate, copy output, rerun (pending; needs `halyard-term` and `halyard-app`)
+- [x] Scanner and block tracker wired into every pane with absolute rows: the session
+  feeds the engine up to each mark and reads the cursor row there
+  (`halyard-term::OutputObserver`, `observer_sees_the_cursor_row_at_each_mark`); a real
+  zsh or bash with the integration script sourced makes blocks with rows, statuses and
+  command lines (`signals::tests::integration_script_in_a_real_shell_makes_blocks`).
+  Rows drift once scrollback is full and old rows are dropped (not handled yet).
+- [ ] Command blocks in the UI: navigate, copy output, failure marks, rerun (pending)
 - [ ] SQLite history and search
 
 ## Phase 4: agent awareness and the open protocol
@@ -162,8 +167,27 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
   parsing and `docs/protocol.md`; Claude Code hook script tested in
   `crates/halyard-agents/tests/claude_hook.rs` (not yet run inside a live Claude Code
   session)
-- [ ] Setting `HALYARD_SESSION_ID` and `TERM_PROGRAM=Halyard` in each pane's environment
-  (pending: belongs to the PTY session code)
+- [x] `HALYARD_SESSION_ID` and `TERM_PROGRAM=Halyard` in each pane's environment
+  (`session_environment_is_set`); the app picks the id before spawning so the pane's
+  monitor can drop reports for other panes (`an_invalid_session_id_is_replaced`,
+  `pane::tests::protocol_report_for_another_session_is_ignored`)
+- [x] Per-pane signal pipeline in the app: output scanned on the session thread, the
+  foreground process polled every 500 ms (argv read only while a command runs), user
+  input and focus fed to the attention machine (`pane::tests`,
+  `signals::tests::fake_claude_notification_means_waiting`). macOS verified live with a
+  fake `claude` (debug-script screenshots, described in the PR); Linux runs the same tests in CI, no window run.
+- [x] Attention in the UI: a state mark on each tab and a badge on each pane from theme
+  tokens, unread drawn as a filled pill, a waiting pane outlined
+  (`attention_ui::tests::indicators_follow_the_theme_tokens`,
+  `tab_mark_is_the_most_urgent_pane_and_unread_if_any_is`); verified by screenshots on
+  macOS arm64
+- [x] Desktop notifications when a pane starts waiting or finishes in an inactive
+  window, rate limited, sanitized, `[agents] notify_on_waiting`
+  (`attention_ui::tests::one_notification_when_waiting_in_an_inactive_window`,
+  `rate_limits_per_pane_and_per_burst`, `notification_text_is_sanitized_and_capped`).
+  Not verified: a notification actually appearing. macOS delivers only from
+  `Halyard.app` (a bare binary has no bundle id and logs that once, seen live); the
+  Linux D-Bus call is compiled by CI but never run against a notification daemon.
 - [x] Dashboard model (git branch without running git, attention sort order):
   `dashboard::tests::sort_order`, `git::tests`
 - [ ] Local session API: authenticated socket, scoped capabilities, user approval for
@@ -192,7 +216,7 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
         dialogs, export the pane env vars, publish events, grants settings page
   - [ ] Peer uid rejection tested with a second real user (code path is a uid compare;
         not exercised by tests)
-- [ ] Agent dashboard with jump-to-pane and notifications: UI wiring pending
+- [ ] Agent dashboard with jump-to-pane: pending
 
 ## Phase 5: optional assistant and MCP
 

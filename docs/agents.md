@@ -1,8 +1,52 @@
 # Agents in Halyard
 
-Status: the model is implemented and tested as a library (`crates/halyard-agents`).
-Wiring it into the app (polling the foreground process, feeding focus and input
-events, drawing the sidebar and the dashboard) is not done yet; see `ROADMAP.md`.
+Status: the model is implemented and tested as a library (`crates/halyard-agents`) and
+wired into the app: every pane scans its output, polls its foreground process, and
+shows its state on its tab and in a badge, with desktop notifications. The dashboard
+is not built yet; see `ROADMAP.md`.
+
+## In the app
+
+Each pane runs the pipeline in `crates/halyard-app/src/signals.rs`:
+
+* **Output.** The session thread hands every PTY chunk to a `SignalScanner`
+  (`halyard-agents::pane`). The scanner finds the escape sequences, the session
+  feeds the VT engine up to each one and reads the cursor's absolute row there
+  (`halyard-term::OutputObserver`), and the chunk is applied to the pane's
+  `PaneMonitor` (command blocks and attention) under one lock. A chunk with no
+  escape sequence is one scan and one lock; terminal I/O never waits for the UI.
+* **Foreground.** Every 500 ms the window reads each shell's process groups (one
+  `proc_pidinfo` or `/proc/<pid>/stat` read per pane). Only while a command holds
+  the terminal does it read that command's executable and argv and run
+  `detect_agent` (plus `[agents] detect` names).
+* **Input and focus.** Keys, typed text and pastes are `UserInput`. A pane counts
+  as focused when it is the focused pane of the shown tab in the active window, so
+  news in a background window stays unread.
+
+What it shows:
+
+| State | Tab mark | Pane badge |
+|-------|----------|------------|
+| Working | `●` in `ui.accent` | `● <agent> · working` |
+| WaitingForInput | `●` in `ui.attention` | the same, and the pane outlined in `ui.attention` |
+| Idle | `●` in `ui.text_muted` | `● <agent> · idle` |
+| Finished, status 0 or unknown | `✓` in `ui.success` | `✓ <agent> · finished` |
+| Finished, status N | `✗N` in `ui.danger` | `✗N <agent> · exited N` |
+| Error | `!` in `ui.danger` | `! <agent> · error` |
+| Unknown | nothing | nothing |
+
+A tab shows its most urgent pane (the dashboard order below). Unread news turns the
+tab mark into a filled pill reading `<mark> new` and outlines the pane and its badge
+in `ui.attention` until the pane is focused.
+
+A pane that becomes WaitingForInput or Finished while its window is not active sends
+one desktop notification (`[agents] notify_on_waiting`, see `docs/configuration.md`).
+The title names the agent; the body is the agent's last notification text, or the tab
+title. Both come from the pane's output, so they are stripped of control and bidi
+characters and capped. Tests: `attention_ui::tests` (indicators, the tab mark, the
+decision, rate limits, sanitizing), `pane::tests` (the pipeline on a fake clock),
+`signals::tests::fake_claude_notification_means_waiting` (a real program named
+`claude` printing OSC 9 in a real PTY).
 
 Halyard shows what a coding agent in a pane is doing using only signals it can
 observe (ADR 0004). Every state names the signal that produced it (`Cause` in the

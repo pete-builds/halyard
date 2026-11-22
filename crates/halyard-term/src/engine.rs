@@ -230,6 +230,18 @@ impl Engine {
         }
     }
 
+    /// The cursor's row counted from the top of scrollback (the first row of
+    /// history is 0): scrollback rows above the active area plus the cursor's row
+    /// in it. While the alternate screen is active this counts on that screen,
+    /// which has no scrollback. Once scrollback is full and the oldest rows are
+    /// dropped, rows recorded earlier no longer match the same text.
+    #[must_use]
+    pub fn cursor_screen_row(&self) -> u64 {
+        let history = self.terminal.scrollback_rows().unwrap_or(0);
+        let y = self.terminal.cursor_y().unwrap_or(0);
+        u64::try_from(history).unwrap_or(u64::MAX).saturating_add(u64::from(y))
+    }
+
     /// The current window title (empty if none was set).
     #[must_use]
     pub fn title(&self) -> String {

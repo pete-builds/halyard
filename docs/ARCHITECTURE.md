@@ -31,8 +31,11 @@ Halyard is a terminal first. Everything else is layered on top and can be turned
   the screen before `Exited` is reported.
 - Commands from the UI (`Session` is `Send + Sync`) and output chunks meet in one
   `crossbeam_channel::select!` loop on the session thread.
-- An optional output tap sees every raw chunk before the engine parses it; the shell
-  integration scanner plugs in there.
+- An optional output tap sees every raw chunk before the engine parses it. An
+  `OutputObserver` does the same and can also ask for the cursor's absolute row at
+  offsets it picks: the session feeds the engine up to each offset, reads the row, and
+  continues. The app's shell integration and agent scanner (`halyard-agents::pane`)
+  plugs in there, so a prompt mark knows its row without a second parse.
 - After consuming a burst of output the session thread builds a new `Frame` and publishes
   it as `Arc<Frame>`, at most once per 8 ms while output streams, then notifies the UI
   through a callback and an event channel (`FrameReady`, `TitleChanged`, `Bell`,

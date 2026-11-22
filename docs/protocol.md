@@ -1,7 +1,7 @@
 # The Halyard session protocol
 
-Version 1. Status: implemented in `halyard-shell` (parsing) and `halyard-agents` (state);
-the UI that shows it is not wired yet (see `ROADMAP.md`).
+Version 1. Status: implemented in `halyard-shell` (parsing) and `halyard-agents` (state),
+and shown by the app on each pane's tab and badge (see `docs/agents.md`).
 
 Programs running in a Halyard pane can tell Halyard what they are doing with one escape
 sequence. Halyard never needs it (agent state is derived from observable signals, see

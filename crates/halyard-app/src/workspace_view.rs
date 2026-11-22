@@ -19,7 +19,12 @@ use halyard_workspace::{
     Axis, Closed, Direction, MinSize, PaneId, Rect, Restored, SavedWindow, Workspace,
 };
 
+mod attention;
+
+use halyard_agents::AttentionState;
+
 use crate::app_state::{self, AppState};
+use crate::attention_ui;
 use crate::keybind::{self, *};
 use crate::palette::{self, Command, Mode};
 use crate::settings::{self, Settings};
@@ -111,7 +116,12 @@ pub struct WorkspaceView {
     dark: bool,
     blink_on: bool,
     fatal: Option<String>,
+    /// Desktop notification decisions (`attention.rs`).
+    notifier: attention_ui::Notifier,
+    /// Each pane's attention state when last seen, to notice transitions.
+    attention_states: HashMap<PaneId, AttentionState>,
     _blink: Task<()>,
+    _agent_poll: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -178,7 +188,10 @@ impl WorkspaceView {
             dark: is_dark(window.appearance()),
             blink_on: true,
             fatal: None,
+            notifier: attention_ui::Notifier::new(),
+            attention_states: HashMap::new(),
             _blink: blink,
+            _agent_poll: Self::start_agent_poll(window, cx),
             _subscriptions: subs,
         };
         for (id, cwd) in restored.cwds {
@@ -333,6 +346,7 @@ impl WorkspaceView {
                     self.after_change(window, cx);
                 }
             }
+            PaneEvent::AttentionChanged => self.attention_changed(id, window, cx),
         }
     }
 
@@ -364,26 +378,38 @@ impl WorkspaceView {
     }
 
     /// Dim inactive panes and outline the focused one (when there are
-    /// several), from the theme's tokens.
+    /// several), from the theme's tokens; badge and outline panes with an
+    /// agent (`attention.rs`).
     fn refresh_chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_seen(window, cx);
         let theme = self.theme(cx);
         let Some(tab) = self.model.tabs().get(self.model.active_index()) else { return };
         let multi = tab.root.len() > 1 && !tab.zoomed;
         let focused = tab.focused;
         let active = window.is_window_active();
-        for (id, p) in &self.panes {
-            let chrome = if *id == focused {
+        let mut updates = Vec::with_capacity(self.panes.len());
+        for id in self.panes.keys() {
+            let mut chrome = if *id == focused {
                 PaneChrome {
-                    dim: None,
                     border: (multi && active).then(|| to_hsla(theme.ui.border_focused)),
+                    ..PaneChrome::default()
                 }
             } else {
                 PaneChrome {
                     dim: multi.then(|| rgba(theme.terminal.background, 0.35)),
-                    border: None,
+                    ..PaneChrome::default()
                 }
             };
-            p.view.update(cx, |v, cx| v.set_chrome(chrome, cx));
+            if let Some((badge, outline)) = self.pane_marks(*id, &theme, cx) {
+                chrome.badge = Some(badge);
+                chrome.border = outline.or(chrome.border);
+            }
+            updates.push((*id, chrome));
+        }
+        for (id, chrome) in updates {
+            if let Some(p) = self.panes.get(&id) {
+                p.view.update(cx, |v, cx| v.set_chrome(chrome, cx));
+            }
         }
     }
 
@@ -431,6 +457,7 @@ impl WorkspaceView {
     }
 
     fn close_pane(&mut self, id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        self.forget_attention(id, cx);
         let outcome = self.model.close_pane(id);
         // Dropping the view drops its session, which ends the program.
         self.panes.remove(&id);
@@ -895,6 +922,7 @@ impl WorkspaceView {
                         this.after_change(window, cx);
                     }
                 }))
+                .children(self.tab_mark(i, theme, cx))
                 .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(title))
                 .when(zoomed, |d| d.child(div().text_color(to_hsla(ui.accent)).child("◉")))
                 .child(

@@ -11,16 +11,20 @@
 //!   user first.
 //! * [`git`]: reading the current branch from `.git/HEAD` without running git.
 //!
-//! UI wiring (polling the foreground process, focus and input events, the sidebar) is
-//! not part of this crate.
+//! * [`pane`]: one pane's signals put together (scanner events with their rows,
+//!   command blocks, attention, the foreground process), for the app to drive.
+//!
+//! The UI itself (drawing, polling timers, notifications) is not part of this crate.
 
 pub mod attention;
 pub mod dashboard;
 pub mod detect;
 pub mod git;
+pub mod pane;
 pub mod platform;
 
 pub use attention::{AttentionConfig, AttentionEvent, AttentionMachine, AttentionState, Cause};
 pub use dashboard::{Dashboard, SessionSummary};
 pub use detect::{AgentKind, ProcessInfo, detect_agent};
 pub use git::{GitHead, git_head};
+pub use pane::{Foreground, PaneMonitor, SignalScanner, detect_with_extra};
