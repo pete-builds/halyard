@@ -29,7 +29,7 @@ named; untested platforms are listed as such. Priorities: [docs/PRODUCT.md](docs
 ## Phase 2: modern UI
 
 - [ ] Tabs, draggable split panes, keyboard pane navigation and resizing
-- [ ] TOML config and token-based themes, bundled themes
+- [x] TOML config and token-based themes, bundled themes (library: `crates/halyard-config`, tests named in docs/themes.md)
 - [ ] Settings wired into the app with live reload
 - [ ] Command palette
 - [ ] Persistent workspaces (layouts, cwd, names) restored on launch
