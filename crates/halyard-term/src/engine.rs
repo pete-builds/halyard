@@ -640,6 +640,7 @@ impl Engine {
             cwd,
             alt_screen,
             mouse_tracking,
+            bracketed_paste: self.bracketed_paste(),
             scroll,
             generation: self.generation,
         })
@@ -1195,6 +1196,16 @@ mod tests {
         e.selection_clear().unwrap();
         assert_eq!(e.selection_text().unwrap(), None);
         assert!(!e.frame().unwrap().cell(6, 0).unwrap().flags.has(CellFlags::SELECTED));
+    }
+
+    #[test]
+    fn frame_reports_bracketed_paste_mode() {
+        let mut e = engine();
+        assert!(!e.frame().unwrap().bracketed_paste);
+        e.write(b"\x1b[?2004h");
+        assert!(e.frame().unwrap().bracketed_paste);
+        e.write(b"\x1b[?2004l");
+        assert!(!e.frame().unwrap().bracketed_paste);
     }
 
     #[test]

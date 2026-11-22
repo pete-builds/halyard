@@ -199,6 +199,9 @@ pub struct Frame {
     pub alt_screen: bool,
     /// True when the application has enabled mouse reporting.
     pub mouse_tracking: bool,
+    /// True when the application has enabled bracketed paste (mode 2004),
+    /// so pasted line breaks do not run commands.
+    pub bracketed_paste: bool,
     /// Scrollback position.
     pub scroll: ScrollInfo,
     /// Increases every time a new frame is published.
