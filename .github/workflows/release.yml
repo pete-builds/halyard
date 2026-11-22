@@ -39,6 +39,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # full history, so the tag can be checked against main
       - name: Version
         id: v
         env:
@@ -51,6 +52,11 @@ jobs:
             exit 1
           fi
           if [ "$REF_TYPE" = tag ]; then
+            # A release may only come from a commit that is already on main.
+            if ! git merge-base --is-ancestor HEAD origin/main; then
+              echo "tag $REF_NAME points at a commit that is not on origin/main" >&2
+              exit 1
+            fi
             if [ "$REF_NAME" != "v$cargo_version" ]; then
               echo "tag $REF_NAME does not match Cargo.toml version $cargo_version" >&2
               echo "Bump the workspace version, merge it, then tag that commit." >&2

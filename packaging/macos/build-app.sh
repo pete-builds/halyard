@@ -41,6 +41,10 @@ bundle_id="io.github.pete-builds.Halyard"
 targets=(aarch64-apple-darwin x86_64-apple-darwin)
 
 target_dir="${CARGO_TARGET_DIR:-$root/target}"
+case "$target_dir" in
+  /*) ;;
+  *) echo "CARGO_TARGET_DIR must be an absolute path (got: $target_dir)" >&2; exit 1 ;;
+esac
 
 if [ "$skip_build" -eq 0 ]; then
   for t in "${targets[@]}"; do
@@ -63,7 +67,9 @@ chmod 755 "$app/Contents/MacOS/halyard"
 
 echo "==> icon"
 icon_src="$root/packaging/icon/halyard-1024.png"
-iconset="$(mktemp -d)/Halyard.iconset"
+icon_tmp="$(mktemp -d)"
+trap 'rm -rf "$icon_tmp"' EXIT
+iconset="$icon_tmp/Halyard.iconset"
 mkdir -p "$iconset"
 for size in 16 32 128 256 512; do
   double=$((size * 2))
@@ -71,7 +77,6 @@ for size in 16 32 128 256 512; do
   sips -z "$double" "$double" "$icon_src" --out "$iconset/icon_${size}x${size}@2x.png" > /dev/null
 done
 iconutil --convert icns "$iconset" --output "$app/Contents/Resources/Halyard.icns"
-rm -rf "$(dirname "$iconset")"
 
 cat > "$app/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -104,7 +109,7 @@ echo "==> codesign (ad-hoc)"
 codesign --force --sign - --timestamp=none "$app"
 codesign --verify --strict --verbose=2 "$app"
 
-zip="$out/Halyard-${version}-macos-universal.zip"
+zip="$out/Halyard-${full_version}-macos-universal.zip"
 rm -f "$zip"
 ditto -c -k --keepParent "$app" "$zip"
 

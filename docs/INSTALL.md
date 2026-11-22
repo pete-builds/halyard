@@ -32,7 +32,7 @@ linked but untested.
      System Settings, Privacy and Security, and choose **Open Anyway**; or
    - remove the quarantine flag yourself:
      ```sh
-     xattr -d com.apple.quarantine /Applications/Halyard.app
+     xattr -dr com.apple.quarantine /Applications/Halyard.app
      ```
    Only do this for a copy whose checksum you verified. Notarization is open work.
 
