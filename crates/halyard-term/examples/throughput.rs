@@ -23,7 +23,7 @@
 //! Every session run checks that a marker printed after the flood is on the
 //! final frame, so a run that drops output or misses the last frame fails.
 //! `--quick` runs small payloads once and exits non-zero when a throughput is
-//! below a loose floor or `yes-head` uses too much CPU, to catch a large
+//! below a loose floor or `yes-head` arrives in tiny chunks, to catch a large
 //! regression in CI.
 
 // The report is this program's output.
@@ -43,12 +43,13 @@ const ROWS: u16 = 50;
 /// Lowest acceptable throughput in `--quick` mode, in MB/s.
 const QUICK_FLOOR_MBPS: f64 = 5.0;
 /// `yes-head` is limited by the program's own 2-byte writes (about 6 MB/s on
-/// an M4 Pro), so its throughput floor is lower.
-const QUICK_FLOOR_YES_HEAD_MBPS: f64 = 1.0;
-/// Most process CPU time per MB of `yes-head` output in `--quick` mode. Before
-/// the reader paused after small reads this was 0.34 s/MB on an M4 Pro; after,
-/// about 0.04 s/MB.
-const QUICK_CEILING_YES_HEAD_CPU_PER_MB: f64 = 0.2;
+/// an M4 Pro, 1.3 MB/s on a GitHub macOS runner), so its floor is far lower.
+const QUICK_FLOOR_YES_HEAD_MBPS: f64 = 0.25;
+/// Smallest average chunk the reader may hand over for `yes-head` in `--quick`
+/// mode. Before the reader paused after small reads it was 8 to 12 bytes; after,
+/// 217 to 568 bytes (M4 Pro, GitHub macOS and Ubuntu runners). Unlike CPU time
+/// this does not depend on how fast the machine is.
+const QUICK_FLOOR_YES_HEAD_CHUNK_BYTES: f64 = 64.0;
 /// Printed after every flood; must be on the last published frame.
 const DONE_MARKER: &str = "bench-done";
 
@@ -321,10 +322,10 @@ fn main() {
         if m < floor {
             failures.push(format!("session/{} {m:.1} MB/s is below {floor} MB/s", w.name()));
         }
-        let cpu_per_mb = pick(|s| s.process_cpu.as_secs_f64()) / mb(bytes);
-        if matches!(w, Workload::YesHead) && cpu_per_mb > QUICK_CEILING_YES_HEAD_CPU_PER_MB {
+        let avg_chunk = bytes as f64 / pick(|s| s.chunks.max(1) as f64);
+        if matches!(w, Workload::YesHead) && avg_chunk < QUICK_FLOOR_YES_HEAD_CHUNK_BYTES {
             failures.push(format!(
-                "session/{} used {cpu_per_mb:.3} s CPU per MB, above {QUICK_CEILING_YES_HEAD_CPU_PER_MB}",
+                "session/{} read {avg_chunk:.0} bytes per chunk, below {QUICK_FLOOR_YES_HEAD_CHUNK_BYTES}",
                 w.name()
             ));
         }

@@ -53,9 +53,12 @@ runs at 26 MB/s (`head -c 100000000 /dev/zero | LC_ALL=C tr '\0' a > /dev/null` 
 so it measured `tr`. In the first baseline it gave 30 MB/s with Halyard's threads mostly idle.
 
 `--quick` runs 5 MB per session workload and 20 MB per engine workload once, and exits non-zero
-when any throughput is below 5 MB/s (1 MB/s for `yes-head`, which is limited by the program's
-own writes), when `yes-head` costs more than 0.2 s of process CPU per MB, when an end marker is
-missing from the final frame, or when an echo never arrives. CI runs it on macOS and Ubuntu.
+when any throughput is below 5 MB/s (0.25 MB/s for `yes-head`, which is limited by the
+program's own writes), when `yes-head` arrives in chunks averaging under 64 bytes, when an end
+marker is missing from the final frame, or when an echo never arrives. CI runs it on macOS and
+Ubuntu. The chunk size check is the one that guards this change, and it does not depend on how
+fast the machine is: a first version used a CPU-per-MB ceiling, and a GitHub macOS runner came
+within 5% of it with the fix in place (0.19 s/MB against 0.2).
 These are loose limits that catch a large regression, not a benchmark.
 
 ## Results
@@ -184,8 +187,8 @@ then waits for the reader, so 50 us it is. The 1024-byte threshold also paused a
 512 it measured 134.4 MB/s, and the 3-run table above shows no change.
 
 Proof: `trickling_output_is_read_in_batches` (`crates/halyard-term/tests/session.rs`) fails on
-`main` ("12 bytes per chunk (48596 chunks)") and passes with the change. The `--quick` CPU
-ceiling fails on `main` ("session/yes-head used 0.332 s CPU per MB, above 0.2").
+`main` ("12 bytes per chunk (48596 chunks)") and passes with the change. `--quick` exits 1 on
+`main` ("session/yes-head read 8 bytes per chunk, below 64") and 0 with the change.
 
 ## Suspects ruled out (measured)
 
@@ -215,7 +218,11 @@ ceiling fails on `main` ("session/yes-head used 0.332 s CPU per MB, above 0.2").
 - Input latency end to end (key press to pixels). Only the headless echo above is measured.
 - GPU render time and frame pacing in a visible window.
 - Many panes at once.
-- Linux and NixOS: CI runs `--quick` on Ubuntu, but no numbers are recorded here.
+- Linux and NixOS, beyond one CI smoke run. On the `ubuntu-24.04` runner (5 MB, one run, with
+  this change) `--quick` gave long-line 245.6, yes 12.4, yes-head 8.3 and mixed 127.0 MB/s,
+  with Linux PTY reads averaging 3253 bytes on long-line, so the 1 KiB read limit is a macOS
+  property. On the `macos-15` runner: 20.1, 7.9, 1.3 and 49.1 MB/s. Shared runners are slow
+  and noisy; these show only that the floors hold there.
 - Throughput with the shell integration scanner installed as the output tap.
 
 ## Found along the way, not changed here
