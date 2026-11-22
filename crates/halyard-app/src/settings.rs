@@ -214,8 +214,10 @@ pub fn appearance(dark: bool) -> Appearance {
 }
 
 /// Where a new shell starts. `inherited` is the focused pane's directory,
-/// used for `working_directory = "inherit"`; a restored pane passes its own
-/// saved directory as `restored`, which wins when it still exists.
+/// used for `working_directory = "inherit"`. A restored pane passes its
+/// saved directory as `restored`: it starts there while the directory
+/// exists, else in home (`persist::resolve_cwd`), never somewhere the
+/// config picked for new panes.
 #[must_use]
 pub fn start_directory(
     setting: &WorkingDirectory,
@@ -223,8 +225,11 @@ pub fn start_directory(
     restored: Option<&Path>,
     home: Option<&Path>,
 ) -> Option<PathBuf> {
-    if let Some(r) = restored.filter(|p| p.is_absolute() && p.is_dir()) {
-        return Some(r.to_path_buf());
+    if let Some(r) = restored {
+        return match home {
+            Some(h) => Some(halyard_workspace::persist::resolve_cwd(Some(r), h)),
+            None => r.is_absolute().then(|| r.to_path_buf()).filter(|p| p.is_dir()),
+        };
     }
     match setting {
         WorkingDirectory::Home => None,
@@ -435,6 +440,14 @@ mod tests {
             Some(d.join("proj"))
         );
         assert_eq!(start_directory(&WorkingDirectory::Home, None, Some(&gone), None), None);
+        // With a home directory, a vanished saved directory restores to home
+        // (persist::resolve_cwd), even when new panes would start elsewhere.
+        let elsewhere = WorkingDirectory::Path(d.join("proj"));
+        assert_eq!(start_directory(&elsewhere, None, Some(&gone), Some(d)), Some(d.to_path_buf()));
+        assert_eq!(
+            start_directory(&elsewhere, None, Some(&d.join("proj")), Some(d)),
+            Some(d.join("proj"))
+        );
         assert_eq!(
             start_directory(&WorkingDirectory::Home, None, Some(Path::new("relative")), None),
             None
