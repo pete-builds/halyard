@@ -109,8 +109,15 @@ flatpak-spawn --host --watch-bus --directory=<cwd> --env=TERM=... --env=HALYARD_
   your session's environment, plus every variable Halyard sets for a pane (`TERM`,
   `COLORTERM`, `TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `HALYARD_SESSION_ID` and any
   configured extras), each passed once with `--env`, and `SHELL`.
-- `--watch-bus` ends the host process when Halyard goes away, so closing a pane or a crash
-  does not leave shells behind.
+- `--watch-bus` makes Flatpak's session helper send SIGINT to the host process group when
+  Halyard's side of the bus goes away (a crash, for example).
+- Every option uses the `--name=value` form and comes before the program: `flatpak-spawn`
+  treats the first argument that does not start with `-` as the command, and a value given
+  as a separate argument would be taken for it.
+
+Flatpak's session helper starts the host process in a new session and makes the pane's PTY
+its controlling terminal (read from `flatpak-session-helper.c`), so job control and the
+kernel's hangup on a closed PTY work as they do in a native install.
 
 The decision is a pure function, `halyard_term::flatpak::host_launch`, with unit tests in
 `crates/halyard-term/src/flatpak.rs` and `session.rs` (`inside_flatpak_*`,
@@ -146,9 +153,10 @@ bundle's permissions against this list and fails if network access appears.
   (unless the shell reports its directory with OSC 7), and agent detection by foreground
   process reports "unknown". Expected from reading the code, not yet observed.
 - **Signals go through `flatpak-spawn`.** Closing a pane sends SIGHUP to `flatpak-spawn`,
-  which forwards it to the host process; if that fails, `--watch-bus` ends it when the
-  connection closes. This is Flatpak's documented behaviour, not yet observed in a real
-  session.
+  which forwards it to the host process, and closing the PTY hangs up the shell's
+  controlling terminal. An interactive shell ignores the SIGINT that `--watch-bus` sends,
+  so a shell left behind by a crash ends through the PTY hangup instead. All of this is
+  read from Flatpak's source, not yet observed in a real session.
 - **Config and state live in the app's directories.** Flatpak points `XDG_CONFIG_HOME` and
   `XDG_STATE_HOME` at `~/.var/app/io.github.pete_builds.Halyard/`, so the config file is
   `~/.var/app/io.github.pete_builds.Halyard/config/halyard/config.toml`. To share one

@@ -82,8 +82,12 @@ pub const HOST_SHELL_FALLBACK: &str = r#"exec "${SHELL:-/bin/sh}" -l"#;
 ///   shell: `<$SHELL> -l` when `$SHELL` is an absolute path, otherwise
 ///   `/bin/sh -c` [`HOST_SHELL_FALLBACK`]. The sandbox cannot check that the
 ///   host's shell exists, so `$SHELL` is passed through as is.
-/// - `--watch-bus` ends the host process when Halyard's side goes away, so a
-///   closed pane or a crashed app does not leave shells running.
+/// - `--watch-bus` has Flatpak signal the host process group (SIGINT) when
+///   Halyard's side of the bus goes away. A shell that ignores SIGINT still
+///   ends when its PTY, its controlling terminal, is closed.
+/// - Every option uses the `--name=value` form and precedes the program:
+///   `flatpak-spawn` takes the first argument without a leading `-` as the
+///   command.
 /// - `flatpak-spawn` does not forward the sandbox's environment; the host
 ///   process starts from the user's session environment. Every variable in
 ///   `spec.env` is passed with `--env`, once per name with its last value,
@@ -238,13 +242,21 @@ mod tests {
 
     #[test]
     fn host_options_come_before_the_program() {
-        // flatpak-spawn stops parsing options at the first non-option, so the
-        // program's own `-l` or `-c` must come after every option of ours.
+        // flatpak-spawn takes the first argument without a leading `-` as the
+        // command, so every option of ours comes first and carries its value
+        // after `=`, never as a separate argument.
         let env = env(&[("A", "1")]);
-        let launch = host_launch(&spec(&env));
+        let launch = host_launch(&HostSpawn { cwd: Some(Path::new("/w")), ..spec(&env) });
         let args = strs(&launch);
         let program = args.iter().position(|a| a == "/usr/bin/zsh").unwrap();
-        assert!(args[..program].iter().all(|a| a.starts_with("--")), "{args:?}");
+        assert_eq!(program, 5, "{args:?}");
+        for opt in &args[..program] {
+            assert!(opt.starts_with("--"), "{args:?}");
+            assert!(
+                opt == "--host" || opt == "--watch-bus" || opt.contains('='),
+                "{opt} has no inline value: {args:?}"
+            );
+        }
     }
 
     #[test]
