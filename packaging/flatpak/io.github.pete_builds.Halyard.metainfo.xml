@@ -40,6 +40,12 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="0.1.1" date="2026-11-22" type="stable">
+      <description>
+        <p>First published preview. Same features as 0.1.0, whose tag produced no release
+        files because of a packaging fault in the release workflow.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-22" type="stable">
       <description>
         <p>First preview release: Ghostty VT engine, GPU rendering, tabs, splits, themes,
