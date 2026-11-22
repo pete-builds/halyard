@@ -191,4 +191,5 @@ The `nix` workflow (`.github/workflows/nix.yml`) runs on `ubuntu-24.04` (x86_64-
 * On Linux, a control build first proves the sandbox has no network, so the package building
   in that sandbox shows the build is offline.
 
-x86_64-darwin is evaluated but not built in CI.
+x86_64-darwin has no runner: CI only evaluates it (`nix flake check --all-systems --no-build`
+on ubuntu-24.04), it is never built.
