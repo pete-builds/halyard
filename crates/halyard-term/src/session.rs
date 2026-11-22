@@ -292,12 +292,12 @@ struct ShutdownPlan {
 }
 
 impl ShutdownPlan {
-    const fn for_child(child_running: bool) -> Self {
-        Self {
-            hangup_group: child_running,
-            hangup_child: child_running,
-            force_kill_after_grace: child_running,
-        }
+    /// The plan when a session closes. `child_running` is the run loop's view; `exit_pending`
+    /// is true when the waiter has already reaped the child and queued its exit status, which
+    /// the run loop has not received yet. Either way a reaped child gets no signal.
+    const fn at_close(child_running: bool, exit_pending: bool) -> Self {
+        let signal = child_running && !exit_pending;
+        Self { hangup_group: signal, hangup_child: signal, force_kill_after_grace: signal }
     }
 }
 
@@ -711,7 +711,9 @@ impl SessionThread {
     /// foreground process group and to the shell, stop the reader, then
     /// SIGKILL the shell if it is still running after a grace period.
     fn shutdown(&mut self, child_running: bool) {
-        let plan = ShutdownPlan::for_child(child_running);
+        // The waiter thread reaps the child and then reports the exit. An exit that is reported
+        // but not yet received means the pid is already reaped and may be reused.
+        let plan = ShutdownPlan::at_close(child_running, !self.exit_rx.is_empty());
         if plan.hangup_group
             && let Some(pgrp) = self.master.process_group_leader()
             && pgrp > 0
@@ -980,6 +982,7 @@ mod tests {
             "STY",
             "ZELLIJ",
             "ZELLIJ_SESSION_NAME",
+            "ZELLIJ_PANE_ID",
             "TERM_FEATURES",
             "TERMINAL_EMULATOR",
             "KONSOLE_DBUS_SESSION",
@@ -994,9 +997,16 @@ mod tests {
     #[test]
     fn a_reaped_child_is_never_signalled() {
         // Its pid and process group may already belong to another process.
-        let plan = ShutdownPlan::for_child(false);
-        assert!(!plan.hangup_group && !plan.hangup_child && !plan.force_kill_after_grace);
-        let plan = ShutdownPlan::for_child(true);
+        let quiet = ShutdownPlan {
+            hangup_group: false,
+            hangup_child: false,
+            force_kill_after_grace: false,
+        };
+        // Exit already received by the run loop, or reaped and queued but not yet received.
+        assert_eq!(ShutdownPlan::at_close(false, false), quiet);
+        assert_eq!(ShutdownPlan::at_close(false, true), quiet);
+        assert_eq!(ShutdownPlan::at_close(true, true), quiet);
+        let plan = ShutdownPlan::at_close(true, false);
         assert!(plan.hangup_group && plan.hangup_child && plan.force_kill_after_grace);
     }
 

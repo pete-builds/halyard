@@ -657,9 +657,9 @@ const XTVERSION: &str = concat!("Halyard ", env!("CARGO_PKG_VERSION"));
 /// inject commands into the shell (CVE-2024-38396 for iTerm2). So this is an
 /// allowlist, applied per escape sequence:
 ///
-/// - CSI replies whose parameters are digits and `; : < = > ?` with optional
-///   intermediates: DA1, DA2, DSR, CPR, DECRQM, Kitty keyboard flags, XTWINOPS
-///   size reports, color scheme reports.
+/// - CSI replies whose parameter bytes are in 0x20 to 0x3f (no free text),
+///   with optional intermediates: DA1, DA2, DSR, CPR, DECRQM, Kitty keyboard
+///   flags, XTWINOPS size reports. The color-scheme query is not answered.
 /// - OSC 4 and OSC 10 to 19 color reports in `rgb:` hex form.
 /// - DCS `>|` XTVERSION with Halyard's own string, and DCS `!|` DA3 (hex).
 ///
