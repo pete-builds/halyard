@@ -43,8 +43,26 @@ actions!(
         PrevPrompt,
         NextPrompt,
         CopyLastOutput,
+        ApproveDialog,
+        DenyDialog,
     ]
 );
+
+/// The key context of an open session API approval dialog.
+pub const APPROVAL_CONTEXT: &str = "Approval";
+
+/// The approval dialog's own bindings, in [`APPROVAL_CONTEXT`]. They must be bound
+/// after the keymap's: config bindings have no context, which GPUI ranks as deep as
+/// the deepest context, so at equal depth the later binding wins. That keeps the
+/// approve chord (Ctrl+Shift+Enter on Linux is also Zoom Pane) with the dialog.
+#[must_use]
+pub fn dialog_bindings(macos: bool) -> Vec<KeyBinding> {
+    let (approve, _) = crate::approval::approve_chord(macos);
+    vec![
+        KeyBinding::new(approve, ApproveDialog, Some(APPROVAL_CONTEXT)),
+        KeyBinding::new("escape", DenyDialog, Some(APPROVAL_CONTEXT)),
+    ]
+}
 
 /// The GPUI action for a config action, or `None` for actions that are not
 /// built yet (`find`), whose chords then stay with the terminal.
@@ -285,5 +303,52 @@ mod tests {
         }
         let c = chord("ctrl+pagedown", Platform::Linux);
         assert!(label(&c).ends_with("Pagedown"));
+    }
+
+    /// With a dialog open (context `Workspace > Approval`), the approve chord is the
+    /// dialog's on both platforms, even where the keymap binds the same chord (Zoom
+    /// Pane is Ctrl+Shift+Enter on Linux); plain Enter and Ctrl+Enter are not.
+    #[test]
+    fn the_approve_chord_reaches_the_dialog_over_workspace_bindings() {
+        for (p, macos) in [(Platform::Mac, true), (Platform::Linux, false)] {
+            let (mut all, _) = bindings(&Keymap::defaults(p));
+            all.extend(dialog_bindings(macos));
+            let keymap = gpui::Keymap::new(all);
+            let stack = [
+                gpui::KeyContext::parse("Workspace").unwrap(),
+                gpui::KeyContext::parse(APPROVAL_CONTEXT).unwrap(),
+            ];
+            let (chord, _) = crate::approval::approve_chord(macos);
+            let ks = [Keystroke::parse(chord).unwrap()];
+            let (found, _) = keymap.bindings_for_input(&ks, &stack);
+            assert!(
+                found.first().is_some_and(|b| b.action().partial_eq(&ApproveDialog)),
+                "{chord} on {p:?}: {:?}",
+                found.iter().map(|b| b.action().name()).collect::<Vec<_>>()
+            );
+            for plain in ["enter", "ctrl-enter", "shift-enter"] {
+                let ks = [Keystroke::parse(plain).unwrap()];
+                let (found, _) = keymap.bindings_for_input(&ks, &stack);
+                assert!(
+                    !found.iter().any(|b| b.action().partial_eq(&ApproveDialog)),
+                    "{plain} on {p:?}"
+                );
+            }
+            // Outside the dialog the chord keeps its workspace meaning.
+            let (found, _) = keymap.bindings_for_input(&ks_of(chord), &stack[..1]);
+            assert!(!found.iter().any(|b| b.action().partial_eq(&ApproveDialog)));
+        }
+        // The Linux chord really is a workspace binding too: the precedence matters.
+        let (linux, _) = bindings(&Keymap::defaults(Platform::Linux));
+        let keymap = gpui::Keymap::new(linux);
+        let (found, _) = keymap.bindings_for_input(
+            &ks_of("ctrl-shift-enter"),
+            &[gpui::KeyContext::parse("Workspace").unwrap()],
+        );
+        assert!(found.first().is_some_and(|b| b.action().partial_eq(&ZoomPane)));
+    }
+
+    fn ks_of(s: &str) -> [Keystroke; 1] {
+        [Keystroke::parse(s).unwrap()]
     }
 }

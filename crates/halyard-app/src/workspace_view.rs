@@ -21,6 +21,9 @@ use halyard_workspace::{
 
 mod attention;
 mod dashboard;
+mod session_api;
+
+pub use session_api::Reply;
 
 use halyard_agents::AttentionState;
 
@@ -100,6 +103,10 @@ struct PaletteUi {
     focus: FocusHandle,
     /// Dashboard rows, in [`Mode::Agents`] (`dashboard.rs`).
     agents: Vec<crate::dashboard_ui::Row>,
+    /// The grants listed in [`Mode::PairedTools`] and where to revoke them.
+    paired: Option<(crate::session_api::PairedTools, halyard_ipc::GrantsHandle)>,
+    /// The grants are still being read.
+    paired_loading: bool,
 }
 
 /// One window.
@@ -123,6 +130,10 @@ pub struct WorkspaceView {
     notifier: attention_ui::Notifier,
     /// Each pane's attention state when last seen, to notice transitions.
     attention_states: HashMap<PaneId, AttentionState>,
+    /// The open session API approval dialog (`session_api.rs`).
+    approval: Option<session_api::ApprovalUi>,
+    /// Numbers dialogs, so a timeout closes only its own.
+    next_approval: u64,
     _blink: Task<()>,
     _agent_poll: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -159,6 +170,7 @@ impl WorkspaceView {
                 this.apply_settings(window, cx);
             }),
             cx.observe_window_activation(window, |this, window, cx| {
+                this.approval_window_activated(window, cx);
                 this.refresh_chrome(window, cx);
                 for p in this.panes.values() {
                     p.view.update(cx, |_, cx| cx.notify());
@@ -193,6 +205,8 @@ impl WorkspaceView {
             fatal: None,
             notifier: attention_ui::Notifier::new(),
             attention_states: HashMap::new(),
+            approval: None,
+            next_approval: 0,
             _blink: blink,
             _agent_poll: Self::start_agent_poll(window, cx),
             _subscriptions: subs,
@@ -310,6 +324,7 @@ impl WorkspaceView {
             ),
             scrollback: usize::try_from(s.config.terminal.scrollback_lines).unwrap_or(usize::MAX),
             palette: settings::engine_palette(&theme.palette()),
+            api: cx.global::<AppState>().session_api.clone(),
         };
         let r = self.content_rect(window, cx);
         let area = size(px(r.w), px(r.h));
@@ -418,6 +433,9 @@ impl WorkspaceView {
     }
 
     fn focus_active_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.approval_open() {
+            return;
+        }
         if self.palette.is_some() {
             return;
         }
@@ -568,6 +586,11 @@ impl WorkspaceView {
 
     /// Run a keymap action.
     pub fn run(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        // An approval dialog is modal: no window action (close, new tab, palette,
+        // zoom) runs under it. Quitting the app still works and denies it.
+        if self.approval_open() && action != Action::Quit {
+            return;
+        }
         let bounds = self.content_rect(window, cx);
         let dir = |d| Some(d);
         let focus_dir = match action {
@@ -735,7 +758,14 @@ impl WorkspaceView {
         let focus = cx.focus_handle();
         window.focus(&focus);
         self.end_preview_unless(Some(&model.mode), window, cx);
-        self.palette = Some(PaletteUi { model, commands, focus, agents: Vec::new() });
+        self.palette = Some(PaletteUi {
+            model,
+            commands,
+            focus,
+            agents: Vec::new(),
+            paired: None,
+            paired_loading: false,
+        });
         cx.notify();
     }
 
@@ -821,6 +851,7 @@ impl WorkspaceView {
                 match picked.and_then(|i| p.commands.get(i).copied()) {
                     Some(Command::SwitchTheme) => self.open_themes(window, cx),
                     Some(Command::CopyShellIntegration) => self.copy_shell_integration(cx),
+                    Some(Command::PairedTools) => self.open_paired_tools(window, cx),
                     Some(Command::Run(a)) if palette::runs_in_pane(a) => {
                         // Copy and paste belong to the pane, which has focus
                         // again; dispatch once this update is over.
@@ -855,6 +886,10 @@ impl WorkspaceView {
                 if let Some(row) = picked.and_then(|i| p.agents.get(i)) {
                     self.jump_to(row.target, window, cx);
                 }
+            }
+            Mode::PairedTools => {
+                self.focus_active_pane(window, cx);
+                self.revoke_picked(picked, p.paired, window, cx);
             }
         }
         cx.notify();
@@ -1104,6 +1139,8 @@ impl WorkspaceView {
             Mode::Themes { .. } => ("Pick a theme (Escape restores)", "Theme"),
             Mode::Rename { .. } => ("Tab name (empty clears)", "Name"),
             Mode::Agents => ("Agents: type to filter, Enter jumps to the pane", "Agents"),
+            Mode::PairedTools if p.paired_loading => ("Loading paired tools\u{2026}", "Revoke"),
+            Mode::PairedTools => ("Paired tools: Enter revokes the selected one", "Revoke"),
         };
         let query: SharedString = if p.model.query.is_empty() {
             placeholder.into()
@@ -1153,7 +1190,9 @@ impl WorkspaceView {
                     })),
             );
         }
-        let empty = p.model.rows().next().is_none() && !matches!(p.model.mode, Mode::Rename { .. });
+        let empty = p.model.rows().next().is_none()
+            && !p.paired_loading
+            && !matches!(p.model.mode, Mode::Rename { .. });
         Some(
             div()
                 .absolute()
@@ -1275,7 +1314,9 @@ impl Render for WorkspaceView {
             CopyLastOutput => CopyLastOutput,
         );
         let root = root.on_action(cx.listener(|this, _: &SwitchTheme, window, cx| {
-            this.open_themes(window, cx);
+            if !this.approval_open() {
+                this.open_themes(window, cx);
+            }
         }));
         if let Some(err) = &self.fatal {
             return root
@@ -1287,7 +1328,14 @@ impl Render for WorkspaceView {
         let panes = self.render_panes(&theme, window, cx);
         let banner = self.render_banner(&theme, cx);
         let palette = self.render_palette(&theme, window, cx);
-        root.child(tab_bar).child(panes).children(banner).children(palette).into_any_element()
+        self.approval_prepaint(window, cx);
+        let approval = self.render_approval(&theme, window, cx);
+        root.child(tab_bar)
+            .child(panes)
+            .children(banner)
+            .children(palette)
+            .children(approval)
+            .into_any_element()
     }
 }
 

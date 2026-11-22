@@ -44,6 +44,14 @@ Halyard is a terminal first. Everything else is layered on top and can be turned
   through a callback and an event channel (`FrameReady`, `TitleChanged`, `Bell`,
   `Exited`).
 - The UI thread never blocks on the engine. It draws the latest frame it has.
+- The session API (`halyard-ipc`, `docs/session-api.md`) runs on its own threads: one
+  accept thread, one per connection. The app hands it a registry of panes (each pane's
+  `Session`, held weakly, its monitor, its child pid and token hash), so listing panes,
+  reading a screen, reporting state and typing (through the session's paste path) happen
+  on connection threads without the UI. Only focusing a pane and the approval dialogs need
+  the UI thread: those go over an unbounded channel to a task on it, and the connection
+  thread waits for the answer with a timeout (2 s for focus, 90 s for a dialog, then a
+  denial). The UI thread never waits on the server.
 
 ## Engine boundary
 

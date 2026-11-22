@@ -230,6 +230,17 @@ direction marks and zero-width characters are removed and it is capped (80 chara
 for the title, 200 for the body); on Linux `&`, `<` and `>` are also escaped. macOS shows
 nothing while Halyard is the frontmost app; the unread pill on the tab covers that case.
 
+
+## `[session_api]`
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `true` | Start the local session API (`docs/session-api.md`): a private Unix socket for hooks such as `halyard-msg` and for tools you pair. Read at startup, so a change needs a restart. With it off, panes get no `HALYARD_SOCKET` or `HALYARD_SESSION_TOKEN`, and `halyard-msg` falls back to escape sequences. |
+
+Nothing the API receives runs on its own. Pairing a tool, and every request to type into
+a pane, opens a dialog first (see "Typing into a pane" in `docs/session-api.md`). Paired
+tools are listed, and revoked, with the command palette's "Paired Tools" command.
+
 ## Saved workspaces
 
 Halyard saves the layout of every window (tabs, their names, splits and their sizes, the

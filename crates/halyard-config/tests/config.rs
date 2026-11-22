@@ -58,6 +58,7 @@ fn default_config_documents_every_key() {
         "model",
         "notify_on_waiting",
         "detect",
+        "session_api",
     ] {
         assert!(default_config_toml().contains(key), "template lacks `{key}`");
     }
@@ -113,6 +114,9 @@ name = "Kelp"
 notify_on_waiting = false
 detect = ["aider", "goose"]
 
+[session_api]
+enabled = false
+
 [ai]
 enabled = true
 
@@ -145,6 +149,8 @@ api_key_env = "ANTHROPIC_API_KEY"
     );
     assert_eq!(c.theme.name_for(halyard_config::Appearance::Light), "Kelp");
     assert_eq!(c.agents.detect, ["aider", "goose"]);
+    assert!(!c.session_api.enabled);
+    assert!(Config::default().session_api.enabled, "the session API is on by default");
     assert!(c.ai.enabled);
     assert_eq!(c.ai.providers.len(), 2);
     assert_eq!(c.ai.providers[0].kind, ProviderKind::Ollama);
@@ -609,6 +615,7 @@ fn no_error_or_warning_ever_echoes_a_value_whatever_the_section() {
         "keybindings.cmd+shift+k",
         "agents.notify_on_waiting",
         "agents.detect",
+        "session_api.enabled",
         "ai.enabled",
         "ai.providers",
         "ai.extra",
