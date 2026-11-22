@@ -1,0 +1,492 @@
+//! Live reload: watch the config file and hand back the new configuration or the error.
+//!
+//! The source of truth is a fingerprint, polled on a dedicated thread about once a second.
+//! File system notifications ([`notify`]) are only a hint that wakes the poll early, so a
+//! missing directory, a failed watch, a symlink swap or a directory moved into place can delay
+//! a reload by at most one poll interval but can never lose one.
+
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
+use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime};
+
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+
+use crate::config::{Config, ConfigError, ConfigWarning, Loaded, themes_dir_for};
+use crate::fsread::{MAX_FILE_BYTES, Refusal, kind_name, read_regular};
+use crate::theme::MAX_THEME_FILES;
+
+/// What a reload produced: the new configuration, or why it could not be loaded.
+pub type ConfigEvent = Result<Loaded, ConfigError>;
+
+/// The longest a reload can be postponed by a constant stream of changes, counted from the
+/// first change of a burst. Without it, a file that is rewritten every few milliseconds would
+/// never reload.
+pub const MAX_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// How often the fingerprint is checked when no notification arrives.
+pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The state of one file: where its symlinks lead right now, and what is in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FileState {
+    /// Absent, or a dangling symlink.
+    Missing,
+    /// Present but not usable: not a regular file (a FIFO, directory, device), over the size
+    /// limit, or not readable. The string is a phrase for a warning, with no file content.
+    Unreadable(String),
+    Present {
+        /// The path after following every symlink, resolved fresh each time.
+        resolved: PathBuf,
+        size: u64,
+        mtime: Option<SystemTime>,
+        /// Hash of the content. Config files are tiny, so hashing is cheap, but it is only
+        /// recomputed when the size or modification time changed.
+        hash: u64,
+    },
+}
+
+/// What was learned about one file at the last poll, so an unchanged file is not re-read.
+#[derive(Debug, Default)]
+struct HashCache {
+    seen: HashMap<PathBuf, (u64, Option<SystemTime>, u64)>,
+    /// How many files were actually hashed; read by a test.
+    hashed: usize,
+}
+
+fn file_state(path: &Path, cache: &mut HashCache) -> FileState {
+    let Ok(resolved) = fs::canonicalize(path) else { return FileState::Missing };
+    let Ok(meta) = fs::metadata(&resolved) else { return FileState::Missing };
+    if !meta.is_file() {
+        return FileState::Unreadable(Refusal::NotRegular(kind_name(&meta)).phrase());
+    }
+    let (size, mtime) = (meta.len(), meta.modified().ok());
+    if size > MAX_FILE_BYTES {
+        return FileState::Unreadable(Refusal::TooLarge.phrase());
+    }
+    let hash = match cache.seen.get(&resolved) {
+        Some((s, m, h)) if *s == size && *m == mtime => *h,
+        _ => match read_regular(&resolved) {
+            Ok(bytes) => {
+                let mut h = DefaultHasher::new();
+                bytes.hash(&mut h);
+                cache.hashed += 1;
+                let h = h.finish();
+                cache.seen.insert(resolved.clone(), (size, mtime, h));
+                h
+            }
+            Err(r) => return FileState::Unreadable(r.phrase()),
+        },
+    };
+    FileState::Present { resolved, size, mtime, hash }
+}
+
+/// Everything a reload depends on: the config file, and the names and state of every
+/// `*.toml` in the themes directory (the first [`MAX_THEME_FILES`] by name).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Fingerprint {
+    config: FileState,
+    themes: Vec<(String, FileState)>,
+    /// Theme files beyond the limit, which are ignored.
+    themes_ignored: usize,
+}
+
+fn fingerprint(config: &Path, cache: &mut HashCache) -> Fingerprint {
+    let mut names: Vec<(String, PathBuf)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(themes_dir_for(config)) {
+        for e in rd.filter_map(Result::ok) {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "toml") {
+                names.push((e.file_name().to_string_lossy().into_owned(), p));
+            }
+        }
+    }
+    names.sort_by(|a, b| a.0.cmp(&b.0));
+    let themes_ignored = names.len().saturating_sub(MAX_THEME_FILES);
+    names.truncate(MAX_THEME_FILES);
+    let themes = names.into_iter().map(|(n, p)| (n, file_state(&p, cache))).collect();
+    Fingerprint { config: file_state(config, cache), themes, themes_ignored }
+}
+
+/// The poll interval is never shorter than this, so a zero cannot make the thread spin.
+const MIN_POLL: Duration = Duration::from_millis(50);
+
+fn clamp_poll(poll: Duration) -> Duration {
+    poll.max(MIN_POLL)
+}
+
+/// Make `path` absolute against `cwd` and drop `.` and `..` components lexically.
+fn absolutize(cwd: &Path, path: &Path) -> PathBuf {
+    let joined = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+    let mut out = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+#[derive(Debug)]
+struct Signals {
+    stop: bool,
+    hint: bool,
+}
+
+/// Wakes the worker: a stop request, or a hint that something may have changed.
+#[derive(Debug)]
+struct Shared {
+    signals: Mutex<Signals>,
+    cv: Condvar,
+}
+
+enum Wake {
+    Stop,
+    Hint,
+    Timeout,
+}
+
+impl Shared {
+    fn hint(&self) {
+        if let Ok(mut s) = self.signals.lock() {
+            s.hint = true;
+        }
+        self.cv.notify_all();
+    }
+
+    fn stop(&self) {
+        if let Ok(mut s) = self.signals.lock() {
+            s.stop = true;
+        }
+        self.cv.notify_all();
+    }
+
+    /// Sleep up to `dur`, returning early for a stop or a hint (a hint is consumed).
+    fn wait(&self, dur: Duration) -> Wake {
+        let deadline = Instant::now() + dur;
+        let Ok(mut g) = self.signals.lock() else { return Wake::Stop };
+        loop {
+            if g.stop {
+                return Wake::Stop;
+            }
+            if g.hint {
+                g.hint = false;
+                return Wake::Hint;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Wake::Timeout;
+            }
+            match self.cv.wait_timeout(g, deadline - now) {
+                Ok((ng, _)) => g = ng,
+                Err(_) => return Wake::Stop,
+            }
+        }
+    }
+}
+
+/// Watches a config file and sends a [`ConfigEvent`] after each change settles.
+///
+/// A change is a different fingerprint: for `config.toml` the path it resolves to after
+/// following every symlink (fresh each time), its size, modification time and a hash of its
+/// content; for the `themes/` folder next to it the sorted names of the `*.toml` files with
+/// the same data for each. So a symlink swapped by rename or by unlink and link, an edit made
+/// through a symlink, a directory moved into place or away, and a file that appears, vanishes
+/// or is recreated are all noticed, and unrelated files in the same directories are not. A missing file is
+/// a state like any other: the event holds the defaults and a warning saying so.
+///
+/// Notifications from the OS only wake the check early, on the config's directory and
+/// `themes/` where they exist. If they cannot be set up, or the directories do not exist yet,
+/// the poll (every [`POLL_INTERVAL`]) still finds every change.
+///
+/// After a change is first seen, the reload waits until nothing has changed for `debounce`, but
+/// never longer than [`MAX_DEBOUNCE`] in total. A relative path is made absolute against the
+/// working directory when the watcher is created.
+///
+/// Dropping the watcher stops its thread and waits for it to finish.
+#[derive(Debug)]
+pub struct ConfigWatcher {
+    shared: Arc<Shared>,
+    rx: Receiver<ConfigEvent>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for ConfigWatcher {
+    fn drop(&mut self) {
+        self.shared.stop();
+        if let Some(h) = self.handle.take() {
+            // A panic in the worker has nothing left to clean up here.
+            let _ = h.join();
+        }
+    }
+}
+
+impl ConfigWatcher {
+    /// Start watching `path`, polling every [`POLL_INTERVAL`].
+    ///
+    /// # Errors
+    /// Returns an error when the working directory or the worker thread cannot be set up.
+    /// A failure to register OS notifications is not an error: polling still works.
+    pub fn new(path: &Path, debounce: Duration) -> notify::Result<Self> {
+        Self::start(path, debounce, POLL_INTERVAL, true)
+    }
+
+    /// Like [`ConfigWatcher::new`] with a chosen poll interval (never shorter than 50 ms).
+    ///
+    /// # Errors
+    /// Same as [`ConfigWatcher::new`].
+    pub fn with_poll_interval(
+        path: &Path,
+        debounce: Duration,
+        poll: Duration,
+    ) -> notify::Result<Self> {
+        Self::start(path, debounce, poll, true)
+    }
+
+    /// Poll only, with no OS notifications at all. This is the fallback path that must work
+    /// alone, exposed so a test can prove it does.
+    ///
+    /// # Errors
+    /// Same as [`ConfigWatcher::new`].
+    #[doc(hidden)]
+    pub fn poll_only(path: &Path, debounce: Duration, poll: Duration) -> notify::Result<Self> {
+        Self::start(path, debounce, poll, false)
+    }
+
+    fn start(
+        path: &Path,
+        debounce: Duration,
+        poll: Duration,
+        use_notify: bool,
+    ) -> notify::Result<Self> {
+        let path = absolutize(&std::env::current_dir().map_err(notify::Error::io)?, path);
+        let shared = Arc::new(Shared {
+            signals: Mutex::new(Signals { stop: false, hint: false }),
+            cv: Condvar::new(),
+        });
+        // The baseline is taken before this returns, so an edit made right after `new` is
+        // a change and not part of the starting state.
+        let mut cache = HashCache::default();
+        let baseline = fingerprint(&path, &mut cache);
+        let (out_tx, out_rx) = mpsc::channel::<ConfigEvent>();
+        let worker_shared = Arc::clone(&shared);
+        let handle =
+            thread::Builder::new().name("halyard-config-watch".into()).spawn(move || {
+                run(
+                    &path,
+                    baseline,
+                    cache,
+                    debounce,
+                    clamp_poll(poll),
+                    use_notify,
+                    &worker_shared,
+                    &out_tx,
+                );
+            })?;
+        Ok(Self { shared, rx: out_rx, handle: Some(handle) })
+    }
+
+    /// Wait up to `timeout` for the next reload result.
+    #[must_use]
+    pub fn recv_timeout(&self, timeout: Duration) -> Option<ConfigEvent> {
+        self.rx.recv_timeout(timeout).ok()
+    }
+
+    /// The next reload result if one is ready.
+    #[must_use]
+    pub fn try_recv(&self) -> Option<ConfigEvent> {
+        self.rx.try_recv().ok()
+    }
+}
+
+/// OS notification handle plus the directories it currently watches. Owned by the worker, so
+/// it is dropped when the worker ends.
+struct Hints {
+    watcher: Option<RecommendedWatcher>,
+    watched: Vec<PathBuf>,
+}
+
+impl Hints {
+    fn new(use_notify: bool, shared: &Arc<Shared>) -> Self {
+        let watcher = use_notify
+            .then(|| {
+                let shared = Arc::clone(shared);
+                notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                    // Reading the file produces Access events on Linux; reacting to them
+                    // would make every check wake the next one.
+                    if res.is_ok_and(|ev| !matches!(ev.kind, EventKind::Access(_))) {
+                        shared.hint();
+                    }
+                })
+                .ok()
+            })
+            .flatten();
+        Self { watcher, watched: Vec::new() }
+    }
+
+    /// Best effort: watch the config's directory, where its symlink leads, and `themes/`,
+    /// each only where it exists. `force` drops and re-adds everything, which revives a
+    /// watch whose directory was deleted and recreated.
+    fn sync(&mut self, config: &Path, force: bool) {
+        let Some(w) = self.watcher.as_mut() else { return };
+        let mut want: Vec<PathBuf> = Vec::new();
+        let mut add = |d: Option<&Path>| {
+            if let Some(d) = d.filter(|d| d.is_dir()) {
+                let d = d.to_path_buf();
+                if !want.contains(&d) {
+                    want.push(d);
+                }
+            }
+        };
+        add(config.parent());
+        add(fs::canonicalize(config).ok().as_deref().and_then(Path::parent));
+        add(Some(&themes_dir_for(config)));
+        if force {
+            for d in self.watched.drain(..) {
+                let _ = w.unwatch(&d);
+            }
+        } else {
+            self.watched.retain(|d| {
+                let keep = want.contains(d);
+                if !keep {
+                    // The directory may be gone already; there is nothing to undo then.
+                    let _ = w.unwatch(d);
+                }
+                keep
+            });
+        }
+        for d in want {
+            if !self.watched.contains(&d) && w.watch(&d, RecursiveMode::NonRecursive).is_ok() {
+                self.watched.push(d);
+            }
+        }
+    }
+}
+
+fn defaults_with(reason: &str) -> Loaded {
+    Loaded {
+        config: Config::default(),
+        warnings: vec![ConfigWarning {
+            key: "config".into(),
+            line: None,
+            message: format!("{reason}; using the defaults"),
+        }],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run(
+    path: &Path,
+    baseline: Fingerprint,
+    mut cache: HashCache,
+    debounce: Duration,
+    poll: Duration,
+    use_notify: bool,
+    shared: &Arc<Shared>,
+    out: &mpsc::Sender<ConfigEvent>,
+) {
+    let mut hints = Hints::new(use_notify, shared);
+    hints.sync(path, true);
+    let mut last = baseline;
+    loop {
+        match shared.wait(poll) {
+            Wake::Stop => return,
+            Wake::Hint => {}
+            Wake::Timeout => {
+                hints.sync(path, false);
+                if fingerprint(path, &mut cache) == last {
+                    continue;
+                }
+            }
+        }
+        // Something may have changed: wait for it to settle, but not past the cap.
+        let started = Instant::now();
+        loop {
+            let left = MAX_DEBOUNCE.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            match shared.wait(debounce.min(left)) {
+                Wake::Stop => return,
+                Wake::Hint => {}
+                Wake::Timeout => break,
+            }
+        }
+        let now = fingerprint(path, &mut cache);
+        if now == last {
+            continue;
+        }
+        hints.sync(path, true);
+        let mut event = match &now.config {
+            // Never open a file the fingerprint found missing or unusable: a FIFO would block
+            // the thread, and with it Drop, forever.
+            FileState::Missing => Ok(defaults_with("the config file does not exist")),
+            FileState::Unreadable(why) => Ok(defaults_with(&format!("the config file {why}"))),
+            FileState::Present { .. } => Config::load(path),
+        };
+        if let Ok(loaded) = &mut event {
+            if now.themes_ignored > 0 {
+                loaded.warnings.push(ConfigWarning {
+                    key: "themes".into(),
+                    line: None,
+                    message: format!(
+                        "{} theme files beyond the first {MAX_THEME_FILES} are ignored",
+                        now.themes_ignored
+                    ),
+                });
+            }
+            for (name, state) in &now.themes {
+                if let FileState::Unreadable(why) = state {
+                    loaded.warnings.push(ConfigWarning {
+                        key: format!("themes/{name}"),
+                        line: None,
+                        message: format!("the theme file {why}; it is skipped"),
+                    });
+                }
+            }
+        }
+        last = now;
+        if out.send(event).is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_unchanged_file_is_not_hashed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+        fs::write(&file, "[font]\nsize = 12\n").unwrap();
+        let mut cache = HashCache::default();
+        let a = fingerprint(&file, &mut cache);
+        assert_eq!(cache.hashed, 1);
+        for _ in 0..5 {
+            assert_eq!(fingerprint(&file, &mut cache), a);
+        }
+        assert_eq!(cache.hashed, 1, "an unchanged file must not be re-read");
+        // A change of size is hashed again, and seen.
+        fs::write(&file, "[font]\nsize = 123\n").unwrap();
+        assert_ne!(fingerprint(&file, &mut cache), a);
+        assert_eq!(cache.hashed, 2);
+    }
+
+    #[test]
+    fn the_poll_interval_has_a_floor() {
+        assert_eq!(clamp_poll(Duration::ZERO), MIN_POLL);
+        assert_eq!(clamp_poll(Duration::from_millis(10)), MIN_POLL);
+        assert_eq!(clamp_poll(Duration::from_secs(1)), Duration::from_secs(1));
+    }
+}
