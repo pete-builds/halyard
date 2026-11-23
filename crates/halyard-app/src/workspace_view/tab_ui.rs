@@ -112,11 +112,9 @@ impl WorkspaceView {
 
     /// Follow the rename and menu targets through a layout change; drop
     /// them when their tab or pane has gone.
-    pub(super) fn refresh_targets(&mut self) {
-        if let Some(r) = &mut self.rename
-            && !r.target.refresh(&self.model)
-        {
-            self.rename = None;
+    pub(super) fn refresh_targets(&mut self, window: &mut Window) {
+        if self.rename.as_mut().is_some_and(|r| !r.target.refresh(&self.model)) {
+            self.drop_rename(false, window);
         }
         let gone = self.menu.as_mut().is_some_and(|m| match &mut m.target {
             MenuTarget::Tab(t) => !t.refresh(&self.model),
@@ -127,15 +125,39 @@ impl WorkspaceView {
         }
     }
 
-    /// The focus handle an open menu, or a name field that has the keyboard,
-    /// keeps through `focus_active_pane`. A layout change while a name is
-    /// being typed (a pane exiting in another tab, a tool focusing a session)
-    /// must not hand the rest of the name to a shell.
-    pub(super) fn overlay_focus(&self, window: &Window) -> Option<FocusHandle> {
+    /// The focus handle an open menu or name field keeps through
+    /// `focus_active_pane`. A layout change while a name is being typed (a
+    /// pane exiting in another tab, a tool focusing a session) must not hand
+    /// the rest of the name to a shell; a field that lost the keyboard while
+    /// the window was inactive (a dialog) gets it back when that closes.
+    pub(super) fn overlay_focus(&self) -> Option<FocusHandle> {
         if let Some(m) = &self.menu {
             return Some(m.focus.clone());
         }
-        self.rename.as_ref().filter(|r| r.focus.is_focused(window)).map(|r| r.focus.clone())
+        self.rename.as_ref().map(|r| r.focus.clone())
+    }
+
+    /// Close the name field. Every way it closes comes through here.
+    ///
+    /// `keyboard_done` is Enter or Escape, after which the caller gives the
+    /// keyboard to the pane. Any other end while the field holds the keyboard
+    /// (its tab closing, a click elsewhere, another field or menu opening)
+    /// parks the keyboard on the window root, where typing goes nowhere,
+    /// until the user picks a pane, a tab or an action (`unpark`): the rest
+    /// of a name must never run in a shell.
+    fn drop_rename(&mut self, keyboard_done: bool, window: &mut Window) -> Option<RenameUi> {
+        let r = self.rename.take()?;
+        if !keyboard_done && r.focus.is_focused(window) {
+            self.parked = true;
+            window.focus(&self.focus);
+        }
+        Some(r)
+    }
+
+    /// The user picked where the keyboard goes (a tab, a pane, an action):
+    /// a parked keyboard may follow the active pane again.
+    pub(super) fn unpark(&mut self) {
+        self.parked = false;
     }
 
     // ------------------------------------------------------------- rename
@@ -158,6 +180,7 @@ impl WorkspaceView {
         }
         // Another tab's field keeps what was typed.
         self.commit_rename(false, window, cx);
+        self.unpark();
         let name = self.model.tabs()[index].name.clone();
         let auto = name.is_none().then(|| self.tab_title(index, cx));
         let edit = LineEdit::new(name.as_deref().or(auto.as_deref()).unwrap_or_default());
@@ -187,7 +210,7 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(r) = self.rename.take() else { return };
+        let Some(r) = self.drop_rename(refocus, window) else { return };
         commit_name(&mut self.model, &r.target, r.edit.text(), r.auto.as_deref());
         if refocus {
             self.after_change(window, cx);
@@ -199,7 +222,7 @@ impl WorkspaceView {
     }
 
     fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.rename.take().is_some() {
+        if self.drop_rename(true, window).is_some() {
             self.focus_active_pane(window, cx);
             cx.notify();
         }
@@ -368,6 +391,7 @@ impl WorkspaceView {
             self.close_palette(window, cx);
         }
         self.commit_rename(false, window, cx);
+        self.unpark();
         let focus = cx.focus_handle();
         // Focus moving elsewhere closes the menu. GPUI also reports a blur
         // when the window goes inactive while the menu keeps focus: it closes
@@ -606,6 +630,7 @@ impl WorkspaceView {
                 // A click elsewhere saves a name being typed; `after_change`
                 // below would otherwise leave the keyboard in the field.
                 self.commit_rename(false, window, cx);
+                self.unpark();
                 if self.model.select_tab(index) {
                     self.after_change(window, cx);
                     if ev.click_count >= 2 {
@@ -634,7 +659,8 @@ impl WorkspaceView {
             (items, m.focus.is_focused(window))
         });
         format!(
-            "rename (tab, text, focused) {rename:?}; menu (items, focused) {menu:?}; window active {}",
+            "rename (tab, text, focused) {rename:?}; menu (items, focused) {menu:?}; parked {}; window active {}",
+            self.parked,
             window.is_window_active()
         )
     }

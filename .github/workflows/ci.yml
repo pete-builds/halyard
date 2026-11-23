@@ -80,6 +80,10 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ui
+      - name: Harness tests
+        # The debug-script parser tests only build with the feature, which
+        # the check job's `cargo test --workspace` leaves off.
+        run: cargo test --locked -p halyard-app --features debug-script -- debug_script
       - name: Window scripts
         run: scripts/ui-check.sh
 

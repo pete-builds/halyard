@@ -230,10 +230,10 @@ pub fn start<H: Host + 'static>(window: &mut Window, cx: &mut Context<H>) {
         match std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|s| parse(&s)) {
             Ok(steps) => steps,
             Err(e) => {
-                // A scripted run with a broken script would otherwise sit idle forever.
+                // A scripted run with a broken script would otherwise sit idle
+                // forever, and must not pass as a test: exit with status 2.
                 eprintln!("halyard: debug script: {e}");
-                cx.quit();
-                return;
+                std::process::exit(2);
             }
         };
     cx.spawn_in(window, async move |this, cx| {

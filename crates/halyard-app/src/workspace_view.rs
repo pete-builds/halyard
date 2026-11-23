@@ -139,6 +139,9 @@ pub struct WorkspaceView {
     rename: Option<tab_ui::RenameUi>,
     /// The open right-click menu (`tab_ui.rs`).
     menu: Option<tab_ui::MenuUi>,
+    /// The keyboard waits on the window root after a name field closed
+    /// under the user (`tab_ui::drop_rename`).
+    parked: bool,
     _blink: Task<()>,
     _agent_poll: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -219,6 +222,7 @@ impl WorkspaceView {
             next_approval: 0,
             rename: None,
             menu: None,
+            parked: false,
             _blink: blink,
             _agent_poll: Self::start_agent_poll(window, cx),
             _subscriptions: subs,
@@ -454,9 +458,17 @@ impl WorkspaceView {
         if self.palette.is_some() {
             return;
         }
-        if let Some(f) = self.overlay_focus(window) {
+        if let Some(f) = self.overlay_focus() {
             window.focus(&f);
             return;
+        }
+        // Parked after a name field closed under the user: stay on the root
+        // until the user picks something, or focus moves off it.
+        if self.parked {
+            if self.focus.is_focused(window) {
+                return;
+            }
+            self.parked = false;
         }
         match self.model.focused().and_then(|id| self.panes.get(&id)) {
             Some(p) => window.focus(&p.view.focus_handle(cx)),
@@ -465,7 +477,7 @@ impl WorkspaceView {
     }
 
     fn after_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_targets();
+        self.refresh_targets(window);
         self.refresh_chrome(window, cx);
         self.focus_active_pane(window, cx);
         self.update_title(window, cx);
@@ -629,7 +641,9 @@ impl WorkspaceView {
         if self.approval_open() && action != Action::Quit {
             return;
         }
-        // An action (a menu item or a shortcut) closes an open menu.
+        // An action (a menu item or a shortcut) closes an open menu, and is
+        // the user picking where the keyboard goes.
+        self.unpark();
         self.close_menu(true, window, cx);
         let bounds = self.content_rect(window, cx);
         let dir = |d| Some(d);
@@ -961,6 +975,7 @@ impl WorkspaceView {
             .on_any_mouse_down(cx.listener(|this, _, window, cx| {
                 window.prevent_default();
                 this.commit_rename(false, window, cx);
+                this.unpark();
                 this.focus_active_pane(window, cx);
             }));
         for i in 0..self.model.tabs().len() {
@@ -1068,6 +1083,9 @@ impl WorkspaceView {
             .w_full()
             .h(px(bounds.h))
             .bg(to_hsla(theme.ui.border))
+            // A click in a pane is the user picking where the keyboard goes
+            // (capture phase: the pane stops the event before it bubbles).
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.unpark()))
             .on_drag_move::<DraggedDivider>(cx.listener(
                 move |this, ev: &gpui::DragMoveEvent<DraggedDivider>, window, cx| {
                     let path = ev.drag(cx).path.clone();

@@ -87,7 +87,7 @@ right-button event), with optional `shift` and `clicks=<n>` after any mouse posi
 (swap a config file mid-run), `select <c1> <r1> <c2> <r2>`, `resize <w> <h>`,
 `shot <file.png>` (macOS: captures the app's own window), `activate`, `dump` (focused pane's
 frame text to stderr), `expect <text>` and `reject <text>` (check the `dump` text; a failed
-check makes `quit` exit with status 1), `quit`. GPUI stops drawing while the window is occluded, so `shot`
+check makes `quit` exit with status 1; a script that cannot be read or parsed exits 2), `quit`. GPUI stops drawing while the window is occluded, so `shot`
 and the mouse commands force a draw first; the window server returns black images while
 the display sleeps, so wake the display first (`caffeinate -u -t 1`). Use `HALYARD_CONFIG`
 and `HALYARD_STATE_DIR` to keep a scripted run away from your own config and saved

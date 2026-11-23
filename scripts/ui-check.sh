@@ -19,13 +19,22 @@ fi
 bin=${HALYARD_BIN:-}
 if [[ -z $bin ]]; then
     (cd "$root" && cargo build --locked -p halyard-app --features debug-script)
-    bin=$root/target/debug/halyard
+    # Where cargo put it: CARGO_TARGET_DIR (relative to the workspace) or target/.
+    target=${CARGO_TARGET_DIR:-target}
+    [[ $target == /* ]] || target=$root/$target
+    bin=$target/debug/halyard
 fi
 limit=${UI_CHECK_TIMEOUT:-90}
 
 scripts=("$@")
 if [[ ${#scripts[@]} -eq 0 ]]; then
+    shopt -s nullglob
     scripts=("$root"/crates/halyard-app/ui-tests/*.txt)
+    shopt -u nullglob
+fi
+if [[ ${#scripts[@]} -eq 0 ]]; then
+    echo "ui-check: no scripts to run" >&2
+    exit 1
 fi
 
 work=$(mktemp -d /tmp/halyard-ui.XXXXXX)
@@ -65,7 +74,9 @@ for script in "${scripts[@]}"; do
     else
         wait "$pid" || status=$?
     fi
-    if [[ $status -eq 0 ]] && ! grep -aq "check failed\|step failed" "$log"; then
+    # A script that cannot be read or parsed exits 2 ("debug script: ...");
+    # match that text too, in case an older binary exits 0.
+    if [[ $status -eq 0 ]] && ! grep -aq "check failed\|step failed\|debug script:" "$log"; then
         echo "ok    $name"
     else
         echo "FAIL  $name (status $status)"
