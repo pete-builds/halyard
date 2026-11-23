@@ -481,8 +481,27 @@ mod tests {
                         .is_ok_and(|t| t.elapsed().is_ok_and(|a| a < Duration::from_secs(900)));
                     if fresh {
                         let text = std::fs::read_to_string(e.path()).unwrap_or_default();
-                        let head: String = text.chars().take(3000).collect();
-                        eprintln!("==== crash report {} ====\n{head}", e.path().display());
+                        eprintln!("==== crash report {} ====", e.path().display());
+                        let body = text.split_once('\n').map_or("", |(_, b)| b);
+                        let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+                            eprintln!("(not json)");
+                            continue;
+                        };
+                        eprintln!("pid {} asi {}", v["pid"], v["asi"]);
+                        let images = v["usedImages"].as_array().cloned().unwrap_or_default();
+                        for th in v["threads"].as_array().cloned().unwrap_or_default() {
+                            if th["triggered"].as_bool() != Some(true) {
+                                continue;
+                            }
+                            for f in th["frames"].as_array().cloned().unwrap_or_default() {
+                                let img = f["imageIndex"]
+                                    .as_u64()
+                                    .and_then(|i| images.get(usize::try_from(i).ok()?))
+                                    .map(|i| i["name"].to_string())
+                                    .unwrap_or_default();
+                                eprintln!("  {img} {} +{}", f["symbol"], f["symbolLocation"]);
+                            }
+                        }
                     }
                 }
             }
