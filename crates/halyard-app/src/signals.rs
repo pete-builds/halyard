@@ -443,7 +443,7 @@ mod tests {
             return;
         }
         let me = std::env::current_exe().unwrap();
-        let runs = 80;
+        let runs = 250;
         let mut failures = Vec::new();
         for i in 0..runs {
             let out = std::process::Command::new(&me)
