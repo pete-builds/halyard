@@ -1,0 +1,32 @@
+# Right click opens the pane menu; with mouse reporting on, a plain right
+# click goes to the program and Shift+right-click opens the menu.
+sleep 1500
+resize 900 500
+sleep 300
+rightdown 300 250
+rightup 300 250
+sleep 400
+dump
+expect Close Pane
+key escape
+sleep 300
+expect menu (items, focused) None
+type printf '\033[?1000;1006h'; cat -v
+key enter
+sleep 600
+rightdown 300 250
+rightup 300 250
+sleep 400
+dump
+expect ^[[<2;
+expect menu (items, focused) None
+rightdown 320 250 shift
+rightup 320 250 shift
+sleep 400
+dump
+expect Close Pane
+key escape
+sleep 300
+key ctrl-c
+sleep 300
+quit

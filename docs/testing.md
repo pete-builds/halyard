@@ -1,5 +1,24 @@
 # Testing
 
+## Window scripts (macOS)
+
+`scripts/ui-check.sh` builds the app with the `debug-script` feature and runs
+each script in `crates/halyard-app/ui-tests/` against a real window, with its
+own config and state directory. Scripts drive the window through AppKit
+(clicks, right clicks, keys) and check the `dump` text with `expect` and
+`reject`, so a key that reaches the wrong place fails the run. They cover what
+unit tests cannot see: a click on a tab keeping the keyboard with the shell, a
+tab name typed in place (including while a pane in another tab exits, while
+the renamed tab's own shell exits, and saved by a click elsewhere), and right
+clicks going to the menu or to a program with mouse reporting. The runner also
+fails when a script cannot be read or parsed, when there are no scripts, and
+when a run hangs; it uses `CARGO_TARGET_DIR` when that is set. The command list is in `AGENTS.md`.
+
+```sh
+scripts/ui-check.sh                      # build and run them all
+scripts/ui-check.sh crates/halyard-app/ui-tests/rename-in-place.txt
+```
+
 ## NixOS VM test (Wayland and X11)
 
 `nix/vm-test.nix` boots two NixOS VMs and drives the real Halyard package

@@ -60,6 +60,14 @@ pub fn pane_has_focus(focused: bool, window_active: bool) -> bool {
     focused && window_active
 }
 
+/// Whether pointer motion goes to a program that turned on mouse reporting.
+/// Not while the right button that opened the pane menu (Shift+right-click)
+/// is still held: its press and release were withheld, so a drag must be too.
+#[must_use]
+pub fn report_motion(mouse_tracking: bool, menu_press: bool, pressed: Option<MouseButton>) -> bool {
+    mouse_tracking && !(menu_press && pressed == Some(MouseButton::Right))
+}
+
 /// The cursor shape to draw: the given shape when focused, a hollow block
 /// when not.
 #[must_use]
@@ -70,6 +78,16 @@ pub fn drawn_cursor(has_focus: bool, shape: CursorShape) -> CursorShape {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_right_drag_that_opened_the_menu_is_not_reported() {
+        let right = Some(MouseButton::Right);
+        assert!(report_motion(true, false, right), "a right drag the program got the press of");
+        assert!(!report_motion(true, true, right), "the press opened the menu: withheld");
+        assert!(report_motion(true, true, Some(MouseButton::Left)), "another button");
+        assert!(report_motion(true, true, None), "plain motion");
+        assert!(!report_motion(false, false, None), "no reporting");
+    }
 
     #[test]
     fn wheel_up_scrolls_into_history() {

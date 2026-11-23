@@ -1,0 +1,33 @@
+# The renamed tab's own shell exits mid-name: the tab closes, and the rest of
+# the name must not run in the surviving tab's shell (the keyboard waits on
+# the window until the user picks a pane or tab).
+sleep 1500
+resize 900 500
+sleep 300
+action new_tab
+sleep 800
+type sleep 3; exit
+key enter
+sleep 300
+action rename_tab
+sleep 300
+type abc
+sleep 4500
+type def
+key enter
+sleep 600
+dump
+expect tabs 1 names [None]
+expect parked true
+reject $ def
+reject not found
+mousedown 300 250
+mouseup 300 250
+sleep 300
+type echo picked-$((4+4))
+key enter
+sleep 600
+dump
+expect picked-8
+expect parked false
+quit

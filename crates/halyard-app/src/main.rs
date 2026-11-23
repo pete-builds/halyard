@@ -15,6 +15,7 @@ mod app_state;
 mod approval;
 mod attention_ui;
 mod blocks_ui;
+mod context_menu;
 mod dashboard_ui;
 #[cfg(feature = "debug-script")]
 mod debug_script;
@@ -22,6 +23,7 @@ mod decide;
 mod grid;
 mod keybind;
 mod keys;
+mod line_edit;
 mod notify;
 mod palette;
 mod procinfo;

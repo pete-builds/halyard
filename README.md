@@ -8,8 +8,9 @@ depending on any of them.
 
 ## What it does today
 
-- A GPU terminal on Ghostty's VT engine with real PTYs, tabs, draggable split panes, a command
-  palette, live themes and config, and workspaces restored on launch.
+- A GPU terminal on Ghostty's VT engine with real PTYs, tabs you rename in place, draggable
+  split panes, right-click menus for tabs and panes, a command palette, live themes and
+  config, and workspaces restored on launch.
 - Shell integration for zsh, bash and fish: jump between prompts, copy a command's output, see
   which commands failed.
 - Agent awareness: Claude Code, Codex, OpenCode and Gemini CLI show as working, waiting or

@@ -1,0 +1,21 @@
+# A pane exiting in another tab while a tab name is being typed must not
+# move the keyboard to a shell: the rest of the name stays in the field.
+sleep 1500
+resize 900 500
+sleep 300
+type sleep 3; exit
+key enter
+sleep 300
+action new_tab
+sleep 800
+action rename_tab
+sleep 300
+type abc
+sleep 4500
+type def
+key enter
+sleep 600
+dump
+expect tabs 1 names [Some("abcdef")]
+reject not found
+quit

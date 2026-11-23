@@ -22,6 +22,7 @@ use halyard_workspace::{
 mod attention;
 mod dashboard;
 mod session_api;
+mod tab_ui;
 
 pub use session_api::Reply;
 
@@ -63,7 +64,7 @@ struct Pane {
 /// A tab being dragged in the tab bar.
 #[derive(Clone, Debug)]
 struct DraggedTab {
-    index: usize,
+    tab: tab_ui::TabRef,
     label: SharedString,
     bg: Hsla,
     fg: Hsla,
@@ -134,6 +135,13 @@ pub struct WorkspaceView {
     approval: Option<session_api::ApprovalUi>,
     /// Numbers dialogs, so a timeout closes only its own.
     next_approval: u64,
+    /// The tab name being edited in place (`tab_ui.rs`).
+    rename: Option<tab_ui::RenameUi>,
+    /// The open right-click menu (`tab_ui.rs`).
+    menu: Option<tab_ui::MenuUi>,
+    /// The keyboard waits on the window root after a name field closed
+    /// under the user (`tab_ui::drop_rename`).
+    parked: bool,
     _blink: Task<()>,
     _agent_poll: Task<()>,
     _subscriptions: Vec<Subscription>,
@@ -170,6 +178,11 @@ impl WorkspaceView {
                 this.apply_settings(window, cx);
             }),
             cx.observe_window_activation(window, |this, window, cx| {
+                // Coming back to a window whose focused element went away
+                // while it was inactive: give the keyboard to the pane.
+                if window.is_window_active() && window.focused(cx).is_none() {
+                    this.focus_active_pane(window, cx);
+                }
                 this.approval_window_activated(window, cx);
                 this.refresh_chrome(window, cx);
                 for p in this.panes.values() {
@@ -207,6 +220,9 @@ impl WorkspaceView {
             attention_states: HashMap::new(),
             approval: None,
             next_approval: 0,
+            rename: None,
+            menu: None,
+            parked: false,
             _blink: blink,
             _agent_poll: Self::start_agent_poll(window, cx),
             _subscriptions: subs,
@@ -365,6 +381,9 @@ impl WorkspaceView {
                 }
             }
             PaneEvent::AttentionChanged => self.attention_changed(id, window, cx),
+            PaneEvent::ContextMenu { position, has_selection } => {
+                self.open_pane_menu(id, *position, *has_selection, window, cx);
+            }
         }
     }
 
@@ -439,6 +458,18 @@ impl WorkspaceView {
         if self.palette.is_some() {
             return;
         }
+        if let Some(f) = self.overlay_focus() {
+            window.focus(&f);
+            return;
+        }
+        // Parked after a name field closed under the user: stay on the root
+        // until the user picks something, or focus moves off it.
+        if self.parked {
+            if self.focus.is_focused(window) {
+                return;
+            }
+            self.parked = false;
+        }
         match self.model.focused().and_then(|id| self.panes.get(&id)) {
             Some(p) => window.focus(&p.view.focus_handle(cx)),
             None => window.focus(&self.focus),
@@ -446,6 +477,7 @@ impl WorkspaceView {
     }
 
     fn after_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_targets(window);
         self.refresh_chrome(window, cx);
         self.focus_active_pane(window, cx);
         self.update_title(window, cx);
@@ -508,10 +540,14 @@ impl WorkspaceView {
     }
 
     /// Close `ids`, asking first if a command is running in any of them.
+    /// `what` names them: "pane", "tab" or "other tabs". With `keep` (Close
+    /// Other Tabs), nothing closes if that tab has gone by the time the user
+    /// answers, which would otherwise close the whole window.
     fn close_panes_confirmed(
         &mut self,
         ids: Vec<PaneId>,
         what: &'static str,
+        keep: Option<tab_ui::TabRef>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -521,16 +557,30 @@ impl WorkspaceView {
             }
             return;
         }
+        let (title, detail) = if what.ends_with('s') {
+            (
+                format!("Close the {what}?"),
+                "A command is still running in one of them, and closing will end it.",
+            )
+        } else {
+            (
+                format!("Close this {what}?"),
+                "A command is still running in it, and closing will end it.",
+            )
+        };
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            &format!("Close this {what}?"),
-            Some("A command is still running in it, and closing will end it."),
+            &title,
+            Some(detail),
             &["Close", "Cancel"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
             if answer.await == Ok(0) {
                 this.update_in(cx, |this, window, cx| {
+                    if !tab_ui::still_kept(keep.as_ref(), &this.model) {
+                        return;
+                    }
                     for id in ids {
                         this.close_pane(id, window, cx);
                     }
@@ -544,7 +594,7 @@ impl WorkspaceView {
     /// Close the focused pane, asking first if a command is running in it.
     fn close_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.model.focused() else { return };
-        self.close_panes_confirmed(vec![id], "pane", window, cx);
+        self.close_panes_confirmed(vec![id], "pane", None, window, cx);
     }
 
     /// The close button: close at once when idle, else ask.
@@ -591,6 +641,10 @@ impl WorkspaceView {
         if self.approval_open() && action != Action::Quit {
             return;
         }
+        // An action (a menu item or a shortcut) closes an open menu, and is
+        // the user picking where the keyboard goes.
+        self.unpark();
+        self.close_menu(true, window, cx);
         let bounds = self.content_rect(window, cx);
         let dir = |d| Some(d);
         let focus_dir = match action {
@@ -681,7 +735,7 @@ impl WorkspaceView {
                 };
                 self.apply_settings(window, cx);
             }
-            Action::RenameTab => self.open_rename(window, cx),
+            Action::RenameTab => self.start_rename(self.model.active_index(), window, cx),
             Action::CommandPalette => self.open_palette(window, cx),
             Action::ReloadConfig => app_state::reload_config(cx),
             Action::OpenConfig => {
@@ -698,7 +752,13 @@ impl WorkspaceView {
             // Copy and paste belong to the focused pane; these arrive here
             // only when no pane has focus (the palette is open).
             Action::Paste => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text())
+                let text = cx.read_from_clipboard().and_then(|i| i.text());
+                if let Some(text) = &text
+                    && self.paste_into_rename(text, window, cx)
+                {
+                    return;
+                }
+                if let Some(text) = text
                     && let Some(p) = &mut self.palette
                 {
                     p.model.type_text(&text);
@@ -738,13 +798,6 @@ impl WorkspaceView {
         let select = names.iter().position(|n| *n == current);
         let previous = s.theme_override.clone();
         let model = palette::Model::new(Mode::Themes { previous }, names, String::new(), select);
-        self.show_palette(model, Vec::new(), window, cx);
-    }
-
-    fn open_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tab = self.model.active_index();
-        let current = self.model.tabs().get(tab).and_then(|t| t.name.clone()).unwrap_or_default();
-        let model = palette::Model::new(Mode::Rename { tab }, Vec::new(), current, None);
         self.show_palette(model, Vec::new(), window, cx);
     }
 
@@ -877,10 +930,6 @@ impl WorkspaceView {
                 self.focus_active_pane(window, cx);
                 self.apply_settings(window, cx);
             }
-            Mode::Rename { tab } => {
-                self.model.rename_tab(tab, Some(&p.model.query));
-                self.after_change(window, cx);
-            }
             Mode::Agents => {
                 self.focus_active_pane(window, cx);
                 if let Some(row) = picked.and_then(|i| p.agents.get(i)) {
@@ -920,7 +969,15 @@ impl WorkspaceView {
             .gap_1()
             .bg(to_hsla(ui.surface_sunken))
             .border_b_1()
-            .border_color(to_hsla(ui.border));
+            .border_color(to_hsla(ui.border))
+            // A click on the bar outside any tab keeps the keyboard in the
+            // pane (and ends a rename, as a click elsewhere does).
+            .on_any_mouse_down(cx.listener(|this, _, window, cx| {
+                window.prevent_default();
+                this.commit_rename(false, window, cx);
+                this.unpark();
+                this.focus_active_pane(window, cx);
+            }));
         for i in 0..self.model.tabs().len() {
             let title: SharedString = self.tab_title(i, cx).into();
             let is_active = i == active;
@@ -930,8 +987,9 @@ impl WorkspaceView {
                 (to_hsla(ui.tab_inactive_bg), to_hsla(ui.text_muted))
             };
             let zoomed = self.model.tabs()[i].zoomed;
+            let Some(tab_ref) = tab_ui::TabRef::of(&self.model, i) else { continue };
             let drag = DraggedTab {
-                index: i,
+                tab: tab_ref,
                 label: title.clone(),
                 bg: to_hsla(ui.surface_raised),
                 fg: to_hsla(ui.text),
@@ -952,28 +1010,29 @@ impl WorkspaceView {
                 .text_color(fg)
                 .text_sm()
                 .when(is_active, |d| d.border_t_2().border_color(to_hsla(ui.accent)))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
-                        if this.model.select_tab(i) {
-                            if ev.click_count >= 2 {
-                                this.after_change(window, cx);
-                                this.open_rename(window, cx);
-                            } else {
-                                this.after_change(window, cx);
-                            }
-                        }
-                    }),
-                )
+                .on_any_mouse_down(cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                    this.tab_mouse_down(i, ev, window, cx);
+                }))
                 .on_drag(drag, |d: &DraggedTab, _, _, cx| cx.new(|_| d.clone()))
                 .drag_over::<DraggedTab>(|s, _, _, _| s.opacity(0.6))
                 .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
-                    if this.model.move_tab(d.index, i) {
+                    if let Some(from) = d.tab.index(&this.model)
+                        && this.model.move_tab(from, i)
+                    {
                         this.after_change(window, cx);
                     }
                 }))
                 .children(self.tab_mark(i, theme, cx))
-                .child(div().flex_1().overflow_hidden().whitespace_nowrap().child(title))
+                .child(if self.renaming(i) {
+                    self.render_rename_field(theme, cx)
+                } else {
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(title)
+                        .into_any_element()
+                })
                 .when(zoomed, |d| d.child(div().text_color(to_hsla(ui.accent)).child("◉")))
                 .child(
                     div()
@@ -983,7 +1042,10 @@ impl WorkspaceView {
                         .text_color(to_hsla(ui.text_muted))
                         .hover(|s| s.bg(to_hsla(ui.surface_raised)))
                         .child("×")
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_any_mouse_down(|_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.close_tab(i, window, cx);
                         })),
@@ -1010,7 +1072,7 @@ impl WorkspaceView {
     fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.model.tabs().get(index) else { return };
         let ids = tab.root.panes();
-        self.close_panes_confirmed(ids, "tab", window, cx);
+        self.close_panes_confirmed(ids, "tab", None, window, cx);
     }
 
     fn render_panes(&self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1021,6 +1083,9 @@ impl WorkspaceView {
             .w_full()
             .h(px(bounds.h))
             .bg(to_hsla(theme.ui.border))
+            // A click in a pane is the user picking where the keyboard goes
+            // (capture phase: the pane stops the event before it bubbles).
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.unpark()))
             .on_drag_move::<DraggedDivider>(cx.listener(
                 move |this, ev: &gpui::DragMoveEvent<DraggedDivider>, window, cx| {
                     let path = ev.drag(cx).path.clone();
@@ -1137,7 +1202,6 @@ impl WorkspaceView {
         let (placeholder, prompt) = match p.model.mode {
             Mode::Commands => ("Type a command", "›"),
             Mode::Themes { .. } => ("Pick a theme (Escape restores)", "Theme"),
-            Mode::Rename { .. } => ("Tab name (empty clears)", "Name"),
             Mode::Agents => ("Agents: type to filter, Enter jumps to the pane", "Agents"),
             Mode::PairedTools if p.paired_loading => ("Loading paired tools\u{2026}", "Revoke"),
             Mode::PairedTools => ("Paired tools: Enter revokes the selected one", "Revoke"),
@@ -1190,9 +1254,7 @@ impl WorkspaceView {
                     })),
             );
         }
-        let empty = p.model.rows().next().is_none()
-            && !p.paired_loading
-            && !matches!(p.model.mode, Mode::Rename { .. });
+        let empty = p.model.rows().next().is_none() && !p.paired_loading;
         Some(
             div()
                 .absolute()
@@ -1328,12 +1390,14 @@ impl Render for WorkspaceView {
         let panes = self.render_panes(&theme, window, cx);
         let banner = self.render_banner(&theme, cx);
         let palette = self.render_palette(&theme, window, cx);
+        let menu = self.render_menu(&theme, window, cx);
         self.approval_prepaint(window, cx);
         let approval = self.render_approval(&theme, window, cx);
         root.child(tab_bar)
             .child(panes)
             .children(banner)
             .children(palette)
+            .children(menu)
             .children(approval)
             .into_any_element()
     }
@@ -1347,14 +1411,17 @@ impl Focusable for WorkspaceView {
 
 #[cfg(feature = "debug-script")]
 impl crate::debug_script::Host for WorkspaceView {
-    fn script_dump(&mut self, cx: &mut Context<Self>) -> String {
+    fn script_dump(&mut self, window: &mut Window, cx: &mut Context<Self>) -> String {
+        let overlay = self.overlay_dump(window);
         let Some(p) = self.model.focused().and_then(|id| self.panes.get(&id)) else {
             return "no focused pane".into();
         };
         let v = p.view.read(cx);
         let f = v.session().latest_frame();
+        let names: Vec<Option<&str>> =
+            self.model.tabs().iter().map(|t| t.name.as_deref()).collect();
         format!(
-            "tabs {} active {} panes {} focused {:?}; frame {} ({}x{}), renders {}:\n{}",
+            "tabs {} names {names:?} active {} panes {} focused {:?}; {overlay}; frame {} ({}x{}), renders {}:\n{}",
             self.model.tabs().len(),
             self.model.active_index(),
             self.model.active().root.len(),
