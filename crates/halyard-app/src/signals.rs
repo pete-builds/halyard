@@ -434,6 +434,36 @@ mod tests {
         drop(session);
     }
 
+    /// TEMPORARY, removed before merge: runs this whole test binary again and
+    /// again, three test threads like a CI runner, and prints the output of
+    /// every run where the fake claude test failed.
+    #[test]
+    fn tmp_fake_claude_stress() {
+        if std::env::var_os("HALYARD_TMP_STRESS_CHILD").is_some() {
+            return;
+        }
+        let me = std::env::current_exe().unwrap();
+        let runs = 80;
+        let mut failures = Vec::new();
+        for i in 0..runs {
+            let out = std::process::Command::new(&me)
+                .args(["--test-threads=3", "--skip", "tmp_fake_claude_stress"])
+                .env("HALYARD_TMP_STRESS_CHILD", "1")
+                .output()
+                .unwrap();
+            if !out.status.success() {
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                eprintln!("==== run {i} failed ====\n{text}");
+                failures.push(i);
+            }
+        }
+        assert!(failures.is_empty(), "{} of {runs} runs failed: {failures:?}", failures.len());
+    }
+
     /// The body of the fake agent: runs only inside the PTY, when the
     /// environment variable is set (the normal test run skips it).
     #[test]
