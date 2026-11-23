@@ -89,6 +89,27 @@ jobs:
           fi
           echo "ok: refused, and the value was not printed"
 
+      - name: Home Manager refuses a key pasted into api_key_env without printing it
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          set +e
+          log="$(nix eval --impure --expr 'import ./nix/tests/secret-canary-api-key-env.nix ./.' 2>&1)"
+          status=$?
+          set -e
+          tail -n 25 <<<"$log"
+          if [ "$status" -eq 0 ]; then
+            echo "::error::a config with a key in api_key_env evaluated"
+            exit 1
+          fi
+          # Both places are named: ai.api_key_env (wrong table) and the provider's value.
+          grep -q "refusing to write ai: a key is" <<<"$log"
+          grep -q "refusing to write ai.providers\[0\].api_key_env: it must be the NAME" <<<"$log"
+          if grep -qE "halyard-canary-(misplaced-9c2e|value-4d81)" <<<"$log"; then
+            echo "::error::a pasted value appears in the error output"
+            exit 1
+          fi
+          echo "ok: both refused, and neither value was printed"
+
       - name: nix flake check
         run: nix flake check -L --no-update-lock-file
 

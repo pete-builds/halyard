@@ -617,19 +617,21 @@ fn secret_error(
     line: Option<usize>,
     documented: Option<&'static str>,
 ) -> ConfigError {
-    let mut message = String::from(
-        "a key here is named like a secret (key, token, secret, password or auth; the name is \
-         not shown). Halyard never stores API keys in the config file. Export the key in an \
-         environment variable (or keep it in your keychain or secret manager and export it \
-         from there) and set `api_key_env = \"NAME_OF_VARIABLE\"` instead",
-    );
+    const ADVICE: &str = "Halyard never stores API keys in the config file. Export the key in an \
+         environment variable (or keep it in your keychain or secret manager and export it from \
+         there) and set `api_key_env = \"NAME_OF_VARIABLE\"` on an `[[ai.providers]]` entry \
+         instead";
     // A documented name in the wrong table: naming it is safe, it is this file's own string.
-    if let Some((name, home)) = documented.and_then(ai_home) {
-        message.push_str(&format!(
-            ". `{name}` is only valid on {home}, and here it is treated as a pasted secret; if \
-             you pasted a real key, revoke it"
-        ));
-    }
+    let message = match documented.and_then(ai_home) {
+        Some((name, home)) => format!(
+            "`{name}` is only valid on {home}; here it is treated as a pasted secret (the value \
+             is not shown). {ADVICE}. If you pasted a real key, revoke it"
+        ),
+        None => format!(
+            "a key here is named like a secret (key, token, secret, password or auth; the name \
+             is not shown). {ADVICE}"
+        ),
+    };
     ConfigError::at(section, line, message)
 }
 
@@ -796,9 +798,15 @@ fn valid_env_name(s: &str) -> bool {
 }
 
 /// Whether a string that passes [`valid_env_name`] is still shaped like a credential, so it was
-/// almost certainly pasted into `api_key_env` by mistake: a well-known token prefix (matched
-/// case-sensitively, so `GITHUB_PAT` is a fine name), a long random-looking mix of upper case,
-/// lower case and digits, or a long hex digest. Real variable names are words joined by `_`.
+/// almost certainly pasted into `api_key_env` by mistake:
+///
+/// * a well-known token prefix followed by at least 16 more characters (matched
+///   case-sensitively, so `GITHUB_PAT` and `hf_token` are fine names);
+/// * an `_`-free run of 32 or more characters mixing upper case, lower case and digits that
+///   changes between those classes on at least every other character (random base62 does;
+///   words in camelCase or `Snake_Case` do not, and `_` is never counted as a change);
+/// * 32 or more hex digits and nothing else (a digest). A name prefix such as
+///   `ANTHROPIC_KEY_` in front of hex makes it a name.
 fn looks_like_token(s: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "ghp_",
@@ -811,8 +819,11 @@ fn looks_like_token(s: &str) -> bool {
         "sk_test_",
         "rk_live_",
         "rk_test_",
+        "hf_",
+        "gsk_",
+        "r8_",
     ];
-    if PREFIXES.iter().any(|p| s.starts_with(p)) {
+    if PREFIXES.iter().any(|p| s.strip_prefix(p).is_some_and(|body| body.len() >= 16)) {
         return true;
     }
     let class = |c: char| match c {
@@ -821,13 +832,16 @@ fn looks_like_token(s: &str) -> bool {
         '0'..='9' => 2,
         _ => 3,
     };
-    let chars: Vec<char> = s.chars().collect();
-    let has = |k| chars.iter().any(|&c| class(c) == k);
-    // Random base62 changes class about every other character; camelCase names do not.
-    let switches = chars.windows(2).filter(|w| class(w[0]) != class(w[1])).count();
-    let mixed = chars.len() >= 24 && has(0) && has(1) && has(2) && switches * 2 >= chars.len();
-    let hex = chars.len() >= 32 && has(2) && chars.iter().all(char::is_ascii_hexdigit);
-    mixed || hex
+    let random_run = |run: &str| {
+        let chars: Vec<char> = run.chars().collect();
+        let has = |k| chars.iter().any(|&c| class(c) == k);
+        let switches = chars.windows(2).filter(|w| class(w[0]) != class(w[1])).count();
+        chars.len() >= 32 && has(0) && has(1) && has(2) && switches * 2 >= chars.len()
+    };
+    let hex = s.len() >= 32
+        && s.bytes().any(|b| b.is_ascii_digit())
+        && s.bytes().all(|b| b.is_ascii_hexdigit());
+    hex || s.split('_').any(random_run)
 }
 
 fn type_error(path: &str, line: Option<usize>, kind: Kind) -> ConfigError {
@@ -1153,15 +1167,25 @@ impl Config {
             }
             _ => {}
         }
-        if let Some(env) = &p.api_key_env
-            && (!valid_env_name(env) || looks_like_token(env))
-        {
-            return Err(ConfigError::at(
-                &key("api_key_env"),
-                l("api_key_env"),
-                "must be the NAME of an environment variable (letters, digits, underscore), not a key; \
-                     if you pasted a key here, revoke it",
-            ));
+        if let Some(env) = &p.api_key_env {
+            if !valid_env_name(env) {
+                return Err(ConfigError::at(
+                    &key("api_key_env"),
+                    l("api_key_env"),
+                    "must be the NAME of an environment variable (letters, digits, underscore, \
+                     not starting with a digit), not a key; the value is not shown. If you \
+                     pasted a key here, revoke it",
+                ));
+            }
+            if looks_like_token(env) {
+                return Err(ConfigError::at(
+                    &key("api_key_env"),
+                    l("api_key_env"),
+                    "looks like a credential, not an environment variable name; the value is not \
+                     shown. Put the key in an environment variable and give its NAME here. If you \
+                     pasted a key here, revoke it",
+                ));
+            }
         }
         Ok(())
     }

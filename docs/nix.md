@@ -166,9 +166,17 @@ evaluation error, not a silent override.
 **Never put a credential in `settings`.** Everything there is copied into the world-readable
 `/nix/store` (and into any binary cache you push to). The module refuses, at evaluation time and
 without printing the value, any key named like a secret (containing key, token, secret,
-password, passwd or auth), the same rule Halyard applies when it reads the file. For an AI
+password, passwd or auth), the same name rule Halyard applies when it reads the file. For an AI
 provider, export the key in an environment variable and name it with
-`api_key_env = "ANTHROPIC_API_KEY"`. This guards the rendered `config.toml` only: a credential
+`api_key_env = "ANTHROPIC_API_KEY"`. As in Halyard, `api_key_env` is exempt from that rule
+only directly on an `ai.providers` entry: `settings.ai.api_key_env`, or `api_key_env` in any
+other table, is refused like any other secret-looking name. On a provider, its value must be a
+variable name (letters, digits, underscore, not starting with a digit), so a pasted
+`sk-ant-...` key is refused too. Halyard itself also refuses, when it reads the file, a value
+that fits that syntax but is shaped like a credential (a known token prefix, a long random run,
+a long hex digest); the module does not repeat that heuristic. In 0.1.0 and 0.1.1 the module
+and Halyard exempted `api_key_env` by name anywhere, so a key in `settings.ai.api_key_env` was
+written to the store; if you did that, revoke the key. This guards the rendered `config.toml` only: a credential
 written in your own `.nix` files is already in the store, because a flake-based configuration
 copies its source there.
 

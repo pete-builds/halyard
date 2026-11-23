@@ -206,6 +206,33 @@ let
     };
     "a token-like name in any section is refused" = rejects { window.Auth_Token = "x"; };
     "a nested secret-like name is refused" = rejects { terminal.shell.password = "x"; };
+    # api_key_env is exempt only directly on an ai.providers entry (v0.1.1
+    # exempted it by name anywhere, so a key pasted there reached the store).
+    "api_key_env directly under ai is refused" = rejects { ai.api_key_env = "ANTHROPIC_API_KEY"; };
+    "api_key_env in a table nested under ai is refused" = rejects {
+      ai.extra.api_key_env = "ANTHROPIC_API_KEY";
+    };
+    "api_key_env in a table inside a provider is refused" = rejects {
+      ai.providers = [
+        {
+          name = "claude";
+          kind = "anthropic";
+          model = "m";
+          headers.api_key_env = "ANTHROPIC_API_KEY";
+        }
+      ];
+    };
+    "api_key_env outside ai is refused" = rejects { font.api_key_env = "ANTHROPIC_API_KEY"; };
+    "a key pasted into a provider's api_key_env is refused" = rejects {
+      ai.providers = [
+        {
+          name = "claude";
+          kind = "anthropic";
+          model = "m";
+          api_key_env = "sk-ant-api03-not-a-real-key";
+        }
+      ];
+    };
     # Control for the rule itself: the same shape without the secret passes.
     "api_key_env and keybindings pass the secret rule" =
       !(rejects {

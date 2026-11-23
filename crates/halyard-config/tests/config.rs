@@ -755,9 +755,13 @@ fn misplaced_documented_name_error_says_where_it_belongs() {
         e.message.contains("`api_key_env` is only valid on an `[[ai.providers]]` entry"),
         "{e}"
     );
+    // It names the field, so it must not also claim the name is hidden.
+    assert!(!e.message.contains("name is not shown"), "{e}");
+    assert!(e.message.contains("value is not shown"), "{e}");
     // Control: an undocumented secret-looking name gets no such hint (its name stays hidden).
     let e = err(&format!("[ai]\napi_key = \"{PASTED}\"\n"));
     assert!(!e.message.contains("only valid on"), "{e}");
+    assert!(e.message.contains("name is not shown"), "{e}");
 }
 
 #[test]
@@ -784,22 +788,31 @@ fn api_key_env_value_that_looks_like_a_token_is_refused() {
     // Each of these passes the variable-name syntax check, but is shaped like a credential.
     // Prefixed fixtures are assembled at run time with a dummy body, so no token-shaped
     // literal sits in the source for secret scanners (or readers) to mistake for a real one.
-    let prefixed = ["ghp_", "gho_", "github_pat_", "sk_live_", "sk_test_", "rk_live_"]
-        .map(|p| format!("{p}fixture_only"));
+    let prefixed =
+        ["ghp_", "gho_", "github_pat_", "sk_live_", "sk_test_", "rk_live_", "hf_", "gsk_", "r8_"]
+            .map(|p| format!("{p}fixtureonlynotarealone"));
     let shaped = [
         "AbCdEf0123456789GhIjKlMnOpQrStUv", // random-looking mixed case and digits
-        "q8Xz3LmT0vRb7NcY2wKd5HsJ9pFg4",
-        "d41d8cd98f00b204e9800998ecf8427e", // a hex digest (MD5 of the empty string)
+        "q8Xz3LmT0vRb7NcY2wKd5HsJ9pFg4Tn6",
+        "deploy_q8Xz3LmT0vRb7NcY2wKd5HsJ9pFg4Tn6", // a random run after a word
+        "d41d8cd98f00b204e9800998ecf8427e",        // a hex digest (MD5 of the empty string)
     ]
     .map(String::from);
     for v in prefixed.iter().chain(&shaped) {
         let src = format!("{PROV}kind = \"anthropic\"\napi_key_env = \"{v}\"\n");
         let e = err(&src);
         assert_eq!(e.key.as_deref(), Some("ai.providers[0].api_key_env"), "{v}: {e}");
-        assert!(e.message.contains("NAME"), "{v}: {e}");
+        assert!(
+            e.message.contains("looks like a credential, not an environment variable name"),
+            "{v}: {e}"
+        );
         assert_secret_absent(&src, v);
     }
-    // Control: real variable names are accepted.
+    // Control: real variable names are accepted, including mixed-case names joined by `_`,
+    // camelCase names with digits, a hex suffix after a name, and token prefixes with a short
+    // body (a name, not a token).
+    let hex_suffix = format!("ANTHROPIC_KEY_{}", "d41d8cd98f00b204e9800998ecf8427e");
+    let hex_suffix_upper = hex_suffix.to_ascii_uppercase();
     for v in [
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
@@ -811,9 +824,40 @@ fn api_key_env_value_that_looks_like_a_token_is_refused() {
         "SK_LIVE",
         "MyAnthropicApiKey2024Work",
         "OPENAI_API_KEY_2024_11_22_PERSONAL_ACCOUNT",
+        "Anthropic_Api_Key_Work_2",
+        "Project_X_Api_Key_V2_Prod",
+        "My_Openai_Key_2024_Work_A",
+        "OpenAI_API_KEY_v2_Work2024",
+        "myOpenAiKeyV2ForWork2024Q4",
+        "HfTokenForWorkLaptop2024Q3Ab",
+        "hf_token",
+        "gsk_key",
+        "sk_live_key",
+        "ghp_work_token",
+        &hex_suffix,
+        &hex_suffix_upper,
     ] {
         let src = format!("{PROV}kind = \"anthropic\"\napi_key_env = \"{v}\"\n");
         let l = Config::parse(&src).unwrap_or_else(|e| panic!("{v} must be accepted: {e}"));
         assert_eq!(l.config.ai.providers[0].api_key_env.as_deref(), Some(v));
+    }
+}
+
+#[test]
+fn non_table_entries_inside_ai_providers_are_walked() {
+    // An array nested in the providers array is not a provider: its tables get no exemption,
+    // and a secret-looking name in them is refused under `[ai]`.
+    for src in [
+        format!("[ai]\nproviders = [[{{ api_key = \"{PASTED}\" }}]]\n"),
+        format!("[ai]\nproviders = [[{{ api_key_env = \"{PASTED}\" }}]]\n"),
+        format!(
+            "[ai]\nproviders = [{{ name = \"a\", kind = \"anthropic\", model = \"m\" }}, \
+             [{{ token = \"{PASTED}\" }}]]\n"
+        ),
+    ] {
+        let e = err(&src);
+        assert_eq!(e.key.as_deref(), Some("ai"), "{src:?}: {e}");
+        assert!(e.message.contains("never stores API keys"), "{src:?}: {e}");
+        assert_secret_absent(&src, PASTED);
     }
 }

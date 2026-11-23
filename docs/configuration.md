@@ -226,8 +226,13 @@ nested under `[ai]` or under a provider, or outside `[ai]`) it is treated as a p
 and rejected; the error names `api_key_env` and where it belongs, never the value. Its value
 must look like a variable name (letters, digits, underscore, not starting with a digit), so
 pasting a key there is rejected too, and so is a value that passes that check but is shaped
-like a credential: a well-known token prefix (`ghp_`, `github_pat_`, `sk_live_` and similar),
-24 or more characters of random-looking mixed case and digits, or 32 or more hex digits.
+like a credential: a well-known token prefix (`ghp_`, `github_pat_`, `sk_live_`, `hf_` and
+similar) followed by at least 16 more characters, a run of 32 or more characters without `_`
+that mixes upper case, lower case and digits and switches between them on at least every other
+character, or a value that is nothing but 32 or more hex digits. Names such as
+`Anthropic_Api_Key_Work_2`, `myOpenAiKeyV2ForWork2024Q4`, `hf_token` and
+`ANTHROPIC_KEY_` followed by hex are accepted. This is a heuristic: a short or single-case
+token with an unlisted prefix still passes, so the name check is what you rely on.
 A `base_url` with credentials in it (`https://user:KEY@host/`) is rejected. No error ever
 echoes a value back. If you pasted a real key into a config file
 at any point, revoke it.

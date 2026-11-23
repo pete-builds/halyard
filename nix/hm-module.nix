@@ -32,9 +32,11 @@ let
   # Mirrors halyard-config's rule: a key NAME containing one of these
   # (case-insensitive) is refused, because its value may be a credential.
   # Checked at evaluation time, before anything is written to the
-  # world-readable store. Exempt, as in halyard-config: `api_key_env` (it holds
-  # the name of a variable, not a key) and everything under the top-level
-  # `keybindings` table (chords, not secrets).
+  # world-readable store. As in halyard-config, a documented name is exempt
+  # only in the table that defines it: `api_key_env` (it holds the name of a
+  # variable, not a key) only directly on an `ai.providers` entry, and
+  # everything under the top-level `keybindings` table (chords, not secrets).
+  # `api_key_env` anywhere else is treated as a pasted secret.
   secretFragments = [
     "key"
     "token"
@@ -43,51 +45,102 @@ let
     "passwd"
     "auth"
   ];
-  looksSecret =
-    name: name != "api_key_env" && lib.any (f: lib.hasInfix f (lib.toLower name)) secretFragments;
+  looksSecret = name: lib.any (f: lib.hasInfix f (lib.toLower name)) secretFragments;
 
-  # Where each secret-looking name is, as a path such as `window.auth_token`.
-  # Under `ai` only the section is reported, as halyard-config does, in case
-  # the name itself was pasted from a credential. Values are never read.
+  # A provider's `api_key_env` must be a variable name. The value is matched
+  # here and never printed.
+  validEnvName = v: builtins.isString v && builtins.match "[A-Za-z_][A-Za-z0-9_]*" v != null;
+
+  # Every problem as `{ path; env; }`: `env` is false for a secret-looking
+  # name, true for a provider `api_key_env` that is not a variable name.
+  # Paths look like `window.auth_token`; under `ai` only the section is
+  # reported (`ai` or `ai.providers[N]`), as halyard-config does, in case a
+  # name itself was pasted from a credential. `where` is the documented table
+  # `value` is: "top", "ai", "providers" (the list), "provider", or "" for
+  # anything undocumented. `section` is the `ai` section to report, or null
+  # outside `ai`. Values are never printed.
   secretPaths =
     let
       walk =
-        path: inAi: value:
+        path: where: section: value:
         if builtins.isAttrs value then
           lib.concatLists (
             lib.mapAttrsToList (
               name: v:
               let
                 here = if path == "" then name else "${path}.${name}";
-                ai = inAi || (path == "" && name == "ai");
+                isAi = where == "top" && name == "ai";
+                child =
+                  if isAi then
+                    "ai"
+                  else if where == "ai" && name == "providers" then
+                    "providers"
+                  else
+                    "";
+                exempt = where == "provider" && name == "api_key_env";
               in
-              if path == "" && name == "keybindings" then
+              if where == "top" && name == "keybindings" then
                 [ ]
               else
-                lib.optional (looksSecret name) (if ai then path else here) ++ walk here ai v
+                lib.optional (looksSecret name && !exempt) {
+                  path = if section == null then here else section;
+                  env = false;
+                }
+                ++ lib.optional (exempt && !(validEnvName v)) {
+                  path = "${section}.api_key_env";
+                  env = true;
+                }
+                ++ walk here child (if isAi then "ai" else section) v
             ) value
           )
         else if builtins.isList value then
-          lib.concatLists (lib.imap0 (i: walk "${path}[${toString i}]" inAi) value)
+          lib.concatLists (
+            lib.imap0 (
+              i: v:
+              let
+                isProvider = where == "providers" && builtins.isAttrs v;
+              in
+              walk "${path}[${toString i}]" (if isProvider then "provider" else "") (
+                if isProvider then "ai.providers[${toString i}]" else section
+              ) v
+            ) value
+          )
         else
           [ ];
     in
-    walk "" false;
+    walk "" "top" null;
 
   checkedSettings =
     settings:
     let
-      found = lib.unique (secretPaths settings);
+      found = secretPaths settings;
+      paths =
+        env:
+        lib.concatStringsSep ", " (
+          lib.unique (map (x: x.path) (lib.filter (x: x.env == env) found))
+        );
+      names = paths false;
+      envs = paths true;
     in
     if found == [ ] then
       settings
     else
-      throw ''
-        programs.halyard.settings: refusing to write ${lib.concatStringsSep ", " found}: a key is
-        named like a secret (key, token, secret, password, passwd or auth). Nix would copy it into
-        the world-readable /nix/store. Export the credential in an environment variable and set
-        `api_key_env = "NAME_OF_VARIABLE"` on the `ai.providers` entry instead.
-      '';
+      throw (
+        lib.optionalString (names != "") ''
+          programs.halyard.settings: refusing to write ${names}: a key is
+          named like a secret (key, token, secret, password, passwd or auth). Nix would copy it into
+          the world-readable /nix/store. Export the credential in an environment variable and set
+          `api_key_env = "NAME_OF_VARIABLE"` on the `ai.providers` entry instead. `api_key_env` is
+          only valid directly on an `ai.providers` entry; anywhere else it is treated as a pasted
+          secret.
+        ''
+        + lib.optionalString (envs != "") ''
+          programs.halyard.settings: refusing to write ${envs}: it must be the NAME of an
+          environment variable (letters, digits, underscore, not starting with a digit), not a
+          key. The value is not shown. Nix would copy it into the world-readable /nix/store. If
+          you pasted a key there, revoke it.
+        ''
+      );
 
   themeModule = types.submodule (
     { name, ... }:
