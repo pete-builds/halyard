@@ -830,6 +830,10 @@ fn api_key_env_value_that_looks_like_a_token_is_refused() {
         "OpenAI_API_KEY_v2_Work2024",
         "myOpenAiKeyV2ForWork2024Q4",
         "HfTokenForWorkLaptop2024Q3Ab",
+        // Title_Snake names of 32 or more characters: `_` separates words, so no single run
+        // is long, although the whole value switches class on every other character.
+        "Anthropic_Api_Key_For_Work_Laptop_2",
+        "Openai_Api_Key_For_Home_Server_2024",
         "hf_token",
         "gsk_key",
         "sk_live_key",
