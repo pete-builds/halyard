@@ -13,9 +13,9 @@
 //! dialogs and runs the UI half.
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{SyncSender, sync_channel};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
 use futures::channel::mpsc::UnboundedSender;
@@ -25,7 +25,7 @@ use halyard_ipc::{
     SendTextRequest, SessionAuth, SessionDirectory, SessionEvent, SessionInfo, SessionToken,
     StateReport, TokenHash,
 };
-use halyard_term::Session;
+use halyard_term::{Session, SessionConfig};
 
 use crate::signals::{self, SharedMonitor};
 
@@ -218,6 +218,114 @@ pub fn pane_env(creds: Option<&PaneCredentials>) -> (Vec<(String, String)>, Vec<
     let remove =
         vec![halyard_ipc::ENV_SOCKET.to_owned(), halyard_ipc::ENV_SESSION_TOKEN.to_owned()];
     (creds.map(|c| c.env.clone()).unwrap_or_default(), remove)
+}
+
+/// The parts of a pane's [`SessionConfig`] that come from here: the session API's
+/// variables ([`pane_env`]) and `hook_dir` added to the end of `PATH`. The view passes
+/// [`hook_client_dir`] and fills in the rest (program, size, callbacks) over this base.
+#[must_use]
+pub fn pane_session_config(
+    creds: Option<&PaneCredentials>,
+    hook_dir: Option<PathBuf>,
+) -> SessionConfig {
+    let (env, env_remove) = pane_env(creds);
+    SessionConfig { env, env_remove, path_append: hook_dir, ..SessionConfig::default() }
+}
+
+/// The hook client every package installs next to `halyard` (`docs/session-api.md`).
+pub const HOOK_CLIENT: &str = "halyard-msg";
+
+/// The directory added to the end of every pane's `PATH` (`SessionConfig::path_append`)
+/// so hooks run in a pane find [`HOOK_CLIENT`] without the user putting it on `PATH`:
+/// the directory of the running `halyard`, symlinks resolved, when an executable
+/// `halyard-msg` is there. In `Halyard.app` that is `Contents/MacOS`. Left out when
+/// `PATH` already finds a `halyard-msg`, or when anyone but this user or root could change
+/// the directory or the file. Worked out once.
+#[must_use]
+pub fn hook_client_dir() -> Option<PathBuf> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let me = unsafe { libc::geteuid() };
+        match hook_client_dir_for(&exe, std::env::var_os("PATH").as_deref(), me) {
+            HookDir::Append(dir) => Some(dir),
+            HookDir::Untrusted(why) => {
+                // Debug formatting escapes control characters in a hostile path.
+                eprintln!("halyard: not adding {why:?} to panes' PATH");
+                None
+            }
+            HookDir::Absent | HookDir::AlreadyOnPath => None,
+        }
+    })
+    .clone()
+}
+
+/// What [`hook_client_dir_for`] decided.
+#[derive(Debug, PartialEq, Eq)]
+enum HookDir {
+    /// Add this directory to the end of panes' `PATH`.
+    Append(PathBuf),
+    /// No executable `halyard-msg` next to `halyard`.
+    Absent,
+    /// Halyard's own `PATH`, which panes inherit, already finds a `halyard-msg`. An entry
+    /// after it would never be used (on Nix, for example, the profile's `bin` already holds
+    /// it while `halyard` resolves to the store path).
+    AlreadyOnPath,
+    /// Someone other than this user (or root) could change what would run: the path and
+    /// why.
+    Untrusted(String),
+}
+
+/// [`hook_client_dir`] for the binary at `exe`, with Halyard's own `PATH` and effective uid.
+///
+/// The directory is left out when the directory or `halyard-msg` is writable by group or
+/// others, or owned by anyone but `me` or root: a copy run from `/tmp` or a shared folder
+/// must not let another local user choose what a hook runs, even from the end of `PATH`.
+fn hook_client_dir_for(exe: &Path, path: Option<&std::ffi::OsStr>, me: u32) -> HookDir {
+    let Some(dir) = exe.parent().filter(|d| d.is_absolute()) else {
+        return HookDir::Absent;
+    };
+    let client = dir.join(HOOK_CLIENT);
+    if !is_executable_file(&client) {
+        return HookDir::Absent;
+    }
+    if path.is_some_and(|p| {
+        std::env::split_paths(p)
+            .any(|entry| entry.is_absolute() && is_executable_file(&entry.join(HOOK_CLIENT)))
+    }) {
+        return HookDir::AlreadyOnPath;
+    }
+    for target in [dir, client.as_path()] {
+        let reason = match std::fs::metadata(target) {
+            Ok(meta) => {
+                use std::os::unix::fs::MetadataExt;
+                untrusted_reason(meta.mode(), meta.uid(), me)
+            }
+            Err(_) => Some("unreadable"),
+        };
+        if let Some(reason) = reason {
+            return HookDir::Untrusted(format!("{}: {reason}", target.display()));
+        }
+    }
+    HookDir::Append(dir.to_path_buf())
+}
+
+fn is_executable_file(file: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(file).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Why a file with this `mode` and `owner` cannot be trusted by user `me`, if it cannot.
+fn untrusted_reason(mode: u32, owner: u32, me: u32) -> Option<&'static str> {
+    if mode & 0o022 != 0 {
+        Some("writable by group or others")
+    } else if owner != me && owner != 0 {
+        Some("owned by another user")
+    } else {
+        None
+    }
 }
 
 /// A request only the UI thread can answer or act on.

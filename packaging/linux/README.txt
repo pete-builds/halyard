@@ -1,8 +1,10 @@
 Halyard (Linux, prebuilt binary)
 
-This tarball holds the plain release binary, `halyard`, built on Ubuntu 24.04 (glibc 2.39).
-It runs on distributions with a glibc at least that new. Nothing in it is installed
-for you: copy `halyard` somewhere on your PATH, for example ~/.local/bin.
+This tarball holds two release binaries built on Ubuntu 24.04 (glibc 2.39): `halyard`, the
+terminal, and `halyard-msg`, the small client agent hooks call to report state to Halyard
+(docs/session-api.md). They run on distributions with a glibc at least that new. Nothing
+in it is installed for you: copy both somewhere on your PATH, for example ~/.local/bin:
+    install -m 755 halyard halyard-msg ~/.local/bin/
 
 Recommended on NixOS and with Nix: use the flake instead of this tarball. It pins every
 dependency, wires up the runtime libraries and installs the desktop entry and icon:

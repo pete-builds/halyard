@@ -550,6 +550,41 @@ halyard-msg info [--strict]
   stderr); 1 on failure with `--strict`; 64 for a usage error. **It never exits 2**,
   because Claude Code treats exit status 2 from some hooks as "block this action".
 
+### Where it is, and how a hook finds it
+
+Every package ships it beside the `halyard` binary:
+
+| Package | Location | Found by a hook in a pane |
+|---------|----------|---------------------------|
+| macOS `Halyard.app` | `Halyard.app/Contents/MacOS/halyard-msg` (universal, like `halyard`) | Yes, through the pane's `PATH` (below) |
+| Linux tarball | `halyard-<version>-linux-<arch>/halyard-msg` | Yes, once you copy it next to `halyard` on your `PATH` (`docs/INSTALL.md`) |
+| Nix | `bin/halyard-msg` in the package | Yes: installed into your profile with `halyard` |
+| Flatpak | `/app/bin/halyard-msg`, inside the sandbox | Not by name. Panes run on the host, which cannot see `/app/bin`; see `docs/flatpak.md` for the wrapper to install |
+| `cargo build` | `target/<profile>/halyard-msg` after `cargo build -p halyard-ipc` | Through the pane's `PATH` when it sits next to the `halyard` you run |
+
+**The pane's `PATH`.** When an executable `halyard-msg` sits in the same directory as the
+running `halyard` (symlinks resolved), Halyard appends that directory to the end of every
+pane's `PATH`. In the app that is `/Applications/Halyard.app/Contents/MacOS`. It goes last,
+so it never shadows a program you installed, and macOS's `path_helper` (run by login
+shells) keeps it at the end. Nothing is added when:
+
+- `PATH` is unset or empty, or already lists the directory;
+- the `PATH` Halyard itself started with already finds an executable `halyard-msg` (a Nix
+  profile's `bin`, or a copy you put on `PATH`), since an entry after it would never be
+  used;
+- the directory or `halyard-msg` is writable by group or others, or owned by anyone but you
+  or root. Then another local user could choose what your hooks run (a copy started from
+  `/tmp` or a shared folder, for example), so Halyard prints
+  `halyard: not adding "<path>: <reason>" to panes' PATH` to its stderr and leaves `PATH`
+  alone.
+
+A shell startup file that assigns `PATH` outright, rather than adding to it, drops the
+entry; put `halyard-msg` on your `PATH` yourself in that case, or call it by its full path.
+Agents started in the pane (Claude Code, for example) inherit the pane's `PATH`, and so do
+their hooks. A hook run by something started outside Halyard does not have it, and does not
+need it: outside Halyard `halyard-msg` does nothing anyway. The Flatpak does not do this,
+because its panes run on the host.
+
 ## Example integrations
 
 ### Claude Code hooks
@@ -572,7 +607,19 @@ In `~/.claude/settings.json` (or a project's `.claude/settings.json`):
 }
 ```
 
-In other terminals these hooks are silent no-ops.
+In other terminals these hooks are silent no-ops, provided `halyard-msg` is on `PATH`
+there too. With the macOS app it is on `PATH` only inside Halyard's panes, so the same
+hooks run in another terminal print "command not found" and exit 127 (Claude Code shows a
+hook error and carries on). Link it onto your `PATH` once to keep them quiet everywhere:
+
+```sh
+mkdir -p ~/.local/bin
+ln -sf /Applications/Halyard.app/Contents/MacOS/halyard-msg ~/.local/bin/halyard-msg
+# or, if Halyard.app is in your own Applications folder:
+ln -sf ~/Applications/Halyard.app/Contents/MacOS/halyard-msg ~/.local/bin/halyard-msg
+```
+
+(`~/.local/bin` must be on your `PATH`; `/usr/local/bin` works as well.)
 
 ### A Python controller using only the standard library
 

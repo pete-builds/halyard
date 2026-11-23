@@ -344,7 +344,6 @@ impl TerminalView {
             .api
             .as_ref()
             .and_then(|api| crate::session_api::pane_credentials(api.socket(), &session_id));
-        let (env, env_remove) = crate::session_api::pane_env(creds.as_ref());
         let config = SessionConfig {
             program,
             args,
@@ -363,9 +362,11 @@ impl TerminalView {
             })),
             observer: Some(Box::new(SignalObserver::new(Arc::clone(&monitor)))),
             session_id: Some(session_id),
-            env,
-            env_remove,
-            ..SessionConfig::default()
+            // The API's variables, and halyard-msg (shipped next to halyard) on PATH.
+            ..crate::session_api::pane_session_config(
+                creds.as_ref(),
+                crate::session_api::hook_client_dir(),
+            )
         };
         let session = Arc::new(Session::spawn(config)?);
         let api = match (spawn.api, creds) {

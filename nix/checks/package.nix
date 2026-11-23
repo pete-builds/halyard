@@ -1,4 +1,6 @@
-# What the package must contain. On every system: bin/halyard. On Linux also
+# What the package must contain. On every system: bin/halyard and bin/halyard-msg
+# (the hook client docs/session-api.md says is installed next to halyard; a
+# hook that cannot find it exits 127). On Linux also
 # the desktop entry and icons, and every library GPUI loads with dlopen must
 # resolve through the binary's RUNPATH (they are not in its NEEDED list, so a
 # missing one would only show up as a window that never opens). Control: a
@@ -39,8 +41,19 @@ pkgs.runCommand "halyard-package-contents"
       pkg=${halyard}
       echo "package: $pkg"
       find "$pkg" -mindepth 1 | sed "s|^$pkg/||" | sort
-      test -x "$pkg/bin/halyard"
-      echo "ok: bin/halyard"
+      for bin in halyard halyard-msg; do
+        if [ ! -x "$pkg/bin/$bin" ] || [ -d "$pkg/bin/$bin" ]; then
+          echo "MISSING: bin/$bin" >&2
+          exit 1
+        fi
+        echo "ok: bin/$bin"
+      done
+      # It runs, and outside Halyard it is the documented silent no-op.
+      "$pkg/bin/halyard-msg" --version
+      # (Not "out": that is this derivation's output path.)
+      said="$(env -u HALYARD_SESSION_ID "$pkg/bin/halyard-msg" state working 2>&1)"
+      [ -z "$said" ] || { echo "halyard-msg printed outside Halyard: $said" >&2; exit 1; }
+      echo "ok: halyard-msg runs and is silent outside Halyard"
     ''
     + lib.optionalString stdenv.hostPlatform.isLinux ''
       desktop-file-validate "$pkg/share/applications/halyard.desktop"

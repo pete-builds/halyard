@@ -23,7 +23,10 @@ linked but untested.
 ### The release zip
 
 1. Download `Halyard-<version>-macos-universal.zip` from the release page and verify it.
-2. Unzip it and drag `Halyard.app` into `/Applications`.
+2. Unzip it and drag `Halyard.app` into `/Applications`. The hook client `halyard-msg`
+   is inside it, at `Halyard.app/Contents/MacOS/halyard-msg`, and is on `PATH` in every
+   Halyard pane; to use the same agent hooks in other terminals, link it onto your `PATH`
+   (docs/session-api.md, "Where it is, and how a hook finds it").
 3. **Halyard is not notarized.** It is ad-hoc signed, which keeps the bundle consistent
    but is not a Developer ID signature, so Gatekeeper blocks a downloaded copy on first
    launch. Either:
@@ -84,11 +87,14 @@ not been tested yet (no window has been opened from the Flatpak so far):
 ## Other Linux
 
 The release has tarballs for x86_64 and aarch64, built on Ubuntu 24.04, so they need a
-glibc at least as new as 2.39. Unpack, then copy `halyard` somewhere on your `PATH`:
+glibc at least as new as 2.39. Each holds two programs: `halyard`, and `halyard-msg`, the
+client agent hooks call (docs/session-api.md). Unpack, then copy both somewhere on your
+`PATH`:
 
 ```sh
 tar xzf halyard-<version>-linux-x86_64.tar.gz
-install -m 755 halyard-<version>-linux-x86_64/halyard ~/.local/bin/
+install -m 755 halyard-<version>-linux-x86_64/halyard \
+    halyard-<version>-linux-x86_64/halyard-msg ~/.local/bin/
 ```
 
 The tarball has no desktop entry or icon. Runtime libraries (the GPU toolkit loads some
@@ -112,7 +118,7 @@ libxcb1-dev libfontconfig-dev libfreetype-dev`), Rust through rustup, and Zig 0.
 (from ziglang.org, or `nix develop`, which provides everything):
 
 ```sh
-cargo build --release --locked -p halyard-app
+cargo build --release --locked -p halyard-app -p halyard-ipc   # halyard and halyard-msg
 ./target/release/halyard
 ```
 

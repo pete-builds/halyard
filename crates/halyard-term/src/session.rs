@@ -13,7 +13,7 @@
 //!
 //! The [`Session`] handle is `Send + Sync`; the UI talks to it from any thread.
 
-use std::ffi::{CStr, OsString};
+use std::ffi::{CStr, OsStr, OsString};
 use std::fmt;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -124,6 +124,14 @@ pub struct SessionConfig {
     /// 128 characters from `A-Z a-z 0-9 . _ -`; anything else is replaced by a
     /// fresh id. `None` makes a fresh id.
     pub session_id: Option<String>,
+    /// A directory to add to the end of the program's `PATH`, so helpers
+    /// shipped beside Halyard, such as `halyard-msg`, resolve in the pane
+    /// without shadowing anything the user installed. Nothing is added when
+    /// `PATH` is unset or empty, or already holds the directory. Only for a
+    /// program Halyard runs itself: a program started on the host through
+    /// Flatpak never gets it, because the directory is a sandbox path the
+    /// host cannot see.
+    pub path_append: Option<PathBuf>,
 }
 
 impl Default for SessionConfig {
@@ -145,6 +153,7 @@ impl Default for SessionConfig {
             output_tap: None,
             observer: None,
             session_id: None,
+            path_append: None,
         }
     }
 }
@@ -168,6 +177,7 @@ impl fmt::Debug for SessionConfig {
             .field("output_tap", &self.output_tap.is_some())
             .field("observer", &self.observer.is_some())
             .field("session_id", &self.session_id)
+            .field("path_append", &self.path_append)
             .finish()
     }
 }
@@ -485,6 +495,11 @@ fn build_command_for(
     for (k, v) in &env {
         cmd.env(k, v);
     }
+    if let Some(dir) = &config.path_append
+        && let Some(path) = path_with_appended(cmd.get_env("PATH"), dir)
+    {
+        cmd.env("PATH", path);
+    }
     if let Some(cwd) = &config.cwd {
         cmd.cwd(cwd);
     } else if let Some(home) = cmd.get_env("HOME").filter(|h| !Path::new(h).is_dir()) {
@@ -501,6 +516,25 @@ fn build_command_for(
         cmd.env("LANG", lang);
     }
     Ok(Built { cmd, env_file: None })
+}
+
+/// `path` with `dir` added as its last entry, or `None` to leave `PATH` as it is.
+///
+/// Nothing changes when `PATH` is unset or empty (setting it would replace the
+/// system's default search path with one directory), when `dir` is not absolute,
+/// when it is already an entry, or when it cannot be written into `PATH` (it
+/// contains a `:`). Last, not first, so it never shadows a program of the same
+/// name the user installed, and macOS's `path_helper`, which login shells run,
+/// keeps entries it does not know at the end.
+#[must_use]
+fn path_with_appended(path: Option<&OsStr>, dir: &Path) -> Option<OsString> {
+    let path = path.filter(|p| !p.is_empty())?;
+    if !dir.is_absolute() || std::env::split_paths(path).any(|entry| entry == dir) {
+        return None;
+    }
+    let mut entries: Vec<PathBuf> = std::env::split_paths(path).collect();
+    entries.push(dir.to_path_buf());
+    std::env::join_paths(entries).ok()
 }
 
 /// The `LANG` to add when the child's environment names no locale at all.
@@ -1488,6 +1522,62 @@ mod tests {
         let cmd = built.cmd;
         assert_eq!(argv(&cmd), ["/usr/bin/htop", "-d", "10"]);
         assert_eq!(cmd.get_cwd().map(PathBuf::from), Some(PathBuf::from("/tmp")));
+    }
+
+    #[test]
+    fn path_append_goes_last_and_only_once() {
+        let dir = Path::new("/Applications/Halyard.app/Contents/MacOS");
+        let appended = |p: &str| path_with_appended(Some(OsStr::new(p)), dir);
+        assert_eq!(
+            appended("/usr/bin:/bin"),
+            Some(OsString::from("/usr/bin:/bin:/Applications/Halyard.app/Contents/MacOS"))
+        );
+        // Already there, in any position: unchanged.
+        assert_eq!(appended("/Applications/Halyard.app/Contents/MacOS:/usr/bin"), None);
+        assert_eq!(appended("/usr/bin:/Applications/Halyard.app/Contents/MacOS"), None);
+        // An unset or empty PATH stays as it is: setting it would drop the default search path.
+        assert_eq!(path_with_appended(None, dir), None);
+        assert_eq!(appended(""), None);
+        // A relative directory, or one PATH cannot express, is never added.
+        assert_eq!(path_with_appended(Some(OsStr::new("/usr/bin")), Path::new("bin")), None);
+        assert_eq!(path_with_appended(Some(OsStr::new("/usr/bin")), Path::new("/a:b")), None);
+    }
+
+    #[test]
+    fn a_local_program_gets_path_append_at_the_end() {
+        let dir = PathBuf::from("/opt/halyard-test-helpers/bin");
+        let config = SessionConfig {
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            path_append: Some(dir.clone()),
+            ..SessionConfig::default()
+        };
+        let cmd = build_command_for(&config, "id", Placement::Local).unwrap().cmd;
+        assert_eq!(
+            cmd.get_env("PATH").and_then(|v| v.to_str()),
+            Some("/usr/bin:/bin:/opt/halyard-test-helpers/bin")
+        );
+
+        // Control: without the field, PATH is exactly what the session set.
+        let config = SessionConfig {
+            env: vec![("PATH".into(), "/usr/bin:/bin".into())],
+            ..SessionConfig::default()
+        };
+        let cmd = build_command_for(&config, "id", Placement::Local).unwrap().cmd;
+        assert_eq!(cmd.get_env("PATH").and_then(|v| v.to_str()), Some("/usr/bin:/bin"));
+    }
+
+    #[test]
+    fn a_host_program_never_gets_path_append() {
+        // The directory is inside the sandbox; the host's PATH must not name it, and the
+        // sandbox's own PATH must not reach the host either.
+        let config = SessionConfig {
+            path_append: Some(PathBuf::from("/app/bin")),
+            ..SessionConfig::default()
+        };
+        let built = build_command_for(&config, "id", Placement::FlatpakHost).unwrap();
+        let entries = env_entries(&built);
+        assert!(!entries.iter().any(|e| e.starts_with("PATH=")), "{entries:?}");
+        assert!(!argv(&built.cmd).iter().any(|a| a.contains("/app/bin")), "{:?}", argv(&built.cmd));
     }
 
     #[test]

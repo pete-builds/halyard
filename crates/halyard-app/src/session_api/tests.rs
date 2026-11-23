@@ -463,6 +463,138 @@ fn panes_never_inherit_another_instances_socket_or_token() {
     assert_eq!(remove.len(), 2);
 }
 
+/// A fake install: `<tmp>/Halyard.app/Contents/MacOS/{halyard, halyard-msg}`, both owned by
+/// this user, the directory 0755 and the client 0755.
+fn fake_install() -> (tempfile::TempDir, PathBuf, PathBuf, u32) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("Halyard.app/Contents/MacOS");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let client = dir.join(HOOK_CLIENT);
+    std::fs::write(&client, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let me = std::fs::metadata(&dir).unwrap().uid();
+    (tmp, dir.join("halyard"), dir, me)
+}
+
+fn chmod(file: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn panes_find_halyard_msg_only_when_it_ships_next_to_halyard() {
+    let (_tmp, exe, dir, me) = fake_install();
+    let client = dir.join(HOOK_CLIENT);
+    let path = Some(std::ffi::OsStr::new("/usr/bin:/bin"));
+    assert_eq!(hook_client_dir_for(&exe, path, me), HookDir::Append(dir.clone()));
+
+    chmod(&client, 0o644);
+    assert_eq!(hook_client_dir_for(&exe, path, me), HookDir::Absent, "not executable");
+
+    // A directory with the client's name is not the client.
+    std::fs::remove_file(&client).unwrap();
+    std::fs::create_dir(&client).unwrap();
+    assert_eq!(hook_client_dir_for(&exe, path, me), HookDir::Absent);
+    std::fs::remove_dir(&client).unwrap();
+    assert_eq!(hook_client_dir_for(&exe, path, me), HookDir::Absent, "missing");
+
+    // A relative binary path never puts a relative directory on PATH.
+    assert_eq!(hook_client_dir_for(Path::new("halyard"), path, me), HookDir::Absent);
+}
+
+#[test]
+fn a_folder_others_can_change_is_not_put_on_path() {
+    let (_tmp, exe, dir, me) = fake_install();
+    let client = dir.join(HOOK_CLIENT);
+    let path = Some(std::ffi::OsStr::new("/usr/bin:/bin"));
+    let untrusted =
+        |what: &Path, why: &str| HookDir::Untrusted(format!("{}: {why}", what.display()));
+
+    chmod(&dir, 0o775);
+    assert_eq!(hook_client_dir_for(&exe, path, me), untrusted(&dir, "writable by group or others"));
+    chmod(&dir, 0o757);
+    assert_eq!(hook_client_dir_for(&exe, path, me), untrusted(&dir, "writable by group or others"));
+    chmod(&dir, 0o755);
+
+    chmod(&client, 0o775);
+    assert_eq!(
+        hook_client_dir_for(&exe, path, me),
+        untrusted(&client, "writable by group or others")
+    );
+    chmod(&client, 0o757);
+    assert_eq!(
+        hook_client_dir_for(&exe, path, me),
+        untrusted(&client, "writable by group or others")
+    );
+    chmod(&client, 0o755);
+    assert_eq!(hook_client_dir_for(&exe, path, me), HookDir::Append(dir.clone()));
+
+    // Owned by someone else. A test cannot chown without root, so judge this user's files as
+    // another user would (when the tests run as root the files are root's, which is trusted).
+    if me != 0 {
+        assert_eq!(
+            hook_client_dir_for(&exe, path, me + 1),
+            untrusted(&dir, "owned by another user")
+        );
+    }
+    assert_eq!(untrusted_reason(0o755, 1000, 1001), Some("owned by another user"));
+    assert_eq!(untrusted_reason(0o755, 0, 1001), None, "root's files are trusted");
+    assert_eq!(untrusted_reason(0o755, 1001, 1001), None);
+    assert_eq!(untrusted_reason(0o1777, 0, 1001), Some("writable by group or others"));
+}
+
+#[test]
+fn nothing_is_added_when_path_already_finds_halyard_msg() {
+    let (tmp, exe, dir, me) = fake_install();
+    // A profile directory that already holds a halyard-msg, as Nix's does.
+    let profile = tmp.path().join("profile/bin");
+    std::fs::create_dir_all(&profile).unwrap();
+    let theirs = profile.join(HOOK_CLIENT);
+    std::fs::write(&theirs, "#!/bin/sh\n").unwrap();
+    chmod(&theirs, 0o755);
+    let path = std::env::join_paths([Path::new("/usr/bin"), &profile]).unwrap();
+    assert_eq!(hook_client_dir_for(&exe, Some(&path), me), HookDir::AlreadyOnPath);
+
+    // Control: a halyard-msg there that cannot run does not count.
+    chmod(&theirs, 0o644);
+    assert_eq!(hook_client_dir_for(&exe, Some(&path), me), HookDir::Append(dir.clone()));
+    // Nor does a relative entry, which depends on the shell's directory. This one really
+    // reaches `theirs` from this process's directory (up to `/`, then down to `profile`),
+    // so only the relative-entry rule can reject it. The current directory is read, never
+    // changed: it is shared by every test thread.
+    chmod(&theirs, 0o755);
+    let cwd = std::env::current_dir().unwrap();
+    let up: PathBuf = cwd.components().skip(1).map(|_| "..").collect();
+    let relative_profile = up.join(profile.strip_prefix("/").unwrap());
+    assert!(relative_profile.is_relative(), "{relative_profile:?}");
+    assert!(
+        is_executable_file(&relative_profile.join(HOOK_CLIENT)),
+        "the control must reach an executable halyard-msg: {relative_profile:?}"
+    );
+    let relative = std::env::join_paths([Path::new("/usr/bin"), &relative_profile]).unwrap();
+    assert_eq!(hook_client_dir_for(&exe, Some(&relative), me), HookDir::Append(dir));
+}
+
+#[test]
+fn every_pane_gets_the_hook_client_dir_and_the_api_variables() {
+    // The view builds each pane's SessionConfig over this base.
+    let hook_dir = PathBuf::from("/Applications/Halyard.app/Contents/MacOS");
+    let config = pane_session_config(None, Some(hook_dir.clone()));
+    assert_eq!(config.path_append, Some(hook_dir.clone()));
+    assert_eq!(config.env_remove, ["HALYARD_SOCKET", "HALYARD_SESSION_TOKEN"]);
+    assert!(config.env.is_empty());
+
+    let creds = pane_credentials(Path::new("/run/h/1.sock"), "p1").expect("creds");
+    let config = pane_session_config(Some(&creds), Some(hook_dir.clone()));
+    assert_eq!(config.path_append, Some(hook_dir));
+    let names: Vec<&str> = config.env.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["HALYARD_SOCKET", "HALYARD_SESSION_ID", "HALYARD_SESSION_TOKEN"]);
+
+    assert_eq!(pane_session_config(None, None).path_append, None);
+}
+
 fn request_for(text: &str) -> SendTextRequest {
     SendTextRequest {
         grant_id: "g".into(),

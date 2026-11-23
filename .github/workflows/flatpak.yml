@@ -97,3 +97,29 @@ jobs:
             echo "smoke-test.sh passed on a missing binary, so it proves nothing" >&2
             exit 1
           fi
+      - name: halyard-msg is in the bundle and runs from the host
+        run: |
+          dbus-run-session -- flatpak run --user --command=halyard-msg \
+            io.github.pete_builds.Halyard --version
+      # Panes run on the host, where /app/bin is not on PATH, so docs/flatpak.md tells hooks
+      # to reach halyard-msg through `flatpak run --command=halyard-msg`. The session API is
+      # off in the Flatpak, so it reports by writing OSC 7717 to the controlling terminal.
+      # This runs that exact path under a pseudo-terminal from script(1) and reads what
+      # reached the terminal.
+      - name: Host hook path, the report reaches the terminal
+        run: |
+          hook='flatpak run --user --command=halyard-msg io.github.pete_builds.Halyard state waiting --agent ci'
+          HALYARD_SESSION_ID=flatpak-ci dbus-run-session -- script -qec "$hook" "$RUNNER_TEMP/tty.log"
+          od -c "$RUNNER_TEMP/tty.log" | head -n 20
+          grep -aq '7717;state=waiting;agent=ci;session=flatpak-ci' "$RUNNER_TEMP/tty.log" \
+            || { echo "no OSC 7717 report reached the terminal" >&2; exit 1; }
+          echo "ok: the report reached the terminal"
+      - name: Control, outside Halyard the hook writes nothing
+        run: |
+          hook='flatpak run --user --command=halyard-msg io.github.pete_builds.Halyard state waiting --agent ci'
+          env -u HALYARD_SESSION_ID dbus-run-session -- script -qec "$hook" "$RUNNER_TEMP/tty-control.log"
+          if grep -aq '7717;' "$RUNNER_TEMP/tty-control.log"; then
+            echo "halyard-msg reported with no HALYARD_SESSION_ID, so the check above proves nothing" >&2
+            exit 1
+          fi
+          echo "control ok: nothing written outside Halyard"
