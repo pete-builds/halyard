@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Security
+- **Revoke any API key you put in `api_key_env` outside an `[[ai.providers]]` entry.** In
+  0.1.0 and 0.1.1, a key pasted as `[ai] api_key_env = "sk-..."`, or into any table nested
+  under `[ai]` or a provider, was kept in `config.toml` with only an "unknown key" warning,
+  and the Home Manager module wrote it into the Nix store, which every user on the machine can
+  read. Both now refuse it, and neither prints the value (#47). Tokens pasted into
+  `api_key_env` on a provider are refused too.
+
 ## 0.1.1 (2026-11-22): first published preview
 
 The `v0.1.0` tag exists but produced no release: its release run built every package and
