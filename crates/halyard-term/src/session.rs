@@ -584,7 +584,11 @@ impl Session {
         spawn_thread("halyard-child-wait", move || {
             let code = match child.wait() {
                 Ok(status) if status.signal().is_none() => i32::try_from(status.exit_code()).ok(),
-                Ok(_) => None,
+                Ok(status) => {
+                    // TEMPORARY (revert before merge): name the signal.
+                    eprintln!("halyard-term: TMP child {pid:?} ended by signal: {status:?}");
+                    None
+                }
                 Err(e) => {
                     eprintln!("halyard-term: waiting for the child failed: {e}");
                     None

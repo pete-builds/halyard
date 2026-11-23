@@ -461,6 +461,32 @@ mod tests {
                 failures.push(i);
             }
         }
+        if !failures.is_empty() {
+            // Crash reports name the crashed program: a copy of this test
+            // binary means a child crashed between fork and exec.
+            std::thread::sleep(Duration::from_secs(10));
+            let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+            for d in [
+                home.join("Library/Logs/DiagnosticReports"),
+                "/Library/Logs/DiagnosticReports".into(),
+            ] {
+                let Ok(entries) = std::fs::read_dir(&d) else {
+                    eprintln!("no {}", d.display());
+                    continue;
+                };
+                for e in entries.flatten() {
+                    let fresh = e
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .is_ok_and(|t| t.elapsed().is_ok_and(|a| a < Duration::from_secs(900)));
+                    if fresh {
+                        let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+                        let head: String = text.chars().take(3000).collect();
+                        eprintln!("==== crash report {} ====\n{head}", e.path().display());
+                    }
+                }
+            }
+        }
         assert!(failures.is_empty(), "{} of {runs} runs failed: {failures:?}", failures.len());
     }
 
