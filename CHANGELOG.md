@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Security
+- **Revoke any API key you put in `api_key_env` outside the top level of an `[[ai.providers]]` entry.** In
+  0.1.0 and 0.1.1, a key pasted as `[ai] api_key_env = "sk-..."`, or into any table nested
+  under `[ai]` or a provider, was kept in `config.toml` with only an "unknown key" warning,
+  and the Home Manager module wrote it into the Nix store, which every user on the machine can
+  read. Both now refuse it, and neither prints the value (#47). On a provider entry, a value
+  that looks like a credential (a known token prefix, or a long random or hex string) is now
+  refused too. That check is a heuristic, and Halyard applies it when it reads the file, not
+  the Home Manager module.
+
 ## 0.1.1 (2026-11-22): first published preview
 
 The `v0.1.0` tag exists but produced no release: its release run built every package and
