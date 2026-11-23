@@ -1500,4 +1500,24 @@ mod tests {
         assert_eq!(f.cell(0, 0).unwrap().fg, Rgb::new(9, 9, 9));
         assert_eq!(f.background, Rgb::new(1, 1, 1));
     }
+
+    #[test]
+    fn palette_change_after_a_frame_recolors_the_next_frame() {
+        // A frame was already built (the render state is clean) and no output
+        // follows the palette change: the next frame must still show it.
+        let mut e = engine();
+        e.write(b"$ ");
+        let first = e.frame().unwrap();
+        let p = Palette {
+            background: Rgb::new(1, 1, 1),
+            foreground: Rgb::new(2, 2, 2),
+            ..Palette::default()
+        };
+        assert_ne!(first.background, p.background);
+        e.set_palette(&p).unwrap();
+        let f = e.frame().unwrap();
+        assert_eq!(f.background, p.background);
+        assert_eq!(f.cell(0, 0).unwrap().fg, p.foreground, "written text");
+        assert_eq!(f.cell(19, 4).unwrap().bg, p.background, "a blank cell");
+    }
 }

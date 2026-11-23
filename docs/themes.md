@@ -125,6 +125,11 @@ per channel, rounded and clamped:
 | `success` | ANSI 2 (green) |
 | `attention` | ANSI 5 (magenta) |
 
+Every bundled theme keeps `surface` equal to `background`, so the chrome and the terminal
+body are one color (`chrome_surface_is_the_terminal_background_in_every_bundled_theme`;
+`the_default_theme_for_each_appearance_matches_that_appearance` checks that the default for
+each appearance is a theme of that appearance).
+
 ## Handing a theme to the engine
 
 `Theme::palette()` returns a `TerminalPalette`: foreground, background, cursor, cursor text,
