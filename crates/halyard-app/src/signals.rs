@@ -109,6 +109,151 @@ mod tests {
         }
     }
 
+    /// Every foreground read a test made, oldest first, printed when it fails
+    /// so a flaky failure explains itself. Repeats are counted, not listed.
+    struct Trace {
+        start: Instant,
+        lines: Mutex<Vec<(u128, String, usize)>>,
+    }
+
+    impl Trace {
+        fn new() -> Self {
+            Self { start: Instant::now(), lines: Mutex::new(Vec::new()) }
+        }
+
+        fn note(&self, what: String) {
+            let mut lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+            match lines.last_mut() {
+                Some((_, last, n)) if *last == what => *n += 1,
+                _ => lines.push((self.start.elapsed().as_millis(), what, 1)),
+            }
+        }
+    }
+
+    impl std::fmt::Display for Trace {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            writeln!(f, "foreground reads, oldest first:")?;
+            for (ms, what, n) in self.lines.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+                let repeat = if *n > 1 { format!("  (x{n})") } else { String::new() };
+                writeln!(f, "  {ms:>6} ms  {what}{repeat}")?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Watches a child process for its exit and reads how it ended (exit code
+    /// or signal) without reaping it: the session's waiter thread reaps it and
+    /// reports only `None` for a signal.
+    #[cfg(target_os = "macos")]
+    struct ExitWatch {
+        kq: Option<std::os::fd::OwnedFd>,
+        error: Option<String>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl ExitWatch {
+        fn new(pid: u32) -> Self {
+            use std::os::fd::FromRawFd;
+            // SAFETY: kqueue takes no arguments and returns a new fd or -1.
+            let fd = unsafe { libc::kqueue() };
+            if fd < 0 {
+                return Self { kq: None, error: Some(std::io::Error::last_os_error().to_string()) };
+            }
+            // SAFETY: `fd` was just created and nothing else owns it.
+            let kq = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+            // SAFETY: kevent is plain data; zeroed is a valid value.
+            let mut ev: libc::kevent = unsafe { std::mem::zeroed() };
+            ev.ident = pid as usize;
+            ev.filter = libc::EVFILT_PROC;
+            ev.flags = libc::EV_ADD;
+            ev.fflags = libc::NOTE_EXIT | libc::NOTE_EXITSTATUS;
+            // SAFETY: one valid change, no events out, no timeout pointer needed.
+            let rc = unsafe {
+                libc::kevent(
+                    std::os::fd::AsRawFd::as_raw_fd(&kq),
+                    &raw const ev,
+                    1,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            if rc < 0 {
+                let e = std::io::Error::last_os_error();
+                return Self { kq: None, error: Some(format!("not watched: {e}")) };
+            }
+            Self { kq: Some(kq), error: None }
+        }
+
+        /// Why the exit cannot be watched, if it cannot.
+        fn error(&self) -> Option<String> {
+            self.error.clone()
+        }
+
+        /// How the process ended, or `None` while it runs.
+        fn ended(&self) -> Option<String> {
+            let kq = self.kq.as_ref()?;
+            // SAFETY: kevent is plain data; zeroed is a valid value.
+            let mut out: libc::kevent = unsafe { std::mem::zeroed() };
+            let zero = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            // SAFETY: room for one event out, a valid timeout, no changes.
+            let n = unsafe {
+                libc::kevent(
+                    std::os::fd::AsRawFd::as_raw_fd(kq),
+                    std::ptr::null(),
+                    0,
+                    &raw mut out,
+                    1,
+                    &raw const zero,
+                )
+            };
+            if n != 1 {
+                return None;
+            }
+            let status = i32::try_from(out.data).unwrap_or(-1);
+            Some(if libc::WIFSIGNALED(status) {
+                format!("shell killed by signal {}", libc::WTERMSIG(status))
+            } else {
+                format!("shell exited with code {}", libc::WEXITSTATUS(status))
+            })
+        }
+    }
+
+    /// Exits are only watched on macOS, where this test has failed.
+    #[cfg(not(target_os = "macos"))]
+    struct ExitWatch;
+
+    #[cfg(not(target_os = "macos"))]
+    impl ExitWatch {
+        fn new(_pid: u32) -> Self {
+            Self
+        }
+
+        fn error(&self) -> Option<String> {
+            Some("exits are watched only on macOS".into())
+        }
+
+        fn ended(&self) -> Option<String> {
+            None
+        }
+    }
+
+    /// One poll as text: the shell's process groups, whether the shell is
+    /// alive, what `poll_foreground` returned and what the job leader reads as.
+    fn describe_poll(pid: u32, fg: Option<&Foreground>) -> String {
+        let groups = crate::procinfo::groups(pid);
+        // SAFETY: kill with signal 0 only checks that the process exists.
+        let alive = unsafe { libc::kill(libc::pid_t::try_from(pid).unwrap_or(0), 0) } == 0;
+        let leader = match fg {
+            Some(Foreground::Command { pgid, .. }) => match process_info(*pgid) {
+                Ok(info) => format!("leader exe {:?} argv {:?}", info.exe, info.argv),
+                Err(e) => format!("leader unreadable: {e}"),
+            },
+            _ => String::new(),
+        };
+        format!("groups {groups:?} alive {alive} poll {fg:?} {leader}")
+    }
+
     fn spawn(program: PathBuf, args: Vec<String>, monitor: &SharedMonitor, id: &str) -> Session {
         Session::spawn(SessionConfig {
             program: Some(program),
@@ -215,20 +360,68 @@ mod tests {
         std::fs::copy(&helper, &claude).unwrap();
         let monitor = new_monitor("fake");
         let sh = PathBuf::from("/bin/sh");
+        let raw = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let tap_raw = Arc::clone(&raw);
         // Interactive, so the shell gives the job its own process group.
-        let session = spawn(sh, vec!["-i".into()], &monitor, "fake");
+        let session = Session::spawn(SessionConfig {
+            program: Some(sh),
+            args: vec!["-i".into()],
+            session_id: Some("fake".into()),
+            observer: Some(Box::new(SignalObserver::new(Arc::clone(&monitor)))),
+            output_tap: Some(Box::new(move |b| {
+                tap_raw.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(b);
+            })),
+            cols: 80,
+            rows: 24,
+            ..SessionConfig::default()
+        })
+        .expect("spawn");
         let pid = session.pid().expect("pid");
+        let exit_watch = ExitWatch::new(pid);
+        let trace = Trace::new();
+        trace.note(format!("shell pid {pid}"));
+        if let Some(e) = exit_watch.error() {
+            trace.note(e);
+        }
         session.write(format!(
             "HALYARD_FAKE_AGENT=1 '{}' --exact signals::tests::fake_agent_main --nocapture\n",
             claude.display()
         ));
-        wait_for("claude in the foreground", || {
+        // Every read goes into the trace, and a failure prints it with the
+        // shell's output, so a flaky failure explains itself.
+        let fail = |why: &str| -> ! {
+            let out = raw.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            panic!(
+                "{why}\n{trace}screen:\n{}\nraw output: {:?}",
+                session.latest_frame().text(),
+                String::from_utf8_lossy(&out)
+            );
+        };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
             let fg = poll_foreground(pid, &[]);
+            trace.note(describe_poll(pid, fg.as_ref()));
+            let mut shell_ended = exit_watch.ended();
+            while let Ok(ev) = session.events().try_recv() {
+                if let halyard_term::SessionEvent::Exited(code) = ev {
+                    shell_ended = Some(format!("session event: shell exited, code {code:?}"));
+                }
+            }
+            if let Some(how) = shell_ended {
+                trace.note(how);
+                fail("the shell ended before claude reached the foreground");
+            }
             if let Some(fg) = &fg {
                 lock(&monitor).on_foreground(fg, SystemTime::now());
             }
-            lock(&monitor).agent_detected()
-        });
+            if lock(&monitor).agent_detected() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                fail("timed out waiting for claude in the foreground");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert_eq!(lock(&monitor).attention().state(), AttentionState::Working);
         session.write("go\n");
         wait_for("waiting", || {
