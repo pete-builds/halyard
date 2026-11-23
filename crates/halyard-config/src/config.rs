@@ -477,20 +477,26 @@ const AGENTS: Schema = &[("notify_on_waiting", Kind::Bool), ("detect", Kind::Str
 const SESSION_API: Schema = &[("enabled", Kind::Bool)];
 
 /// Substrings that make a key name look like it holds a secret (matched case-insensitively).
-/// Applies to every key under `[ai]`, except the documented names such as `api_key_env`.
+/// Applies to every key in the file. A documented name (such as `api_key_env`) is exempt only
+/// in the one table whose schema defines it, never by name elsewhere.
 const SECRET_FRAGMENTS: &[&str] = &["key", "token", "secret", "password", "passwd", "auth"];
 
 fn in_schema(schema: Schema, key: &str) -> bool {
     schema.iter().any(|(n, _)| *n == key)
 }
 
-/// Whether an undocumented `[ai]` key looks like it holds a secret.
-fn is_secret_key(key: &str) -> bool {
-    if in_schema(AI, key) || in_schema(PROVIDER, key) {
-        return false;
-    }
+/// Whether a key name looks like it holds a secret. Callers decide exemptions per table.
+fn looks_secret(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     SECRET_FRAGMENTS.iter().any(|f| lower.contains(f))
+}
+
+/// Where a documented `[ai]` name belongs, for the hint when it shows up in the wrong table.
+/// Returns only strings from this file, never text from the config.
+fn ai_home(key: &str) -> Option<(&'static str, &'static str)> {
+    [(PROVIDER, "an `[[ai.providers]]` entry"), (AI, "`[ai]`")]
+        .into_iter()
+        .find_map(|(s, home)| s.iter().find(|(n, _)| *n == key).map(|(n, _)| (*n, home)))
 }
 
 type Spanned<T> = toml::Spanned<T>;
@@ -606,81 +612,162 @@ fn provider_tables<'a, 'i>(ai: &'a DeTable<'i>) -> impl Iterator<Item = &'a DeTa
         .filter_map(|v| v.get_ref().as_table())
 }
 
-fn secret_error(section: &str, line: Option<usize>) -> ConfigError {
-    ConfigError::at(
-        section,
-        line,
-        "a key here is named like a secret (key, token, secret, password or auth; the name is \
-         not shown). Halyard never stores API keys in the config file. Export the key in an \
-         environment variable (or keep it in your keychain or secret manager and export it \
-         from there) and set `api_key_env = \"NAME_OF_VARIABLE\"` instead",
-    )
+fn secret_error(
+    section: &str,
+    line: Option<usize>,
+    documented: Option<&'static str>,
+) -> ConfigError {
+    const ADVICE: &str = "Halyard never stores API keys in the config file. Export the key in an \
+         environment variable (or keep it in your keychain or secret manager and export it from \
+         there) and set `api_key_env = \"NAME_OF_VARIABLE\"` on an `[[ai.providers]]` entry \
+         instead";
+    // A documented name in the wrong table: naming it is safe, it is this file's own string.
+    let message = match documented.and_then(ai_home) {
+        Some((name, home)) => format!(
+            "`{name}` is only valid on {home}; here it is treated as a pasted secret (the value \
+             is not shown). {ADVICE}. If you pasted a real key, revoke it"
+        ),
+        None => format!(
+            "a key here is named like a secret (key, token, secret, password or auth; the name \
+             is not shown). {ADVICE}"
+        ),
+    };
+    ConfigError::at(section, line, message)
 }
 
-/// Find a secret-looking key name anywhere under `table`, however deeply nested.
-fn find_secret_name(src: &str, table: &DeTable<'_>) -> Option<usize> {
+/// A secret-looking key name found under `[ai]`: its line, and the documented name it matches
+/// (for example `api_key_env` placed outside a provider), if any.
+type AiHit = (usize, Option<&'static str>);
+
+/// Find a secret-looking key name anywhere under `table`, however deeply nested, through
+/// tables and arrays at any depth. `schema` is the schema of `table` itself (`None` for an
+/// undocumented table): a documented name is exempt only in the table that defines it.
+fn find_secret_name(src: &str, table: &DeTable<'_>, schema: Option<Schema>) -> Option<AiHit> {
     for (k, v) in table {
-        if is_secret_key(k.get_ref().as_ref()) {
-            return Some(line_of_offset(src, k.span().start));
+        let name = k.get_ref().as_ref();
+        let exempt = schema.is_some_and(|s| in_schema(s, name));
+        if !exempt && looks_secret(name) {
+            return Some((line_of_offset(src, k.span().start), ai_home(name).map(|(n, _)| n)));
         }
-        let nested = match v.get_ref() {
-            DeValue::Table(t) => find_secret_name(src, t),
-            DeValue::Array(a) => a
-                .iter()
-                .filter_map(|x| x.get_ref().as_table())
-                .find_map(|t| find_secret_name(src, t)),
-            _ => None,
-        };
-        if nested.is_some() {
-            return nested;
+        if let Some(hit) = find_secret_in_value(src, v.get_ref()) {
+            return Some(hit);
         }
     }
     None
 }
 
-/// A secret-looking key NAME outside `[ai]`: top level, any section, any depth. Documented
-/// names (such as the `keybindings` section) are exempt, and the chords inside `[keybindings]`
-/// are not checked at all. Returns the dotted path and line. Only the name is ever shown.
+/// [`find_secret_name`] for every table reachable from `v` (none of them documented).
+fn find_secret_in_value(src: &str, v: &DeValue<'_>) -> Option<AiHit> {
+    match v {
+        DeValue::Table(t) => find_secret_name(src, t, None),
+        DeValue::Array(a) => a.iter().find_map(|x| find_secret_in_value(src, x.get_ref())),
+        _ => None,
+    }
+}
+
+/// A secret-looking key name under `[ai]`, with the nearest documented section to report.
+/// `[ai]` itself is checked against the `[ai]` schema, each `[[ai.providers]]` table against
+/// the provider schema, and every other table under `[ai]` against no schema at all.
+fn find_secret_in_ai(src: &str, ai: &DeTable<'_>) -> Option<(String, AiHit)> {
+    for (i, p) in provider_tables(ai).enumerate() {
+        if let Some(hit) = find_secret_name(src, p, Some(PROVIDER)) {
+            return Some((format!("ai.providers[{i}]"), hit));
+        }
+    }
+    for (k, v) in ai {
+        let name = k.get_ref().as_ref();
+        let hit = if name == "providers" {
+            // The provider tables were checked above. Anything else in there is not one.
+            match v.get_ref() {
+                DeValue::Array(a) => a
+                    .iter()
+                    .filter(|x| x.get_ref().as_table().is_none())
+                    .find_map(|x| find_secret_in_value(src, x.get_ref())),
+                other => find_secret_in_value(src, other),
+            }
+        } else if !in_schema(AI, name) && looks_secret(name) {
+            Some((line_of_offset(src, k.span().start), ai_home(name).map(|(n, _)| n)))
+        } else {
+            find_secret_in_value(src, v.get_ref())
+        };
+        if let Some(hit) = hit {
+            return Some(("ai".to_string(), hit));
+        }
+    }
+    None
+}
+
+/// The documented tables outside `[ai]`, by dotted path, with their schemas.
+const SECTIONS: [(&str, Schema); 7] = [
+    ("font", FONT),
+    ("window", WINDOW),
+    ("terminal", TERMINAL),
+    ("terminal.shell", SHELL),
+    ("theme", THEME),
+    ("agents", AGENTS),
+    ("session_api", SESSION_API),
+];
+
+/// A secret-looking key NAME outside `[ai]`: top level, any section, any depth, through
+/// tables and arrays. `here` is the documented table being walked (`Some("")` for the top
+/// level, `None` for an undocumented one); a documented name is exempt only in its own table.
+/// The chords inside `[keybindings]` are not checked at all. Returns the dotted path and line.
+/// Only the name is ever shown.
 fn find_secret_outside_ai(
     src: &str,
     table: &DeTable<'_>,
     prefix: &str,
-    top: bool,
+    here: Option<&'static str>,
 ) -> Option<(String, usize)> {
-    const SECTION_SCHEMAS: [Schema; 7] =
-        [FONT, WINDOW, TERMINAL, SHELL, THEME, AGENTS, SESSION_API];
     for (k, v) in table {
         let name = k.get_ref().as_ref();
         let path = if prefix.is_empty() { name.to_string() } else { format!("{prefix}.{name}") };
-        if top && matches!(name, "ai" | "keybindings") {
+        if here == Some("") && matches!(name, "ai" | "keybindings") {
             continue;
         }
-        let known =
-            (top && TOP_KEYS.contains(&name)) || SECTION_SCHEMAS.iter().any(|s| in_schema(s, name));
-        let lower = name.to_ascii_lowercase();
-        if !known && SECRET_FRAGMENTS.iter().any(|f| lower.contains(f)) {
+        let documented = match here {
+            Some("") => TOP_KEYS.contains(&name),
+            Some(h) => SECTIONS.iter().any(|(p, s)| *p == h && in_schema(s, name)),
+            None => false,
+        };
+        if !documented && looks_secret(name) {
             return Some((path, line_of_offset(src, k.span().start)));
         }
-        let nested = match v.get_ref() {
-            DeValue::Table(t) => find_secret_outside_ai(src, t, &path, false),
-            DeValue::Array(a) => a
-                .iter()
-                .filter_map(|x| x.get_ref().as_table())
-                .find_map(|t| find_secret_outside_ai(src, t, &path, false)),
-            _ => None,
-        };
-        if nested.is_some() {
-            return nested;
+        // A documented child table keeps its schema; everything else is undocumented.
+        let child = here.filter(|_| documented).and_then(|h| {
+            let want = if h.is_empty() { name.to_string() } else { format!("{h}.{name}") };
+            SECTIONS.iter().find(|(p, _)| *p == want).map(|(p, _)| *p)
+        });
+        if let Some(hit) = find_outside_in_value(src, v.get_ref(), &path, child) {
+            return Some(hit);
         }
     }
     None
 }
 
+/// [`find_secret_outside_ai`] for every table reachable from `v`. Only a table that is the
+/// value itself keeps the schema `here`; tables inside arrays are undocumented.
+fn find_outside_in_value(
+    src: &str,
+    v: &DeValue<'_>,
+    path: &str,
+    here: Option<&'static str>,
+) -> Option<(String, usize)> {
+    match v {
+        DeValue::Table(t) => find_secret_outside_ai(src, t, path, here),
+        DeValue::Array(a) => {
+            a.iter().find_map(|x| find_outside_in_value(src, x.get_ref(), path, None))
+        }
+        _ => None,
+    }
+}
+
 /// Reject any secret-looking key name anywhere in the file. Decided from the parsed tree, so
 /// quoting, dotted keys and multi-line strings cannot hide one. Under `[ai]` the name is never
-/// reported; elsewhere the key path (a name) is, and the value never is.
+/// reported (only a documented name such as `api_key_env` in the wrong table is named);
+/// elsewhere the key path (a name) is, and the value never is.
 fn reject_secrets(src: &str, root: &DeTable<'_>) -> Result<(), ConfigError> {
-    if let Some((path, line)) = find_secret_outside_ai(src, root, "", true) {
+    if let Some((path, line)) = find_secret_outside_ai(src, root, "", Some("")) {
         return Err(ConfigError::at(
             &path,
             Some(line),
@@ -691,14 +778,8 @@ fn reject_secrets(src: &str, root: &DeTable<'_>) -> Result<(), ConfigError> {
         ));
     }
     let Some(ai) = sub_table(root, "ai") else { return Ok(()) };
-    if let Some(line) = find_secret_name(src, ai) {
-        // Say where: the nearest documented section, never the name.
-        let providers: Vec<&DeTable<'_>> = provider_tables(ai).collect();
-        let section = providers
-            .iter()
-            .position(|p| find_secret_name(src, p).is_some())
-            .map_or_else(|| "ai".to_string(), |i| format!("ai.providers[{i}]"));
-        return Err(secret_error(&section, Some(line)));
+    if let Some((section, (line, documented))) = find_secret_in_ai(src, ai) {
+        return Err(secret_error(&section, Some(line), documented));
     }
     Ok(())
 }
@@ -714,6 +795,53 @@ fn valid_env_name(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether a string that passes [`valid_env_name`] is still shaped like a credential, so it was
+/// almost certainly pasted into `api_key_env` by mistake:
+///
+/// * a well-known token prefix followed by at least 16 more characters (matched
+///   case-sensitively, so `GITHUB_PAT` and `hf_token` are fine names);
+/// * an `_`-free run of 32 or more characters mixing upper case, lower case and digits that
+///   changes between those classes on at least every other character (random base62 does;
+///   words in camelCase or `Snake_Case` do not, and `_` is never counted as a change);
+/// * 32 or more hex digits and nothing else (a digest). A name prefix such as
+///   `ANTHROPIC_KEY_` in front of hex makes it a name.
+fn looks_like_token(s: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "sk_live_",
+        "sk_test_",
+        "rk_live_",
+        "rk_test_",
+        "hf_",
+        "gsk_",
+        "r8_",
+    ];
+    if PREFIXES.iter().any(|p| s.strip_prefix(p).is_some_and(|body| body.len() >= 16)) {
+        return true;
+    }
+    let class = |c: char| match c {
+        'A'..='Z' => 0,
+        'a'..='z' => 1,
+        '0'..='9' => 2,
+        _ => 3,
+    };
+    let random_run = |run: &str| {
+        let chars: Vec<char> = run.chars().collect();
+        let has = |k| chars.iter().any(|&c| class(c) == k);
+        let switches = chars.windows(2).filter(|w| class(w[0]) != class(w[1])).count();
+        chars.len() >= 32 && has(0) && has(1) && has(2) && switches * 2 >= chars.len()
+    };
+    let hex = s.len() >= 32
+        && s.bytes().any(|b| b.is_ascii_digit())
+        && s.bytes().all(|b| b.is_ascii_hexdigit());
+    hex || s.split('_').any(random_run)
 }
 
 fn type_error(path: &str, line: Option<usize>, kind: Kind) -> ConfigError {
@@ -1039,15 +1167,25 @@ impl Config {
             }
             _ => {}
         }
-        if let Some(env) = &p.api_key_env
-            && !valid_env_name(env)
-        {
-            return Err(ConfigError::at(
-                &key("api_key_env"),
-                l("api_key_env"),
-                "must be the NAME of an environment variable (letters, digits, underscore), not a key; \
-                     if you pasted a key here, revoke it",
-            ));
+        if let Some(env) = &p.api_key_env {
+            if !valid_env_name(env) {
+                return Err(ConfigError::at(
+                    &key("api_key_env"),
+                    l("api_key_env"),
+                    "must be the NAME of an environment variable (letters, digits, underscore, \
+                     not starting with a digit), not a key; the value is not shown. If you \
+                     pasted a key here, revoke it",
+                ));
+            }
+            if looks_like_token(env) {
+                return Err(ConfigError::at(
+                    &key("api_key_env"),
+                    l("api_key_env"),
+                    "looks like a credential, not an environment variable name; the value is not \
+                     shown. Put the key in an environment variable and give its NAME here. If you \
+                     pasted a key here, revoke it",
+                ));
+            }
         }
         Ok(())
     }
