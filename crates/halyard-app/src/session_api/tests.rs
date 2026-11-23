@@ -560,9 +560,20 @@ fn nothing_is_added_when_path_already_finds_halyard_msg() {
     // Control: a halyard-msg there that cannot run does not count.
     chmod(&theirs, 0o644);
     assert_eq!(hook_client_dir_for(&exe, Some(&path), me), HookDir::Append(dir.clone()));
-    // Nor does a relative entry, which depends on the shell's directory.
+    // Nor does a relative entry, which depends on the shell's directory. This one really
+    // reaches `theirs` from this process's directory (up to `/`, then down to `profile`),
+    // so only the relative-entry rule can reject it. The current directory is read, never
+    // changed: it is shared by every test thread.
     chmod(&theirs, 0o755);
-    let relative = std::env::join_paths([Path::new("/usr/bin"), Path::new("")]).unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let up: PathBuf = cwd.components().skip(1).map(|_| "..").collect();
+    let relative_profile = up.join(profile.strip_prefix("/").unwrap());
+    assert!(relative_profile.is_relative(), "{relative_profile:?}");
+    assert!(
+        is_executable_file(&relative_profile.join(HOOK_CLIENT)),
+        "the control must reach an executable halyard-msg: {relative_profile:?}"
+    );
+    let relative = std::env::join_paths([Path::new("/usr/bin"), &relative_profile]).unwrap();
     assert_eq!(hook_client_dir_for(&exe, Some(&relative), me), HookDir::Append(dir));
 }
 
