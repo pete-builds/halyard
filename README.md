@@ -3,7 +3,7 @@
 A fast, open-source terminal for macOS and Linux, built to host coding agents without
 depending on any of them.
 
-> **Status: 0.1.1, first preview.** Usable on macOS and Linux; see [CHANGELOG.md](CHANGELOG.md)
+> **Status: 0.1.2, preview.** Usable on macOS and Linux; see [CHANGELOG.md](CHANGELOG.md)
 > for what is verified and what is not, and [ROADMAP.md](ROADMAP.md) for what comes next.
 
 ## What it does today

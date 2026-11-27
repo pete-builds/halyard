@@ -40,6 +40,14 @@
     <control>pointing</control>
   </supports>
   <releases>
+    <release version="0.1.2" date="2026-11-27" type="stable">
+      <description>
+        <p>Rename tabs in place and right-click menus for tabs and panes. Fixes: the
+        halyard-msg hook client now ships, the session API starts on a fresh account, an
+        exited pane no longer uses a full CPU core, and API keys pasted into the wrong
+        config field are refused.</p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-11-22" type="stable">
       <description>
         <p>First published preview. Same features as 0.1.0, whose tag produced no release
