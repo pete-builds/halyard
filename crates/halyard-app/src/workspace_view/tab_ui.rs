@@ -139,25 +139,37 @@ impl WorkspaceView {
 
     /// Close the name field. Every way it closes comes through here.
     ///
-    /// `keyboard_done` is Enter or Escape, after which the caller gives the
-    /// keyboard to the pane. Any other end while the field holds the keyboard
-    /// (its tab closing, a click elsewhere, another field or menu opening)
-    /// parks the keyboard on the window root, where typing goes nowhere,
-    /// until the user picks a pane, a tab or an action (`unpark`): the rest
-    /// of a name must never run in a shell.
-    fn drop_rename(&mut self, keyboard_done: bool, window: &mut Window) -> Option<RenameUi> {
+    /// `user_chose` is Enter, Escape or a click elsewhere, after which the
+    /// caller gives the keyboard to the pane (or the click takes it). Any
+    /// other end while the field holds the keyboard (its tab closing, another
+    /// field or menu opening) parks the keyboard on the window root, where
+    /// typing goes nowhere, until the user clicks anywhere or runs an action
+    /// (`unpark`): the rest of a name must never run in a shell.
+    fn drop_rename(&mut self, user_chose: bool, window: &mut Window) -> Option<RenameUi> {
         let r = self.rename.take()?;
-        if !keyboard_done && r.focus.is_focused(window) {
+        if !user_chose && r.focus.is_focused(window) {
             self.parked = true;
             window.focus(&self.focus);
         }
         Some(r)
     }
 
-    /// The user picked where the keyboard goes (a tab, a pane, an action):
-    /// a parked keyboard may follow the active pane again.
+    /// The user picked where the keyboard goes (an action, or any click
+    /// through `unpark_on_click`): a parked keyboard follows the active pane
+    /// again.
     pub(super) fn unpark(&mut self) {
         self.parked = false;
+    }
+
+    /// Any mouse-down in the window, before anything handles it (the root's
+    /// capture phase, so a control that stops propagation, such as a tab's
+    /// close button or the banner's, still counts): a parked keyboard goes
+    /// to the active pane, and the click may then move it elsewhere.
+    pub(super) fn unpark_on_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.parked {
+            self.unpark();
+            self.focus_active_pane(window, cx);
+        }
     }
 
     // ------------------------------------------------------------- rename
@@ -318,10 +330,12 @@ impl WorkspaceView {
                 window.prevent_default();
                 cx.stop_propagation();
             })
-            // A click anywhere else saves the name before it lands. Not left
-            // to the blur: GPUI reports none while the window is inactive.
+            // A click anywhere else saves the name before it lands and gives
+            // the keyboard to the active pane (the click may then move it).
+            // Not left to the blur: GPUI reports none while the window is
+            // inactive.
             .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                this.commit_rename(false, window, cx);
+                this.commit_rename(true, window, cx);
             }))
             .flex_1()
             .min_w(px(0.0))
@@ -627,10 +641,7 @@ impl WorkspaceView {
         cx.stop_propagation();
         match ev.button {
             MouseButton::Left => {
-                // A click elsewhere saves a name being typed; `after_change`
-                // below would otherwise leave the keyboard in the field.
-                self.commit_rename(false, window, cx);
-                self.unpark();
+                // An open name field has already saved (its click-outside).
                 if self.model.select_tab(index) {
                     self.after_change(window, cx);
                     if ev.click_count >= 2 {
