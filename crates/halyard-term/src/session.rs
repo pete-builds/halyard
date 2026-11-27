@@ -566,6 +566,38 @@ fn pty_size(cols: u16, rows: u16, cell_width: u32, cell_height: u32) -> PtySize 
     }
 }
 
+/// Finishes libnotify's one-time setup on this thread before the fork that
+/// starts a session's program.
+///
+/// On macOS, `fork()` runs libSystem's child handlers, and libnotify's handler
+/// passes the same once gate (`os_alloc_once`) that guards libnotify's first
+/// use in the process. If another thread is inside that first use at the
+/// moment of the fork, the child inherits a gate held by a thread that does
+/// not exist there and aborts inside `fork()` ("os_once_t is corrupt",
+/// "crashed on child side of fork pre-exec"), before the program runs. `std`
+/// still reports the spawn as a success, because the child closed the pipe
+/// that would carry an exec error, so the pane's program just ends with no
+/// output. Any libnotify call passes the gate, waiting for another thread
+/// that is inside it; once passed, no later fork can find it half done.
+/// Seen on GitHub's macOS 15 runners, where the first panes of a fresh test
+/// process start while other threads are still setting up.
+#[cfg(target_os = "macos")]
+fn settle_fork_handlers() {
+    unsafe extern "C" {
+        /// libnotify (part of libSystem): looks a token up in its table.
+        fn notify_is_valid_token(val: libc::c_int) -> bool;
+    }
+    // SAFETY: a table lookup under libnotify's own lock; any value is valid
+    // input, and no token 0 is ever registered by Halyard.
+    unsafe {
+        notify_is_valid_token(0);
+    }
+}
+
+/// Only macOS runs fork handlers that need settling (see the macOS version).
+#[cfg(not(target_os = "macos"))]
+const fn settle_fork_handlers() {}
+
 fn spawn_thread(
     name: &str,
     f: impl FnOnce() + Send + 'static,
@@ -592,6 +624,7 @@ impl Session {
         let reader = dup_cloexec(master_fd).map_err(|e| spawn_err(&e))?;
         let (wake_read, wake_write) = wake_pipe().map_err(|e| spawn_err(&e))?;
         let Built { cmd, env_file } = build_command(&config, &id).map_err(|e| spawn_err(&e))?;
+        settle_fork_handlers();
         // On failure the env file (if any) is dropped and deleted here.
         let mut child = pair.slave.spawn_command(cmd).map_err(|e| spawn_err(&e))?;
         // The wrapper in the child deletes it now; see `flatpak::EnvFile`.
@@ -619,7 +652,11 @@ impl Session {
         spawn_thread("halyard-child-wait", move || {
             let code = match child.wait() {
                 Ok(status) if status.signal().is_none() => i32::try_from(status.exit_code()).ok(),
-                Ok(_) => None,
+                Ok(status) => {
+                    // TEMPORARY (revert before merge): name the signal.
+                    eprintln!("halyard-term: TMP child {pid:?} ended by signal: {status:?}");
+                    None
+                }
                 Err(e) => {
                     eprintln!("halyard-term: waiting for the child failed: {e}");
                     None
