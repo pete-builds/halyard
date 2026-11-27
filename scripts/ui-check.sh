@@ -40,9 +40,16 @@ fi
 work=$(mktemp -d /tmp/halyard-ui.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 # A plain shell with a fixed prompt, so checks can name what the shell got.
-cat >"$work/config.toml" <<'TOML'
+# Shells start in a folder whose name is longer than a tab can show, so an
+# unnamed tab is always the maximum width (220px) whatever the machine's home
+# folder is called: scripts can click a tab's close button by position (the
+# first tab's is at x 204).
+cwd=$work/window-script-workspace-folder-with-a-long-name
+mkdir -p "$cwd"
+cat >"$work/config.toml" <<TOML
 [terminal]
 shell = { program = "/bin/sh" }
+working_directory = "$cwd"
 TOML
 
 # The display must be awake for the window server to deliver events.

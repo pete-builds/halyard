@@ -18,8 +18,9 @@ sleep 4500
 dump
 expect tabs 2
 expect parked true
-mousedown 106 16
-mouseup 106 16
+# Tab 1's close button (unnamed tabs are 220px wide under ui-check.sh).
+mousedown 204 16
+mouseup 204 16
 sleep 800
 type echo after-$((3+3))
 key enter
