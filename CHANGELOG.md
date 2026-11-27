@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.2 (2026-11-27): fixes from the first review, tab rename, right-click menus
 
 ### Security
 - **Revoke any API key you put in `api_key_env` outside the top level of an `[[ai.providers]]` entry.** In
@@ -11,6 +11,45 @@
   that looks like a credential (a known token prefix, or a long random or hex string) is now
   refused too. That check is a heuristic, and Halyard applies it when it reads the file, not
   the Home Manager module.
+
+### Fixed
+- `halyard-msg`, the hook client in docs/session-api.md, now ships in every package (the Linux
+  tarballs, the macOS app, the Nix package and the Flatpak). Earlier releases left it out, so
+  the documented hooks failed with "command not found". Each pane finds it on `PATH` when it
+  sits next to `halyard`, unless that folder can be changed by other users or `PATH` already
+  has one (#39).
+- The session API now starts on a machine without `~/.local/state`, such as any fresh macOS
+  account. Missing parent folders are created; the last one is still checked to be private (#37).
+- A pane left on the "Process exited" notice no longer uses a full CPU core after a background
+  job that outlived the shell finishes (#38).
+- Flatpak: leftover per-pane environment files are swept at the first pane start (#41).
+
+### Added
+- Rename a tab in place: double-click it, choose Rename Tab from its right-click menu, or press
+  Cmd+Shift+I (Ctrl+Shift+I on Linux). Enter saves, Escape cancels, a click elsewhere saves,
+  and an empty name lets the tab follow the program's title again. The palette's rename box is
+  gone (#44).
+- Right-click a tab for Rename Tab, Close Tab, Close Other Tabs, Move Tab Left, Move Tab Right
+  and New Tab; right-click a pane for Copy, Paste, Select All, Split Right, Split Down and Close
+  Pane. Each item runs the same action as its shortcut, so closing a busy tab still asks first.
+  Programs that use the mouse (vim, htop, tmux) still get a plain right click; Shift+right-click
+  opens the menu there (#44).
+- Fixed on the way: typing right after clicking a tab went nowhere until you clicked the pane
+  (#44).
+
+### Build and tests
+- Release provenance is signed in its own job that runs only for a tag (#40).
+- New window checks in macOS CI drive a real Halyard window (rename, focus, right-click
+  routing) and fail on a missed check, a broken script or a hang (#44).
+- Two flaky tests fixed (#42, #43); guard tests for theme recoloring added (#46). The design
+  for an optional assistant is in docs/assistant.md as a proposal; no assistant code ships (#45).
+
+### Known issues
+- While you rename a tab, closing a different tab with its × saves the name but leaves the
+  keyboard idle until your next click. Nothing you type reaches a shell. Fixed in the next
+  release.
+- On NixOS KDE Wayland the tab bar can follow a dark system theme while the terminal body stays
+  light. Under investigation.
 
 ## 0.1.1 (2026-11-22): first published preview
 
