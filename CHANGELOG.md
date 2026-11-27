@@ -15,14 +15,16 @@
 ### Fixed
 - `halyard-msg`, the hook client in docs/session-api.md, now ships in every package (the Linux
   tarballs, the macOS app, the Nix package and the Flatpak). Earlier releases left it out, so
-  the documented hooks failed with "command not found". Each pane finds it on `PATH` when it
-  sits next to `halyard`, unless that folder can be changed by other users or `PATH` already
-  has one (#39).
+  the documented hooks failed with "command not found". In the tarballs, the app and the Nix
+  package, each pane finds it on `PATH` when it sits next to `halyard`, unless that folder can
+  be changed by other users or `PATH` already has one. Flatpak panes run on the host, so there
+  it needs the small wrapper in docs/flatpak.md (#39).
 - The session API now starts on a machine without `~/.local/state`, such as any fresh macOS
   account. Missing parent folders are created; the last one is still checked to be private (#37).
 - A pane left on the "Process exited" notice no longer uses a full CPU core after a background
   job that outlived the shell finishes (#38).
 - Flatpak: leftover per-pane environment files are swept at the first pane start (#41).
+- Typing right after clicking a tab went nowhere until you clicked the pane (#44).
 
 ### Added
 - Rename a tab in place: double-click it, choose Rename Tab from its right-click menu, or press
@@ -34,8 +36,6 @@
   Pane. Each item runs the same action as its shortcut, so closing a busy tab still asks first.
   Programs that use the mouse (vim, htop, tmux) still get a plain right click; Shift+right-click
   opens the menu there (#44).
-- Fixed on the way: typing right after clicking a tab went nowhere until you clicked the pane
-  (#44).
 
 ### Build and tests
 - Release provenance is signed in its own job that runs only for a tag (#40).
