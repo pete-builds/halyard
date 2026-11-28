@@ -971,11 +971,9 @@ impl WorkspaceView {
             .border_b_1()
             .border_color(to_hsla(ui.border))
             // A click on the bar outside any tab keeps the keyboard in the
-            // pane (and ends a rename, as a click elsewhere does).
+            // pane (an open name field has already saved on its way out).
             .on_any_mouse_down(cx.listener(|this, _, window, cx| {
                 window.prevent_default();
-                this.commit_rename(false, window, cx);
-                this.unpark();
                 this.focus_active_pane(window, cx);
             }));
         for i in 0..self.model.tabs().len() {
@@ -1083,9 +1081,6 @@ impl WorkspaceView {
             .w_full()
             .h(px(bounds.h))
             .bg(to_hsla(theme.ui.border))
-            // A click in a pane is the user picking where the keyboard goes
-            // (capture phase: the pane stops the event before it bubbles).
-            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.unpark()))
             .on_drag_move::<DraggedDivider>(cx.listener(
                 move |this, ev: &gpui::DragMoveEvent<DraggedDivider>, window, cx| {
                     let path = ev.drag(cx).path.clone();
@@ -1341,7 +1336,11 @@ impl Render for WorkspaceView {
             .flex_col()
             .bg(to_hsla(ui.surface))
             .text_color(to_hsla(ui.text))
-            .font_family(".SystemUIFont");
+            .font_family(".SystemUIFont")
+            // Every click, before any control handles it (`tab_ui.rs`).
+            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
+                this.unpark_on_click(window, cx);
+            }));
         let root = on_actions!(root, cx,
             NewTab => NewTab,
             ClosePane => ClosePane,
